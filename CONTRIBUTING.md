@@ -33,3 +33,5 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\check.ps1
 ```
 
 Физический микрофон, динамик, Bluetooth-кнопка и настоящие внешние действия проверяются вручную и никогда не имитируются без согласия пользователя.
+
+Общие вопросы и предложения можно направить автору идеи в Telegram: [@Alexperowo](https://t.me/Alexperowo). Уязвимости через Telegram не отправляйте — для них предназначен приватный канал из [SECURITY.md](SECURITY.md).
