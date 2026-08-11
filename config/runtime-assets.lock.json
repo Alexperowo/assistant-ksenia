@@ -1,0 +1,54 @@
+{
+  "python": {
+    "version": "3.12.10",
+    "pip": "25.0.1"
+  },
+  "packages": {
+    "torch": "2.11.0+cu128",
+    "silero": "0.5.5",
+    "vosk": "0.3.45",
+    "sounddevice": "0.5.5",
+    "playwright": "1.62.0",
+    "pywinauto": "0.6.9",
+    "pywin32": "312",
+    "comtypes": "1.4.16",
+    "faster-whisper": "1.2.1",
+    "ctranslate2": "4.8.1",
+    "googlenewsdecoder": "0.1.7",
+    "huggingface-hub": "1.27.0"
+  },
+  "vosk": {
+    "directory": "vosk-model-small-ru-0.22",
+    "archive": "vosk-model-small-ru-0.22.zip",
+    "url": "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip",
+    "size_bytes": 46236750,
+    "sha256": "961D5FF98A17F4AA6DE69864D0AA71FA5BAC682301D2B5D17A3F24C5C99A46D4"
+  },
+  "whisper": {
+    "repo": "dropbox-dash/faster-whisper-large-v3-turbo",
+    "revision": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+    "directory": "faster-whisper-large-v3-turbo",
+    "files": {
+      "config.json": {
+        "size_bytes": 2263,
+        "sha256": "B0253EA6C0D3BEA6B1E19E91A02ACFD3B53F4467362EFCB5A3E6B16C9B3A9B7E"
+      },
+      "model.bin": {
+        "size_bytes": 1617884929,
+        "sha256": "E76620F83D5F5B69EFD3D87E3DC180C1BD21DF9FBEBACFD4335E5E1EFCC018DA"
+      },
+      "preprocessor_config.json": {
+        "size_bytes": 340,
+        "sha256": "7CCC62C6F2765AF1F3B46C00C9B5894426835A05021C8B9C01EECB6DFB542711"
+      },
+      "tokenizer.json": {
+        "size_bytes": 2710337,
+        "sha256": "297B13372AC43916285644FB9687ADD3CC62EE2A1ADB60DA3DC25CC94C1871FD"
+      },
+      "vocabulary.json": {
+        "size_bytes": 1068114,
+        "sha256": "C69260F2AB26D659B7C398F9A2B2B48ED0DF16C3B47D7326782FD9CBA71690C1"
+      }
+    }
+  }
+}

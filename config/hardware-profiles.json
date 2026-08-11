@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "notice": "These are conservative starting points. Model architecture, quantization and real KV usage must still be measured.",
+  "profiles": [
+    {
+      "id": "cpu_or_low_vram",
+      "label_ru": "Процессор или видеопамять меньше 8 ГБ",
+      "minimum_vram_mb": 0,
+      "minimum_ram_gb": 8,
+      "recommended_context": 8192,
+      "gpu_layers": "auto",
+      "cache_type_k": "q8_0",
+      "cache_type_v": "q5_0",
+      "fit_target_mb": 1024,
+      "guidance_ru": "Использовать компактную модель и измерить скорость. Большие модели почти наверняка потребуют ОЗУ и файл подкачки."
+    },
+    {
+      "id": "compact_8gb",
+      "label_ru": "Около 8 ГБ видеопамяти",
+      "minimum_vram_mb": 7500,
+      "minimum_ram_gb": 16,
+      "recommended_context": 16384,
+      "gpu_layers": "auto",
+      "cache_type_k": "q8_0",
+      "cache_type_v": "q5_0",
+      "fit_target_mb": 1536,
+      "guidance_ru": "Начать с Dense 7–9B или небольшого MoE и повышать контекст только после замера."
+    },
+    {
+      "id": "balanced_12gb",
+      "label_ru": "Около 12 ГБ видеопамяти",
+      "minimum_vram_mb": 11000,
+      "minimum_ram_gb": 16,
+      "recommended_context": 32768,
+      "gpu_layers": "auto",
+      "cache_type_k": "q8_0",
+      "cache_type_v": "q5_0",
+      "fit_target_mb": 2048,
+      "guidance_ru": "Подходит для 9–12B с большим контекстом; 20–30B проверять только отдельным benchmark."
+    },
+    {
+      "id": "quality_16gb",
+      "label_ru": "Около 16 ГБ видеопамяти",
+      "minimum_vram_mb": 15000,
+      "minimum_ram_gb": 16,
+      "recommended_context": 65536,
+      "gpu_layers": "auto",
+      "cache_type_k": "q8_0",
+      "cache_type_v": "q5_0",
+      "fit_target_mb": 2048,
+      "guidance_ru": "Рабочий профиль Александра: 64K реалистичен для 9–12B; 26B/MoE требует точного замера VRAM, ОЗУ и скорости."
+    },
+    {
+      "id": "large_24gb",
+      "label_ru": "24 ГБ видеопамяти и больше",
+      "minimum_vram_mb": 22500,
+      "minimum_ram_gb": 32,
+      "recommended_context": 65536,
+      "gpu_layers": "auto",
+      "cache_type_k": "q8_0",
+      "cache_type_v": "q5_0",
+      "fit_target_mb": 3072,
+      "guidance_ru": "Можно тестировать более точные кванты и тяжёлые роли, сохраняя одну активную модель и обязательный A/B benchmark."
+    }
+  ]
+}

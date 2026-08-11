@@ -1,0 +1,273 @@
+{
+  "assistant": {
+    "name": "Ксения",
+    "language": "ru",
+    "default_role": "developer",
+    "announce_status": true
+  },
+  "paths": {
+    "llama_server": "tools/llama.cpp/llama-server.exe",
+    "models_dir": "models",
+    "model_search_dirs": [],
+    "runtime_dir": "runtime"
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 18080,
+    "startup_timeout_seconds": 120
+  },
+  "diagnostics": {
+    "enabled": true,
+    "max_file_mb": 8,
+    "backup_count": 6,
+    "llama_logs_per_role": 20,
+    "include_content": false
+  },
+  "voice": {
+    "enabled": true,
+    "engine": "silero",
+    "python": "",
+    "model": "v5_ru",
+    "speaker": "aidar",
+    "sample_rate": 48000,
+    "threads": 4,
+    "tts_device": "cpu",
+    "tts_min_free_vram_mb": 2048,
+    "wake_word": "Ксения слушай",
+    "wake_model": "runtime/voice/vosk-model-small-ru-0.22",
+    "wake_sample_rate": 16000,
+    "wake_device": "",
+    "stt_engine": "auto",
+    "stt_model": "",
+    "stt_device": "auto",
+    "stt_compute_type": "int8_float16",
+    "stt_silence_seconds": 0.75,
+    "stt_no_speech_timeout_seconds": 10.0,
+    "stt_max_command_seconds": 45,
+    "microphone_retry_base_seconds": 5,
+    "microphone_retry_max_seconds": 60,
+    "microphone_error_reminder_seconds": 300,
+    "leading_silence_ms": 120,
+    "cold_leading_silence_ms": 1000
+  },
+  "browser": {
+    "enabled": true,
+    "python": "",
+    "executable": "",
+    "profile_dir": "",
+    "headless": true,
+    "persistent": true,
+    "max_parallel": 4,
+    "timeout_seconds": 45,
+    "max_text_chars": 6000
+  },
+  "headset_controls": {
+    "enabled": false,
+    "activation_button": "play_pause",
+    "consume": true,
+    "debounce_ms": 700
+  },
+  "windows": {
+    "automation_timeout_seconds": 20,
+    "max_inspected_elements": 150
+  },
+  "lan": {
+    "enabled": true,
+    "host": "auto",
+    "port": 8765
+  },
+  "agent": {
+    "max_steps": 8,
+    "max_tool_calls_total": 16,
+    "status_heartbeat_seconds": 20,
+    "tool_result_max_chars": 12000,
+    "conversation_max_tokens": 768,
+    "conversation_history_messages": 6
+  },
+  "routing": {
+    "enabled": true,
+    "planning_min_chars": 260,
+    "plan_max_tokens": 4096,
+    "research_max_steps": 12,
+    "research_turn_max_tokens": 1600,
+    "research_result_max_chars": 16000,
+    "research_total_max_chars": 80000,
+    "research_default_mode": "normal",
+    "research_evidence_max_chars": 20000
+  },
+  "generation": {
+    "max_tokens": 4096
+  },
+  "memory": {
+    "persistent": true,
+    "max_saved_messages": 80,
+    "compression_enabled": true,
+    "compression_trigger_tokens": 48000,
+    "compression_summary_tokens": 1600,
+    "keep_recent_messages": 10
+  },
+  "rag": {
+    "enabled": false,
+    "namespace": "workspace",
+    "model_path": "models/Embeddings/Qwen3-Embedding-0.6B-Q8_0.gguf",
+    "model_repo": "Qwen/Qwen3-Embedding-0.6B-GGUF",
+    "expected_size_bytes": 639150592,
+    "sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
+    "port": 18081,
+    "context_size": 8192,
+    "cpu_threads": 6,
+    "max_file_bytes": 1000000,
+    "result_limit": 8,
+    "auto_index": true
+  },
+  "capability_roles": {
+    "assistant": {
+      "label": "Дворецкий или ассистент",
+      "purpose": "Диалог, повседневные поручения, координация и понятная связь с Александром.",
+      "primary_model": "developer",
+      "candidate_model": null,
+      "enabled": true
+    },
+    "researcher": {
+      "label": "Исследователь",
+      "purpose": "Поиск в интернете, проверка источников, сравнение товаров, цен и фактов.",
+      "primary_model": "planner",
+      "candidate_model": null,
+      "enabled": true
+    },
+    "developer": {
+      "label": "Разработчик",
+      "purpose": "Работа с файлами, кодом, тестами, терминалом и инструментами агента.",
+      "primary_model": "developer",
+      "candidate_model": "developer_qwopus",
+      "enabled": true
+    },
+    "heavy_brain": {
+      "label": "Тяжёлый мозг",
+      "purpose": "Сложная декомпозиция, длинное планирование и независимая проверка важных решений.",
+      "primary_model": null,
+      "candidate_model": null,
+      "enabled": false
+    }
+  },
+  "developer": {
+    "workspace_dir": "workspace",
+    "allowed_programs": ["python", "python.exe", "py", "pytest", "git", "node", "npm", "npm.cmd"],
+    "command_timeout_seconds": 180,
+    "max_output_chars": 30000,
+    "test_command": ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
+  },
+  "models": {
+    "developer": {
+      "label": "Основной разработчик Gemma 4 12B",
+      "filename": "gemma4-12b-agentic-q6_k.gguf",
+      "context_size": 16384,
+      "gpu_layers": 99,
+      "enabled": true,
+      "experimental": false,
+      "reasoning": "off",
+      "extra_args": [
+        "--jinja",
+        "--flash-attn",
+        "on",
+        "--parallel",
+        "1",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q5_0"
+      ]
+    },
+    "planner": {
+      "label": "Временный планировщик Gemma 4 26B-A4B Heretic JA QAT Q4_0",
+      "filename": "gemma-4-26B-A4B-it-qat-q4_0-heretic-ja-Q4_0.gguf",
+      "source_repo": "OS-Software/gemma-4-26B-A4B-it-qat-q4_0-heretic-ja-GGUF",
+      "context_size": 65536,
+      "gpu_layers": "auto",
+      "enabled": false,
+      "experimental": true,
+      "reasoning": "off",
+      "extra_args": [
+        "--jinja",
+        "--flash-attn",
+        "on",
+        "--parallel",
+        "1",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q5_0",
+        "--fit",
+        "on",
+        "--fit-target",
+        "1024"
+      ]
+    },
+    "developer_qwopus": {
+      "label": "Разработчик и исследователь Qwopus 3.5 9B Coder MTP Q6_K",
+      "filename": "Qwopus3.5-9B-Coder-MTP-Q6_K.gguf",
+      "source_repo": "Jackrong/Qwopus3.5-9B-Coder-MTP-GGUF",
+      "expected_size_bytes": 7558903712,
+      "sha256": "6993e21c637d79a6f359f4b7b45db67b103d73d17cbf6f3a883b2e5cb9e4e87a",
+      "context_size": 65536,
+      "gpu_layers": 99,
+      "enabled": true,
+      "experimental": false,
+      "reasoning": "off",
+      "extra_args": [
+        "--jinja",
+        "--flash-attn",
+        "on",
+        "--parallel",
+        "1",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q5_0",
+        "--spec-type",
+        "draft-mtp",
+        "--spec-draft-n-max",
+        "2",
+        "--fit",
+        "on",
+        "--fit-target",
+        "2048"
+      ]
+    },
+    "experimental_qwen": {
+      "label": "Экспериментальный планировщик Qwen 3.6 35B A3B",
+      "filename": "qwen3.6-35b-a3b-agent-q3_16g.gguf",
+      "context_size": 16384,
+      "gpu_layers": "auto",
+      "enabled": false,
+      "experimental": true,
+      "reasoning": "off",
+      "extra_args": [
+        "--jinja", "--flash-attn", "on", "--parallel", "1",
+        "--cache-type-k", "q8_0", "--cache-type-v", "q5_0",
+        "--n-cpu-moe", "20", "--fit", "on", "--fit-target", "3072"
+      ]
+    }
+  },
+  "permissions": {
+    "allowed_roots": ["projects"],
+    "actions": {
+      "read_file": "allow",
+      "list_directory": "allow",
+      "write_file": "confirm",
+      "run_tests": "allow",
+      "run_command": "confirm",
+      "browser_read": "allow",
+      "windows_read": "allow",
+      "windows_write": "confirm",
+      "browser_write": "confirm",
+      "memory_read": "allow",
+      "memory_write": "confirm",
+      "memory_delete": "confirm",
+      "delete_file": "confirm",
+      "install_software": "confirm",
+      "send_message": "confirm",
+      "financial_action": "deny"
+    }
+  }
+}

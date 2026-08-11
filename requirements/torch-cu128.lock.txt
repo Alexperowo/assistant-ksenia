@@ -1,0 +1,3 @@
+# NVIDIA CUDA runtime used and tested by Ksenia on Windows x64.
+# Install this file only from https://download.pytorch.org/whl/cu128.
+torch==2.11.0+cu128

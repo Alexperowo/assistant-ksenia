@@ -1,0 +1,37 @@
+name: Предложение
+description: Новая возможность или улучшение
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какую проблему это решает?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Предлагаемое поведение
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Область
+      options:
+        - Голос и доступность
+        - Модели и оркестрация
+        - Память и RAG
+        - Разработка и инструменты
+        - Браузер и исследование
+        - Windows и LAN
+        - Установка и обновление
+        - Документация
+    validations:
+      required: true
+  - type: textarea
+    id: risks
+    attributes:
+      label: Риски и подтверждения
+      description: Какие внешние действия, данные или разрешения затрагиваются?

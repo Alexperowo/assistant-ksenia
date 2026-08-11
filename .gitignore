@@ -1,0 +1,60 @@
+# Python and editors
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.idea/
+.vscode/
+
+# Personal configuration and mutable state
+config/user.json
+config/user.json.*
+runtime/
+workspace/*
+!workspace/README.txt
+.codex-remote-attachments/
+latest_silero_models.yml
+
+# Local engines, downloads and release products
+tools/downloads/
+tools/llama.cpp/
+tools/.llama-stage-*/
+dist/
+*.partial
+*.zip
+
+# Model and speech weights
+models/
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.bin
+
+# Secrets and private browser/audio data
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.kdbx
+*.sqlite3
+*.db
+*.wav
+*.mp3
+*.flac
+
+# Unpacked native binaries and Windows noise
+*.dll
+*.exe
+Thumbs.db
+Desktop.ini

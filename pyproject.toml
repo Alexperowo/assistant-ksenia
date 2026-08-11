@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "assistant-ksenia"
+version = "0.1.0"
+description = "Local Russian voice assistant, developer-agent and accessibility-first partner for Windows"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = {file = "LICENSE"}
+authors = [{name = "Alexperowo"}]
+keywords = ["local-ai", "voice-assistant", "llama-cpp", "accessibility", "windows"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows :: Windows 11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Alexperowo/assistant-ksenia"
+Repository = "https://github.com/Alexperowo/assistant-ksenia"
+Issues = "https://github.com/Alexperowo/assistant-ksenia/issues"
+
+[project.scripts]
+butler = "butler.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

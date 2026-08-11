@@ -1,0 +1,32 @@
+name: Доступность
+description: Проблема со зрительным, голосовым или клавиатурным интерфейсом
+title: "[Accessibility]: "
+labels: [accessibility]
+body:
+  - type: textarea
+    id: barrier
+    attributes:
+      label: Что мешает пользоваться Ксенией?
+      description: Опишите задачу и момент, где теряется обратная связь или управление.
+    validations:
+      required: true
+  - type: dropdown
+    id: interface
+    attributes:
+      label: Интерфейс
+      options:
+        - Голосовой ввод
+        - Озвучивание
+        - Клавиатура
+        - Ярлыки Windows
+        - LAN-панель
+        - Документация
+        - Другое
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Какое поведение было бы понятным и доступным?
+    validations:
+      required: true
