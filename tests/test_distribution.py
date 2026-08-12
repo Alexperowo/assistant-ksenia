@@ -100,8 +100,13 @@ class DistributionTests(unittest.TestCase):
 
     def test_installer_uses_exact_locks_and_never_downloads_llm(self):
         installer = (SCRIPTS / "install-runtime.ps1").read_text(encoding="utf-8-sig")
+        runtime_lock = (ROOT / "requirements" / "runtime.lock.txt").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("runtime.lock.txt", installer)
         self.assertIn("torch-cu128.lock.txt", installer)
+        self.assertIn("setuptools==78.1.1", runtime_lock)
+        self.assertNotIn("setuptools==78.1.0", runtime_lock)
         self.assertIn("[string]$ModelStorageRoot", installer)
         self.assertIn("pip==$", installer)
         self.assertIn("chrome-win64", installer)
