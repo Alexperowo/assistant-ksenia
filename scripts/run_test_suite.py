@@ -9,7 +9,7 @@ import warnings
 from pathlib import Path
 
 
-MINIMUM_TEST_COUNT = 191
+MINIMUM_TEST_COUNT = 199
 ORDER_AUDIT_SEEDS = (17, 73, 211)
 
 

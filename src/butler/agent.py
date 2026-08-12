@@ -370,6 +370,19 @@ class AgentSession:
             1,
             int(self.settings.raw.get("agent", {}).get("max_tool_calls_total", 16)),
         )
+        max_confirmation_requests = min(
+            8,
+            max(
+                1,
+                int(
+                    self.settings.raw.get("agent", {}).get(
+                        "max_confirmation_requests", 4
+                    )
+                ),
+            ),
+        )
+        confirmation_requests = 0
+        confirmation_limit_reached = False
 
         try:
             if control is not None:
@@ -385,6 +398,7 @@ class AgentSession:
                     conversation_only
                     or step >= max_steps
                     or len(events) >= max_tool_calls
+                    or confirmation_limit_reached
                 )
                 request_messages = (
                     self._conversation_request_messages()
@@ -553,45 +567,69 @@ class AgentSession:
                                     result.status == "confirmation_required"
                                     and on_confirmation is not None
                                 ):
-                                    emit("Нужно подтверждение")
-                                    diagnostic_event(
-                                        self.settings,
-                                        "agent",
-                                        "confirmation_requested",
-                                        tool_name=name,
-                                        argument_names=sorted(str(key) for key in arguments),
-                                    )
-                                    approved = on_confirmation(
-                                        name, arguments, result.message
-                                    )
-                                    if approved:
+                                    if confirmation_requests >= max_confirmation_requests:
+                                        confirmation_limit_reached = True
+                                        emit("Останавливаю повторные подтверждения")
                                         diagnostic_event(
                                             self.settings,
                                             "agent",
-                                            "confirmation_received",
+                                            "confirmation_limit_reached",
+                                            level="warning",
                                             tool_name=name,
-                                            approved=True,
-                                        )
-                                        if reusable_approval(name):
-                                            approved_scopes.add(scope)
-                                        if control is not None:
-                                            control.checkpoint()
-                                        result = self.tools.execute(
-                                            name, arguments, confirmed=True
-                                        )
-                                    else:
-                                        diagnostic_event(
-                                            self.settings,
-                                            "agent",
-                                            "confirmation_received",
-                                            tool_name=name,
-                                            approved=False,
+                                            confirmation_request_count=confirmation_requests,
+                                            max_confirmation_requests=max_confirmation_requests,
                                         )
                                         result = ToolResult(
                                             False,
-                                            "confirmation_declined",
-                                            "Пользователь не подтвердил действие.",
+                                            "confirmation_limit",
+                                            "Предел запросов подтверждения для одной задачи достигнут. "
+                                            "Остальные рискованные действия отменены.",
                                         )
+                                    else:
+                                        confirmation_requests += 1
+                                        emit("Нужно подтверждение")
+                                        diagnostic_event(
+                                            self.settings,
+                                            "agent",
+                                            "confirmation_requested",
+                                            tool_name=name,
+                                            argument_names=sorted(
+                                                str(key) for key in arguments
+                                            ),
+                                            confirmation_request_count=confirmation_requests,
+                                            max_confirmation_requests=max_confirmation_requests,
+                                        )
+                                        approved = on_confirmation(
+                                            name, arguments, result.message
+                                        )
+                                        if approved:
+                                            diagnostic_event(
+                                                self.settings,
+                                                "agent",
+                                                "confirmation_received",
+                                                tool_name=name,
+                                                approved=True,
+                                            )
+                                            if reusable_approval(name):
+                                                approved_scopes.add(scope)
+                                            if control is not None:
+                                                control.checkpoint()
+                                            result = self.tools.execute(
+                                                name, arguments, confirmed=True
+                                            )
+                                        else:
+                                            diagnostic_event(
+                                                self.settings,
+                                                "agent",
+                                                "confirmation_received",
+                                                tool_name=name,
+                                                approved=False,
+                                            )
+                                            result = ToolResult(
+                                                False,
+                                                "confirmation_declined",
+                                                "Пользователь не подтвердил действие.",
+                                            )
                     events.append(AgentToolEvent(name, arguments, result))
                     diagnostic_event(
                         self.settings,

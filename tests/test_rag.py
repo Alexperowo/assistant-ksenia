@@ -8,7 +8,15 @@ from butler.rag import HybridRagIndex, chunk_text
 class FakeEmbedder:
     model_id = "fake-russian-v1"
 
-    VOCABULARY = ("микрофон", "голос", "цена", "товар", "ошибка", "python")
+    VOCABULARY = (
+        "микрофон",
+        "голос",
+        "цена",
+        "товар",
+        "ошибка",
+        "python",
+        "история",
+    )
 
     def embed(self, texts, *, kind="document"):
         vectors = []
@@ -89,6 +97,79 @@ class HybridRagTests(unittest.TestCase):
             self.assertEqual(first.indexed_files, 1)
             self.assertEqual(second.unchanged_files, 1)
             self.assertEqual(index.search("project", "голос", embedder=embedder)[0].path, "main.py")
+
+    def test_unrelated_semantic_query_returns_no_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            index = HybridRagIndex(Path(directory))
+            embedder = FakeEmbedder()
+            index.index_text(
+                "project",
+                "audio.md",
+                "Настройка микрофона и голосовой активации Ксении.",
+                modified_ns=1,
+                embedder=embedder,
+            )
+
+            results = index.search(
+                "project",
+                "история Древнего Рима",
+                embedder=embedder,
+                min_vector_similarity=0.3,
+            )
+
+            self.assertEqual(results, [])
+
+    def test_exact_lexical_match_survives_low_semantic_score(self):
+        class OrthogonalEmbedder:
+            model_id = "orthogonal-v1"
+
+            def embed(self, texts, *, kind="document"):
+                vector = [1.0, 0.0] if kind == "document" else [0.0, 1.0]
+                return [vector[:] for _text in texts]
+
+        with tempfile.TemporaryDirectory() as directory:
+            index = HybridRagIndex(Path(directory))
+            embedder = OrthogonalEmbedder()
+            index.index_text(
+                "project",
+                "settings.md",
+                "Параметр wake_device выбирает устройство активации.",
+                modified_ns=1,
+                embedder=embedder,
+            )
+
+            results = index.search(
+                "project",
+                "wake_device",
+                embedder=embedder,
+                min_vector_similarity=0.9,
+            )
+
+            self.assertEqual(results[0].path, "settings.md")
+            self.assertEqual(results[0].vector_similarity, 0.0)
+
+    def test_equal_scores_are_ordered_by_path(self):
+        class EqualEmbedder:
+            model_id = "equal-v1"
+
+            def embed(self, texts, *, kind="document"):
+                return [[1.0, 0.0] for _text in texts]
+
+        with tempfile.TemporaryDirectory() as directory:
+            index = HybridRagIndex(Path(directory))
+            embedder = EqualEmbedder()
+            for path in ("zeta.md", "alpha.md"):
+                index.index_text(
+                    "project",
+                    path,
+                    "Одинаковый проверяемый термин.",
+                    modified_ns=1,
+                    embedder=embedder,
+                )
+
+            results = index.search("project", "одинаковый термин", embedder=embedder)
+
+            self.assertEqual([item.path for item in results], ["alpha.md", "zeta.md"])
 
 
 if __name__ == "__main__":

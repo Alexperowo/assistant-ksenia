@@ -155,7 +155,7 @@
     "workspace"
   ],
   "quality_gate": {
-    "minimum_tests": 191,
+    "minimum_tests": 199,
     "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1"
   },
   "models": {

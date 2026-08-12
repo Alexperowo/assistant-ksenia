@@ -499,13 +499,15 @@ class ResearchCoordinator:
             result = session.tools.execute(name, arguments, confirmed=confirmed)
             return AgentToolEvent(name, arguments, result)
 
+        ordered_search_events: list[AgentToolEvent | None] = [None] * len(queries)
         with ThreadPoolExecutor(max_workers=min(mode.query_limit, len(queries))) as pool:
-            search_futures = [
-                pool.submit(execute, "browser_search", {"query": query})
-                for query in queries
-            ]
+            search_futures = {
+                pool.submit(execute, "browser_search", {"query": query}): index
+                for index, query in enumerate(queries)
+            }
             for future in as_completed(search_futures):
-                events.append(future.result())
+                ordered_search_events[search_futures[future]] = future.result()
+        events.extend(event for event in ordered_search_events if event is not None)
         if control is not None:
             control.checkpoint()
         search_payloads = [
@@ -541,15 +543,20 @@ class ResearchCoordinator:
             + _russian_count(len(sources), "источник", "источника", "источников")
         )
         opened: dict[str, AgentToolEvent] = {}
+        ordered_page_events: list[AgentToolEvent | None] = [None] * len(sources)
         with ThreadPoolExecutor(max_workers=min(4, len(sources))) as pool:
-            future_urls = {
-                pool.submit(execute, "browser_read_page", {"url": source["url"]}): source["url"]
-                for source in sources
+            future_sources = {
+                pool.submit(
+                    execute, "browser_read_page", {"url": source["url"]}
+                ): (index, source["url"])
+                for index, source in enumerate(sources)
             }
-            for future in as_completed(future_urls):
+            for future in as_completed(future_sources):
+                index, url = future_sources[future]
                 event = future.result()
-                opened[future_urls[future]] = event
-                events.append(event)
+                opened[url] = event
+                ordered_page_events[index] = event
+        events.extend(event for event in ordered_page_events if event is not None)
         if control is not None:
             control.checkpoint()
 

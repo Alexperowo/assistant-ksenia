@@ -1,3 +1,5 @@
+import json
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -183,6 +185,93 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(len(reply.tool_events), 4)
         self.assertTrue(any("параллельно 2" in item for item in statuses))
         session.record_exchange.assert_called_once()
+
+    @patch("butler.research.complete_chat")
+    def test_parallel_results_keep_query_and_source_order(self, complete_chat):
+        complete_chat.side_effect = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"queries":["alpha fast","alpha medium"]}'
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"message": {"content": "Итог."}}]},
+            {"choices": [{"message": {"content": "Проверенный итог."}}]},
+        ]
+        settings = SimpleNamespace(
+            raw={
+                "routing": {
+                    "research_default_mode": "normal",
+                    "research_evidence_max_chars": 20_000,
+                },
+                "diagnostics": {"enabled": False},
+            }
+        )
+
+        def execute(name, arguments, confirmed=False):
+            if name == "browser_search":
+                query = arguments["query"]
+                time.sleep({"alpha": 0.03, "alpha fast": 0.0, "alpha medium": 0.01}[query])
+                slug = query.replace(" ", "-")
+                return ToolResult(
+                    True,
+                    "ok",
+                    "найдено",
+                    {
+                        "results": [
+                            {
+                                "title": f"Alpha {slug}",
+                                "url": f"https://{slug}.test/page",
+                            }
+                        ]
+                    },
+                )
+            url = arguments["url"]
+            time.sleep(0.02 if "alpha.test" in url else 0.0)
+            return ToolResult(
+                True,
+                "ok",
+                "прочитано",
+                {
+                    "title": url,
+                    "url": url,
+                    "text": "Подтверждённый факт alpha. " * 20,
+                    "retrieved_at": "2026-08-12T12:00:00Z",
+                },
+            )
+
+        session = SimpleNamespace(
+            tools=SimpleNamespace(execute=execute),
+            record_exchange=Mock(),
+        )
+
+        reply = ResearchCoordinator(settings).run("Глубоко исследуй alpha", session)
+
+        packet_text = complete_chat.call_args_list[1].args[1][0]["content"]
+        packet = json.loads(packet_text.split("Собранные источники:\n", 1)[1])
+        self.assertEqual(
+            [item["url"] for item in packet],
+            [
+                "https://alpha.test/page",
+                "https://alpha-fast.test/page",
+                "https://alpha-medium.test/page",
+            ],
+        )
+        self.assertEqual(
+            [event.arguments.get("query") for event in reply.tool_events[:3]],
+            ["alpha", "alpha fast", "alpha medium"],
+        )
+        self.assertEqual(
+            [event.arguments.get("url") for event in reply.tool_events[3:6]],
+            [
+                "https://alpha.test/page",
+                "https://alpha-fast.test/page",
+                "https://alpha-medium.test/page",
+            ],
+        )
 
 
 if __name__ == "__main__":

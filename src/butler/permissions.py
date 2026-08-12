@@ -13,6 +13,30 @@ class Decision(StrEnum):
     DENY = "deny"
 
 
+_RESTRICTION = {
+    Decision.ALLOW: 0,
+    Decision.CONFIRM: 1,
+    Decision.DENY: 2,
+}
+
+# Personal configuration may make a rule stricter, but it must never remove
+# these product-level safeguards. They are part of Ksenia's security contract,
+# not convenience defaults.
+SAFETY_MINIMUM = {
+    "write_file": Decision.CONFIRM,
+    "run_tests": Decision.CONFIRM,
+    "run_command": Decision.CONFIRM,
+    "windows_write": Decision.CONFIRM,
+    "browser_write": Decision.CONFIRM,
+    "memory_write": Decision.CONFIRM,
+    "memory_delete": Decision.CONFIRM,
+    "delete_file": Decision.CONFIRM,
+    "install_software": Decision.CONFIRM,
+    "send_message": Decision.CONFIRM,
+    "financial_action": Decision.DENY,
+}
+
+
 @dataclass(frozen=True)
 class Authorization:
     decision: Decision
@@ -27,25 +51,37 @@ class PermissionBroker:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         policy = settings.raw.get("permissions", {})
-        self.actions = {
-            str(name): Decision(str(value))
-            for name, value in policy.get("actions", {}).items()
-        }
+        self.actions: dict[str, Decision] = dict(SAFETY_MINIMUM)
+        for name, value in policy.get("actions", {}).items():
+            action = str(name)
+            decision = Decision(str(value))
+            minimum = SAFETY_MINIMUM.get(action)
+            if minimum is not None and _RESTRICTION[decision] < _RESTRICTION[minimum]:
+                decision = minimum
+            self.actions[action] = decision
+
+        raw_workspace = Path(
+            str(settings.raw.get("developer", {}).get("workspace_dir", "."))
+        )
+        workspace_root = (
+            raw_workspace.resolve()
+            if raw_workspace.is_absolute()
+            else (settings.root / raw_workspace).resolve()
+        )
         roots: list[Path] = []
         for raw in policy.get("allowed_roots", []):
-            if raw == "workspace":
-                roots.append(settings.root)
-            elif raw == "projects":
-                workspace = settings.raw.get("developer", {}).get("workspace_dir", "workspace")
-                workspace_path = Path(str(workspace))
-                roots.append(
-                    workspace_path.resolve()
-                    if workspace_path.is_absolute()
-                    else (settings.root / workspace_path).resolve()
-                )
+            if raw in {"workspace", "projects"}:
+                candidate = workspace_root
             else:
-                roots.append(Path(str(raw)).resolve())
-        self.allowed_roots = tuple(roots)
+                configured = Path(str(raw))
+                candidate = (
+                    configured.resolve()
+                    if configured.is_absolute()
+                    else (settings.root / configured).resolve()
+                )
+            if candidate == workspace_root or workspace_root in candidate.parents:
+                roots.append(candidate)
+        self.allowed_roots = tuple(dict.fromkeys(roots))
         self.protected_paths = (
             (settings.root / ".git").resolve(),
             (settings.root / "config" / "default.json").resolve(),

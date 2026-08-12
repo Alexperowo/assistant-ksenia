@@ -18,7 +18,7 @@
 |---|---|---|
 | `model_manager.py` | одна активная LLM, команда запуска, PID, порт, размер GGUF | неизвестный процесс не завершать; loopback; bounded wait |
 | `chat.py` | OpenAI-совместимый HTTP, stream, tokenizer, system normalization | один первый system; timeout; локальный ключ |
-| `agent.py` | цикл tool calling одной модели | общий лимит шагов/инструментов, checkpoint отмены |
+| `agent.py` | цикл tool calling одной модели | общий лимит шагов/инструментов/вопросов подтверждения, checkpoint отмены |
 | `orchestrator.py` | выбор роли, планирование и исполнение разными моделями | планировщик только читает; handoff сохраняется |
 | `model_catalog.py` | безопасное перечисление GGUF | только configured model root |
 | `model_evaluation.py` | русский A/B и критерии кандидата | детерминированные проверки, недоверенные данные |
@@ -28,7 +28,7 @@
 | Файл | Ответственность |
 |---|---|
 | `tools.py` | схемы и исполнение файлов, браузера, Windows, памяти, RAG |
-| `permissions.py` | базовая политика allow/confirm/deny |
+| `permissions.py` | политика allow/confirm/deny и неослабляемый минимум безопасности |
 | `approval.py` | область и повторное использование подтверждения |
 | `confirmation.py` | понятное описание конкретного действия |
 | `developer.py` | ограниченный запуск разрешённых программ без shell |
@@ -42,7 +42,7 @@
 | Файл | Ответственность |
 |---|---|
 | `browser.py` | родительский безопасный API дочернего Chromium |
-| `research.py` | запрос, выбор источников, параллельное чтение и синтез |
+| `research.py` | запрос, выбор источников, параллельное чтение в стабильном порядке и синтез |
 | `windows_automation.py` | UI Automation высокого уровня |
 | `windows_bridge.py` | окна, клавиатура, указатель и низкоуровневый Win32 |
 | `scripts/browser_worker.py` | Chromium, поиск и SSRF/redirect guard в отдельном процессе |
@@ -71,7 +71,7 @@
 | `memory.py` | короткая история и сжатая сводка |
 | `knowledge.py` | подтверждённые долговременные факты SQLite |
 | `handoff.py` | план, запрос, ошибки и результат между ролями |
-| `rag.py` | FTS5, векторы, chunking, RRF и цитаты строк |
+| `rag.py` | FTS5, векторы, chunking, RRF, порог смыслового совпадения и цитаты строк |
 | `embeddings.py` | временный CPU `llama-server` для embeddings |
 | `tasking.py` | долговечное состояние, пауза, отмена и восстановление |
 

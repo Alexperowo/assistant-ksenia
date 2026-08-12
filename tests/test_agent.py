@@ -312,6 +312,56 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(confirmations, ["write_workspace_file"])
         self.assertTrue(executor.execute.call_args_list[-1].kwargs["confirmed"])
 
+    @patch("butler.agent.ToolExecutor")
+    @patch("butler.agent.complete_chat")
+    def test_confirmation_request_limit_stops_prompt_flood(self, complete, executor_class):
+        executor = executor_class.return_value
+
+        def execute(_name, _arguments, *, confirmed=False):
+            return (
+                ToolResult(True, "ok", "Выполнено")
+                if confirmed
+                else ToolResult(False, "confirmation_required", "Нужно подтверждение")
+            )
+
+        executor.execute.side_effect = execute
+        response = tool_call_response(1)
+        response["choices"][0]["message"]["tool_calls"] = []
+        for index in range(3):
+            response["choices"][0]["message"]["tool_calls"].append(
+                {
+                    "id": f"delete-{index}",
+                    "type": "function",
+                    "function": {
+                        "name": "delete_workspace_file",
+                        "arguments": json.dumps({"path": f"file-{index}.txt"}),
+                    },
+                }
+            )
+        complete.side_effect = [
+            response,
+            {"choices": [{"message": {"role": "assistant", "content": "Остановлено безопасно."}}]},
+        ]
+        settings = SimpleNamespace(
+            raw={
+                "memory": {"compression_enabled": False},
+                "agent": {
+                    "max_tool_calls_total": 16,
+                    "max_confirmation_requests": 2,
+                },
+            }
+        )
+        confirmations = []
+
+        reply = AgentSession(settings).ask(
+            "Удали три файла",
+            on_confirmation=lambda name, _arguments, _message: confirmations.append(name) or True,
+        )
+
+        self.assertEqual(len(confirmations), 2)
+        self.assertEqual(reply.tool_events[-1].result.status, "confirmation_limit")
+        self.assertIsNone(complete.call_args_list[-1].kwargs["tools"])
+
 
 if __name__ == "__main__":
     unittest.main()

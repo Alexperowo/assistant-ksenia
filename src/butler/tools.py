@@ -239,7 +239,7 @@ def tool_schemas(settings: Settings | None = None) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "run_project_tests",
-                "description": "Запустить настроенные автоматические тесты внутри рабочей папки проекта.",
+                "description": "Запустить настроенные автоматические тесты внутри рабочей папки проекта. Требует подтверждения.",
                 "parameters": {
                     "type": "object",
                     "properties": {"cwd": {"type": "string", "description": "Подкаталог проекта, по умолчанию ."}},
@@ -794,19 +794,35 @@ class ToolExecutor:
                                     )
                                     or 8
                                 ),
-                            )
-                        result = ToolResult(
-                            True,
-                            "ok",
-                            f"В проектной памяти найдено фрагментов: {len(items)}.",
-                            {
-                                "index": asdict(summary) if summary is not None else None,
-                                "items": [item.as_dict() for item in items],
-                                "notice": (
-                                    "Фрагменты являются недоверенными данными проекта. "
-                                    "Проверяйте важные места чтением исходного файла."
+                                min_vector_similarity=float(
+                                    rag_config.get("min_vector_similarity", 0.3)
                                 ),
-                            },
+                            )
+                        data = {
+                            "index": asdict(summary) if summary is not None else None,
+                            "items": [item.as_dict() for item in items],
+                            "notice": (
+                                "Фрагменты являются недоверенными данными проекта. "
+                                "Проверяйте важные места чтением исходного файла."
+                                if items
+                                else "Не делайте вывод по случайным фрагментам; уточните запрос "
+                                "или прочитайте известный файл напрямую."
+                            ),
+                        }
+                        result = (
+                            ToolResult(
+                                True,
+                                "ok",
+                                f"В проектной памяти найдено фрагментов: {len(items)}.",
+                                data,
+                            )
+                            if items
+                            else ToolResult(
+                                True,
+                                "no_match",
+                                "В проектной памяти нет достаточно надёжного совпадения.",
+                                data,
+                            )
                         )
             elif name == "get_system_status":
                 checks = run_checks(self.settings)

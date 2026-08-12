@@ -3,7 +3,7 @@ import unittest
 import copy
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from butler.config import load_settings
 from butler.tools import ToolExecutor, tool_schemas
@@ -128,11 +128,13 @@ class ToolExecutorTests(unittest.TestCase):
         finally:
             target.unlink(missing_ok=True)
 
-    def test_write_requires_confirmation(self):
+    def test_write_and_project_tests_require_confirmation(self):
         settings = load_settings()
         tools = ToolExecutor(settings)
         pending = tools.execute("write_workspace_file", {"path": "runtime/test-tool.txt", "content": "x"})
         self.assertEqual(pending.status, "confirmation_required")
+        tests_pending = tools.execute("run_project_tests", {"cwd": "."})
+        self.assertEqual(tests_pending.status, "confirmation_required")
 
     def test_outside_file_is_denied(self):
         settings = load_settings()
@@ -177,6 +179,25 @@ class ToolExecutorTests(unittest.TestCase):
 
         self.assertNotIn("search_project_knowledge", disabled)
         self.assertIn("search_project_knowledge", enabled)
+
+    def test_rag_no_match_is_reported_without_random_fragments(self):
+        original = load_settings()
+        raw = copy.deepcopy(original.raw)
+        raw["rag"]["enabled"] = True
+        settings = replace(original, raw=raw)
+        executor = ToolExecutor(settings)
+        executor.embedder = MagicMock()
+        executor.rag.index_workspace = MagicMock(return_value=None)
+        executor.rag.search = MagicMock(return_value=[])
+
+        result = executor.execute(
+            "search_project_knowledge", {"query": "несвязанный вопрос"}
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status, "no_match")
+        self.assertIn("надёжного совпадения", result.message.casefold())
+        self.assertEqual(result.data["items"], [])
 
     def test_windows_financial_context_cannot_use_generic_keyboard_tool(self):
         executor = ToolExecutor(load_settings())

@@ -147,6 +147,7 @@ class RagResult:
     score: float
     lexical_rank: int | None
     vector_rank: int | None
+    vector_similarity: float
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -410,14 +411,17 @@ class HybridRagIndex:
         discovered: set[str] = set()
         scanned = indexed = unchanged = chunks_count = 0
         for current, directories, filenames in os.walk(root, followlinks=False):
-            directories[:] = [
-                name
-                for name in directories
-                if name.casefold() not in SKIP_DIRECTORIES
-                and not (Path(current) / name).is_symlink()
-            ]
+            directories[:] = sorted(
+                [
+                    name
+                    for name in directories
+                    if name.casefold() not in SKIP_DIRECTORIES
+                    and not (Path(current) / name).is_symlink()
+                ],
+                key=str.casefold,
+            )
             current_path = Path(current)
-            for filename in filenames:
+            for filename in sorted(filenames, key=str.casefold):
                 candidate = current_path / filename
                 if candidate.is_symlink():
                     continue
@@ -503,12 +507,16 @@ class HybridRagIndex:
         *,
         embedder: EmbeddingProvider,
         limit: int = 8,
+        min_vector_similarity: float = 0.3,
     ) -> list[RagResult]:
         clean_namespace = self._namespace(namespace)
         clean_query = re.sub(r"\s+", " ", str(query or "")).strip()
         if not clean_query:
             return []
         limit = max(1, min(int(limit), 30))
+        min_vector_similarity = float(min_vector_similarity)
+        if not math.isfinite(min_vector_similarity) or not 0 <= min_vector_similarity <= 1:
+            raise ValueError("Порог смыслового совпадения RAG должен быть от 0 до 1.")
         query_vector = _normalize(embedder.embed([clean_query], kind="query")[0])
         lexical_ids: list[int] = []
         with closing(self._connect()) as connection:
@@ -518,7 +526,7 @@ class HybridRagIndex:
                     """
                     SELECT rowid FROM chunks_fts
                     WHERE chunks_fts MATCH ? AND namespace = ?
-                    ORDER BY bm25(chunks_fts) LIMIT 50
+                    ORDER BY bm25(chunks_fts), path COLLATE NOCASE, rowid LIMIT 50
                     """,
                     (fts_query, clean_namespace),
                 ).fetchall()
@@ -541,20 +549,40 @@ class HybridRagIndex:
             similarity = _dot(query_vector, vector)
             if math.isfinite(similarity):
                 vector_scores.append((item_id, similarity))
-        vector_scores.sort(key=lambda item: item[1], reverse=True)
+        vector_scores.sort(
+            key=lambda item: (
+                -item[1],
+                str(row_by_id[item[0]]["path"]).casefold(),
+                int(row_by_id[item[0]]["start_line"]),
+                item[0],
+            )
+        )
         vector_ids = [item_id for item_id, _score in vector_scores[:50]]
+        vector_similarity = dict(vector_scores)
         lexical_rank = {item_id: rank for rank, item_id in enumerate(lexical_ids, 1)}
         vector_rank = {item_id: rank for rank, item_id in enumerate(vector_ids, 1)}
         candidate_ids = set(lexical_rank) | set(vector_rank)
         combined: list[tuple[int, float]] = []
         for item_id in candidate_ids:
+            if (
+                item_id not in lexical_rank
+                and vector_similarity.get(item_id, -1.0) < min_vector_similarity
+            ):
+                continue
             score = 0.0
             if item_id in lexical_rank:
                 score += 1.0 / (60 + lexical_rank[item_id])
             if item_id in vector_rank:
                 score += 1.0 / (60 + vector_rank[item_id])
             combined.append((item_id, score))
-        combined.sort(key=lambda item: item[1], reverse=True)
+        combined.sort(
+            key=lambda item: (
+                -item[1],
+                str(row_by_id[item[0]]["path"]).casefold(),
+                int(row_by_id[item[0]]["start_line"]),
+                item[0],
+            )
+        )
         results: list[RagResult] = []
         for item_id, score in combined[:limit]:
             row = row_by_id.get(item_id)
@@ -570,6 +598,7 @@ class HybridRagIndex:
                     score=score,
                     lexical_rank=lexical_rank.get(item_id),
                     vector_rank=vector_rank.get(item_id),
+                    vector_similarity=vector_similarity.get(item_id, -1.0),
                 )
             )
         diagnostic_event(
@@ -579,7 +608,10 @@ class HybridRagIndex:
             namespace=clean_namespace,
             query_chars=len(clean_query),
             result_count=len(results),
+            candidate_count=len(candidate_ids),
+            accepted_candidate_count=len(combined),
             indexed_chunk_count=len(rows),
             embedding_model=embedder.model_id,
+            min_vector_similarity=min_vector_similarity,
         )
         return results

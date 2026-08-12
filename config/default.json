@@ -79,6 +79,7 @@
   "agent": {
     "max_steps": 8,
     "max_tool_calls_total": 16,
+    "max_confirmation_requests": 4,
     "status_heartbeat_seconds": 20,
     "tool_result_max_chars": 12000,
     "conversation_max_tokens": 768,
@@ -118,6 +119,7 @@
     "cpu_threads": 6,
     "max_file_bytes": 1000000,
     "result_limit": 8,
+    "min_vector_similarity": 0.3,
     "auto_index": true
   },
   "capability_roles": {
@@ -255,7 +257,7 @@
       "read_file": "allow",
       "list_directory": "allow",
       "write_file": "confirm",
-      "run_tests": "allow",
+      "run_tests": "confirm",
       "run_command": "confirm",
       "browser_read": "allow",
       "windows_read": "allow",
