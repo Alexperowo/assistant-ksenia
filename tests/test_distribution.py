@@ -21,6 +21,18 @@ class DistributionTests(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertFalse(report["package"])
         self.assertGreaterEqual(report["required_file_count"], 30)
+        workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            workflow,
+        )
+        self.assertIn(
+            "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+            workflow,
+        )
+        self.assertNotRegex(workflow, r"uses:\s+actions/(?:checkout|setup-python)@v\d")
 
     def test_release_version_matches_pyproject(self):
         manifest = json.loads(
