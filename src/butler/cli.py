@@ -50,6 +50,13 @@ from butler.tasking import (
     TaskControl,
     TaskState,
 )
+from butler.trusted_task import (
+    TRUSTED_TASK_ARMED,
+    TRUSTED_TASK_FINISHED,
+    TRUSTED_TASK_STARTED,
+    TRUSTED_TASK_WARNING,
+    TrustedTaskStore,
+)
 from butler.user_messages import spoken_agent_error
 from butler.wake import (
     WakeListener,
@@ -175,9 +182,76 @@ def _status(
         if state
         else "Ядро модели сейчас не запущено."
     )
+    if TrustedTaskStore(settings).status() is not None:
+        message += " Доверенная задача подготовлена и ожидает следующего запроса."
     print(f"\n{message}")
     speech.say_and_wait(message)
     return 0 if ok else 1
+
+
+def _trusted_task_control(settings, speech: SpeechAnnouncer) -> int:
+    """Arm or cancel the one-shot grant only after explicit local keyboard consent."""
+    if not sys.stdin.isatty():
+        message = (
+            "Доверенную задачу можно подготовить только вручную в интерактивном окне "
+            "на этом компьютере. Перенаправленный ввод отклонён."
+        )
+        print(f"\n{message}\n")
+        speech.say_and_wait(message)
+        return 1
+    with SingleInstance(settings.root, "agent-task") as safe_to_change_trust:
+        if not safe_to_change_trust:
+            message = (
+                "Доверенную задачу нельзя подготовить, пока Ксения выполняет другой запрос. "
+                "Дождитесь его завершения и повторите."
+            )
+            print(f"\n{message}\n")
+            speech.say_and_wait(message)
+            return 1
+        return _trusted_task_control_locked(settings, speech)
+
+
+def _trusted_task_control_locked(settings, speech: SpeechAnnouncer) -> int:
+    """Keep the agent-task mutex until the local choice has been applied."""
+    store = TrustedTaskStore(settings)
+    active = store.status() is not None
+    state = (
+        "Сейчас доверенная задача уже подготовлена."
+        if active
+        else "Сейчас доверенная задача не подготовлена."
+    )
+    print(
+        "\n=== ДОВЕРЕННАЯ ЗАДАЧА ===\n"
+        f"{state}\n\n{TRUSTED_TASK_WARNING}\n\n"
+        "1. Включить для следующего запроса\n"
+        "2. Отменить подготовленный допуск\n"
+        "0. Ничего не менять\n"
+    )
+    speech.say_and_wait(
+        f"{state} {TRUSTED_TASK_WARNING} "
+        "Чтобы включить режим, нажмите цифру один и затем Enter. "
+        "Чтобы отменить подготовленный допуск, нажмите два и Enter."
+    )
+    choice = input("Ваш выбор: ").strip().casefold()
+    if choice == "1":
+        store.arm()
+        print(f"\n{TRUSTED_TASK_ARMED}\n")
+        speech.say_and_wait(TRUSTED_TASK_ARMED)
+        return 0
+    if choice == "2":
+        cancelled = store.cancel()
+        message = (
+            "Подготовленный допуск отменён. Обычные подтверждения включены."
+            if cancelled
+            else "Доверенная задача не была подготовлена. Обычные подтверждения включены."
+        )
+        print(f"\n{message}\n")
+        speech.say_and_wait(message)
+        return 0
+    message = "Настройки доверия не изменены."
+    print(f"\n{message}\n")
+    speech.say_and_wait(message)
+    return 0
 
 
 def _setup(settings) -> int:
@@ -739,12 +813,22 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             speech.say_and_wait("Голосовой диалог завершён.")
             return 0
 
+        trusted_task_used = False
+
         def report_status(status: str) -> None:
+            nonlocal trusted_task_used
+            if status == TRUSTED_TASK_STARTED:
+                trusted_task_used = True
             print(f"[{status}]", flush=True)
             task_store.transition(
                 task.id, _runtime_task_state(status), status, confirmation=None
             )
-            speech.say(status)
+            if status == TRUSTED_TASK_STARTED:
+                # The task must not race ahead before a blind user hears that
+                # repeat confirmations are disabled for this request.
+                speech.say_and_wait(status)
+            else:
+                speech.say(status)
 
         def confirm_action(name: str, arguments: dict, _reason: str) -> bool:
             prompt = _confirmation_text(name, arguments)
@@ -893,6 +977,8 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
         print(f"Ксения: {reply.text}\n")
         # The final answer is more important than queued progress messages.
         speech.stop()
+        if trusted_task_used:
+            speech.say(TRUSTED_TASK_FINISHED)
         speech.say(reply.text)
 
 
@@ -1000,6 +1086,7 @@ def _menu(settings, speech: SpeechAnnouncer) -> int:
             "15. Настроить глубину рассуждений\n"
             "16. Настроить длину ответа\n"
             "17. Проверить управление с наушников\n"
+            "18. Доверенная задача — один запрос без подтверждений\n"
             "0. Выход\n"
         )
         choice = input("Выберите действие: ").strip().lower()
@@ -1063,10 +1150,12 @@ def _menu(settings, speech: SpeechAnnouncer) -> int:
             elif choice in {"17", "наушники", "кнопки наушников"}:
                 _headset_controls_test(settings, speech)
                 settings = load_settings(settings.root)
+            elif choice in {"18", "доверие", "доверенная задача"}:
+                _trusted_task_control(settings, speech)
             elif choice in {"0", "выход", "выйти"}:
                 return 0
             else:
-                print("Команда не распознана. Введите число от 0 до 17.")
+                print("Команда не распознана. Введите число от 0 до 18.")
                 speech.say_and_wait("Команда не распознана. Введите номер или слово.")
         except (
             ModelManagerError,
@@ -1120,6 +1209,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("audio-devices")
     sub.add_parser("headset-test")
     sub.add_parser("models")
+    sub.add_parser("trust-next-task")
     lan = sub.add_parser("lan")
     lan.add_argument("--host", default=None)
     lan.add_argument("--port", type=int, default=None)
@@ -1192,6 +1282,8 @@ def main(argv: list[str] | None = None) -> int:
         if command == "models":
             _show_models(settings, speech)
             return 0
+        if command == "trust-next-task":
+            return _trusted_task_control(settings, speech)
         if command == "lan":
             lan_config = settings.raw.get("lan", {})
             run_lan_server(

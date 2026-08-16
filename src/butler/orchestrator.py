@@ -17,8 +17,13 @@ from butler.handoff import RoleHandoffStore
 from butler.instance_lock import SingleInstance
 from butler.model_manager import ModelManager, ModelManagerError
 from butler.research import ResearchCoordinator, is_web_research_request
-from butler.tasking import TaskControl
+from butler.tasking import TaskCancelled, TaskControl
 from butler.tools import ToolResult, tool_schemas
+from butler.trusted_task import (
+    TRUSTED_TASK_FINISHED,
+    TRUSTED_TASK_STARTED,
+    TrustedTaskStore,
+)
 
 
 PLANNING_HINTS = (
@@ -161,6 +166,7 @@ class RoutedAgentSession:
         self.session = AgentSession(settings)
         self.research = ResearchCoordinator(settings)
         self.handoffs = RoleHandoffStore(settings.runtime_dir)
+        self.trusted_tasks = TrustedTaskStore(settings)
         diagnostic_event(self.settings, "orchestrator", "session_ready")
 
     def clear_memory(self) -> None:
@@ -230,6 +236,8 @@ class RoutedAgentSession:
         emit: StatusCallback | None,
         control: TaskControl | None = None,
         task_id: str | None = None,
+        *,
+        confirmed: bool = False,
     ) -> str:
         planning_started = time.monotonic()
         outcome = "failed"
@@ -379,7 +387,9 @@ class RoutedAgentSession:
                             )
                         else:
                             seen_calls.add(signature)
-                            result = self.session.tools.execute(name, arguments, confirmed=False)
+                            result = self.session.tools.execute(
+                                name, arguments, confirmed=confirmed
+                            )
                     allowed_chars = min(per_result_chars, remaining_chars)
                     payload = bounded_tool_payload(result, max_chars=max(200, allowed_chars))
                     remaining_chars -= min(len(payload), allowed_chars)
@@ -489,14 +499,57 @@ class RoutedAgentSession:
                 raise ChatError(
                     "Ксения уже выполняет другую задачу. Дождитесь сообщения «Готово» и повторите."
                 )
-            return self._ask_exclusive(
-                text,
-                confirmed=confirmed,
-                max_steps=max_steps,
-                on_status=on_status,
-                on_confirmation=on_confirmation,
-                control=control,
-            )
+            trusted_grant = None if confirmed else self.trusted_tasks.consume()
+            effective_confirmed = confirmed or trusted_grant is not None
+            outcome = "failed"
+
+            def emit_trusted_status(status: str) -> None:
+                if on_status is None:
+                    return
+                try:
+                    on_status(status)
+                except Exception as exc:
+                    # This extra announcement must not fail the task after its
+                    # one-shot grant has already been consumed.
+                    diagnostic_exception(
+                        self.settings,
+                        "orchestrator",
+                        "trusted_status_failed",
+                        exc,
+                    )
+
+            if trusted_grant is not None:
+                diagnostic_event(
+                    self.settings,
+                    "orchestrator",
+                    "trusted_task_started",
+                    grant_id=trusted_grant.grant_id,
+                )
+                emit_trusted_status(TRUSTED_TASK_STARTED)
+            try:
+                reply = self._ask_exclusive(
+                    text,
+                    confirmed=effective_confirmed,
+                    max_steps=max_steps,
+                    on_status=on_status,
+                    on_confirmation=on_confirmation,
+                    control=control,
+                )
+                outcome = "completed"
+                return reply
+            except TaskCancelled:
+                outcome = "cancelled"
+                raise
+            finally:
+                if trusted_grant is not None:
+                    diagnostic_event(
+                        self.settings,
+                        "orchestrator",
+                        "trusted_task_finished",
+                        grant_id=trusted_grant.grant_id,
+                        outcome=outcome,
+                    )
+                    emit_trusted_status(TRUSTED_TASK_FINISHED)
 
     def _ask_exclusive(
         self,
@@ -593,7 +646,13 @@ class RoutedAgentSession:
                 raise
         if planner_available and needs_plan:
             try:
-                plan = self._make_plan(text, on_status, control, task_id)
+                plan = self._make_plan(
+                    text,
+                    on_status,
+                    control,
+                    task_id,
+                    confirmed=confirmed,
+                )
             except (ChatError, ModelManagerError, OSError) as exc:
                 if task_id:
                     self.handoffs.append(

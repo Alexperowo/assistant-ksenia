@@ -19,6 +19,7 @@
     "approved_update": "UPDATE.cmd",
     "rollback": "ROLLBACK-UPDATE.cmd",
     "audit": "AUDIT.cmd",
+    "trusted_task": "TRUST-NEXT-TASK.cmd",
     "hardware_report": "HARDWARE-REPORT.cmd",
     "release_builder": "BUILD-RELEASE.cmd",
     "release_verifier": "VERIFY-RELEASE.cmd"
@@ -37,6 +38,7 @@
     "UPDATE.cmd",
     "ROLLBACK-UPDATE.cmd",
     "AUDIT.cmd",
+    "TRUST-NEXT-TASK.cmd",
     "HARDWARE-REPORT.cmd",
     "BUILD-RELEASE.cmd",
     "VERIFY-RELEASE.cmd",
@@ -113,6 +115,7 @@
       "START-LAN.cmd",
       "START-VOICE.cmd",
       "STOP-VOICE.cmd",
+      "TRUST-NEXT-TASK.cmd",
       "TEST-HEADSET-CONTROLS.cmd",
       "TEST-MICROPHONE.cmd",
       "TEST-VOICE.cmd",
@@ -155,7 +158,7 @@
     "workspace"
   ],
   "quality_gate": {
-    "minimum_tests": 199,
+    "minimum_tests": 217,
     "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1"
   },
   "models": {

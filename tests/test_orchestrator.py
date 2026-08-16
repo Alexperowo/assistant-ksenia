@@ -145,6 +145,47 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(plan, "Короткий план.")
         self.assertEqual(statuses, ["Планирую на усиленной модели", "Составляю план"])
 
+    @patch("butler.orchestrator.complete_chat")
+    def test_planner_inherits_task_wide_preconfirmation(self, complete_chat):
+        complete_chat.side_effect = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "search-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "browser_search",
+                                        "arguments": '{"query":"официальная документация"}',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"message": {"role": "assistant", "content": "Факты."}}]},
+            {"choices": [{"message": {"role": "assistant", "content": "План."}}]},
+        ]
+        session = RoutedAgentSession(load_settings())
+        session.manager.switch = Mock()
+        session.session.tools.execute = Mock(
+            return_value=ToolResult(True, "ok", "Найдено", {"results": []})
+        )
+
+        plan = session._make_plan(
+            "Изучи проект и официальный источник",
+            None,
+            confirmed=True,
+        )
+
+        self.assertEqual(plan, "План.")
+        self.assertTrue(session.session.tools.execute.call_args.kwargs["confirmed"])
+
 
 if __name__ == "__main__":
     unittest.main()

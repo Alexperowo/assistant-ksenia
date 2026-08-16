@@ -9,6 +9,7 @@ $shortcuts = @(
     @{ Name = 'Ксения — НАЧАТЬ РАЗГОВОР'; Target = 'START-VOICE.cmd'; Hotkey = 'CTRL+ALT+K'; Description = 'Главный голосовой режим. Горячая клавиша Control Alt K.' },
     @{ Name = 'Ксения — ОСТАНОВИТЬ ГОЛОС'; Target = 'STOP-VOICE.cmd'; Hotkey = 'CTRL+ALT+S'; Description = 'Аварийно остановить только голосовой режим. Горячая клавиша Control Alt S.' },
     @{ Name = 'Ксения — помощь и управление'; Target = 'START-BUTLER.cmd'; Hotkey = 'CTRL+ALT+U'; Description = 'Меню состояния, моделей и настроек. Горячая клавиша Control Alt U.' },
+    @{ Name = 'Ксения — ДОВЕРЕННАЯ ЗАДАЧА'; Target = 'TRUST-NEXT-TASK.cmd'; Hotkey = 'CTRL+ALT+D'; Description = 'После предупреждения разрешить следующую задачу без повторных подтверждений. Горячая клавиша Control Alt D.' },
     @{ Name = 'Ксения — локальная сеть'; Target = 'START-LAN.cmd'; Description = 'Открыть защищённую панель Ксении для телефона.' },
     @{ Name = 'Ксения — проверка микрофона'; Target = 'TEST-MICROPHONE.cmd'; Hotkey = 'CTRL+ALT+M'; Description = 'Проверить одну фразу с микрофона. Горячая клавиша Control Alt M.' },
     @{ Name = 'Ксения — проверка активации'; Target = 'TEST-WAKE-WORD.cmd'; Description = 'Отдельно проверить фразу Ксения слушай.' },
