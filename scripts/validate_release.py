@@ -219,6 +219,16 @@ def _validate_versions(root: Path, manifest: dict[str, Any]) -> None:
         raise ValidationError(
             f"Версии расходятся: pyproject={package_version}, release={release_version}."
         )
+    build_requires = pyproject.get("build-system", {}).get("requires", [])
+    if not isinstance(build_requires, list):
+        raise ValidationError("build-system.requires должен быть списком exact requirements.")
+    setuptools_requirements = [
+        str(item) for item in build_requires if str(item).casefold().startswith("setuptools")
+    ]
+    if len(setuptools_requirements) != 1 or not LOCK_LINE_RE.fullmatch(
+        setuptools_requirements[0]
+    ):
+        raise ValidationError("setuptools в pyproject должен быть закреплён через ==.")
 
     runtime = _load_json(root / "config" / "runtime-assets.lock.json")
     python_version = str(runtime.get("python", {}).get("version", ""))
@@ -227,6 +237,34 @@ def _validate_versions(root: Path, manifest: dict[str, Any]) -> None:
     torch_version = str(runtime.get("packages", {}).get("torch", ""))
     if "+cu" not in torch_version:
         raise ValidationError("Версия Torch должна явно содержать проверенный CUDA variant.")
+    torch_config = runtime.get("torch")
+    if not isinstance(torch_config, dict):
+        raise ValidationError("runtime-assets.lock.json не содержит объект torch.")
+    torch_requirements = str(torch_config.get("requirements", "")).replace("\\", "/")
+    torch_index = str(torch_config.get("index_url", "")).rstrip("/")
+    if not re.fullmatch(r"requirements/[A-Za-z0-9_.-]+\.txt", torch_requirements):
+        raise ValidationError("Некорректный относительный путь Torch lock.")
+    if not re.fullmatch(r"https://download\.pytorch\.org/whl/(?:cu\d+|cpu)", torch_index):
+        raise ValidationError("Torch должен использовать официальный HTTPS index PyTorch.")
+    torch_variant = torch_version.split("+", 1)[1]
+    if not torch_index.endswith("/" + torch_variant):
+        raise ValidationError("CUDA variant Torch не совпадает с настроенным index URL.")
+    torch_lines = {
+        line.strip()
+        for line in (root / torch_requirements).read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    if torch_lines != {f"torch=={torch_version}"}:
+        raise ValidationError("Torch lock не совпадает с runtime-assets.lock.json.")
+    runtime_lines = {
+        line.strip()
+        for line in (root / "requirements" / "runtime.lock.txt")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    if setuptools_requirements[0] not in runtime_lines:
+        raise ValidationError("Версия setuptools расходится между pyproject и runtime lock.")
 
     engine = _load_json(root / "config" / "engine.lock.json")
     for key in ("release", "commit", "cuda", "assets"):
@@ -244,12 +282,25 @@ def _validate_requirements(root: Path, manifest: dict[str, Any]) -> None:
     locks = manifest.get("component_locks", [])
     if not isinstance(locks, list) or not locks:
         raise ValidationError("Не перечислены component_locks.")
+    requirement_locks: list[str] = []
     for item in locks:
-        path = root / str(item)
+        relative = str(item).replace("\\", "/")
+        pure = PurePosixPath(relative)
+        if pure.is_absolute() or ".." in pure.parts or WINDOWS_ABSOLUTE_RE.match(relative):
+            raise ValidationError(f"Некорректный путь component lock: {item}")
+        path = (root / relative).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as error:
+            raise ValidationError(f"Component lock выходит за корень: {item}") from error
         if not path.is_file():
             raise ValidationError(f"Не найден lock-файл: {item}")
+        if relative.startswith("requirements/"):
+            requirement_locks.append(relative)
 
-    for relative in ("requirements/runtime.lock.txt", "requirements/torch-cu128.lock.txt"):
+    if not requirement_locks:
+        raise ValidationError("В component_locks не перечислены Python requirements.")
+    for relative in requirement_locks:
         path = root / relative
         packages: list[str] = []
         for raw in path.read_text(encoding="utf-8").splitlines():

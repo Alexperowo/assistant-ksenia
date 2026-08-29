@@ -12,7 +12,7 @@
     "config/engine.lock.json",
     "config/runtime-assets.lock.json",
     "requirements/runtime.lock.txt",
-    "requirements/torch-cu128.lock.txt"
+    "requirements/torch.lock.txt"
   ],
   "entry_points": {
     "clean_install": "INSTALL.cmd",

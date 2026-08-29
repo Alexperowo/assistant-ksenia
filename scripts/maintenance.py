@@ -43,7 +43,15 @@ def component_status(root: Path) -> dict[str, Any]:
     runtime_lock = _json(root / "config" / "runtime-assets.lock.json")
     engine_lock = _json(root / "config" / "engine.lock.json")
     expected_packages = {"pip": str(runtime_lock["python"]["pip"])}
-    expected_packages.update(_requirements(root / "requirements" / "torch-cu128.lock.txt"))
+    torch_relative = Path(str(runtime_lock["torch"]["requirements"]))
+    if torch_relative.is_absolute() or ".." in torch_relative.parts:
+        raise RuntimeError("Некорректный путь Torch lock в runtime-assets.lock.json")
+    torch_lock = (root / torch_relative).resolve()
+    try:
+        torch_lock.relative_to(root / "requirements")
+    except ValueError as error:
+        raise RuntimeError("Torch lock находится вне каталога requirements") from error
+    expected_packages.update(_requirements(torch_lock))
     expected_packages.update(_requirements(root / "requirements" / "runtime.lock.txt"))
 
     package_rows: list[dict[str, Any]] = []

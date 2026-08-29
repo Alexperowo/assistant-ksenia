@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 import zipfile
 from pathlib import Path
@@ -236,10 +237,28 @@ class DistributionTests(unittest.TestCase):
         runtime_lock = (ROOT / "requirements" / "runtime.lock.txt").read_text(
             encoding="utf-8"
         )
+        runtime_assets = json.loads(
+            (ROOT / "config" / "runtime-assets.lock.json").read_text(encoding="utf-8")
+        )
+        torch_lock_path = ROOT / runtime_assets["torch"]["requirements"]
+        torch_lock = torch_lock_path.read_text(encoding="utf-8")
+        pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertIn("runtime.lock.txt", installer)
-        self.assertIn("torch-cu128.lock.txt", installer)
-        self.assertIn("setuptools==78.1.1", runtime_lock)
-        self.assertNotIn("setuptools==78.1.0", runtime_lock)
+        self.assertIn("$assetLock.torch.requirements", installer)
+        self.assertNotIn("download.pytorch.org/whl/cu", installer)
+        setuptools_line = next(
+            line for line in runtime_lock.splitlines() if line.startswith("setuptools==")
+        )
+        self.assertEqual(pyproject["build-system"]["requires"], [setuptools_line])
+        setuptools_version = tuple(int(part) for part in setuptools_line.split("==", 1)[1].split("."))
+        pip_version = tuple(int(part) for part in runtime_assets["python"]["pip"].split("."))
+        self.assertGreaterEqual(setuptools_version, (84, 0, 0))
+        self.assertGreaterEqual(pip_version, (26, 2, 1))
+        self.assertEqual(
+            torch_lock.strip().splitlines()[-1],
+            f'torch=={runtime_assets["packages"]["torch"]}',
+        )
+        self.assertTrue(runtime_assets["torch"]["index_url"].startswith("https://download.pytorch.org/whl/"))
         self.assertIn("[string]$ModelStorageRoot", installer)
         self.assertIn("pip==$", installer)
         self.assertIn("chrome-win64", installer)
@@ -250,9 +269,6 @@ class DistributionTests(unittest.TestCase):
         self.assertIn("[string]$AllowedRoot", installer)
         self.assertIn("Move-ToInstallerQuarantine $wakeModelPath -AllowedRoot $voiceRoot", installer)
         self.assertIn("$wakeModelInsideManagedRoot", installer)
-        runtime_assets = json.loads(
-            (ROOT / "config" / "runtime-assets.lock.json").read_text(encoding="utf-8")
-        )
         self.assertEqual(
             runtime_assets["silero_tts"]["sha256"],
             "7BA04D42340FE0398042EED2E0D12D62E23096D626B1B9FEFF4DCB1309197AB4",

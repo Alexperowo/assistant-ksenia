@@ -131,7 +131,10 @@ if ([bool]$metadata.runtime_changed -and $freezeBackup -and (Test-Path -LiteralP
     $lines = @(Get-Content -LiteralPath $freezeBackup -Encoding UTF8 | Where-Object { $_.Trim() -and -not $_.StartsWith('#') })
     $torchLine = $lines | Where-Object { $_ -match '^(?i)torch==' } | Select-Object -First 1
     if ($torchLine) {
-        & $PythonPath -m pip install --upgrade --index-url https://download.pytorch.org/whl/cu128 $torchLine
+        $torchVariantMatch = [regex]::Match($torchLine, '\+(cu\d+)$', [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if (-not $torchVariantMatch.Success) { throw 'Нельзя безопасно определить CUDA index предыдущего Torch.' }
+        $torchIndexUrl = "https://download.pytorch.org/whl/$($torchVariantMatch.Groups[1].Value.ToLowerInvariant())"
+        & $PythonPath -m pip install --upgrade --index-url $torchIndexUrl $torchLine
         if ($LASTEXITCODE -ne 0) { throw 'Не удалось вернуть предыдущий Torch.' }
     }
     $restoreRequirements = Join-Path $UpdateDirectory 'python-freeze-restore.txt'

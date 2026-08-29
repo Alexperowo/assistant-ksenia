@@ -23,9 +23,21 @@ $defaultConfigPath = Join-Path $projectRoot 'config\default.json'
 $userConfigPath = Join-Path $projectRoot 'config\user.json'
 $assetLockPath = Join-Path $projectRoot 'config\runtime-assets.lock.json'
 $runtimeRequirementsPath = Join-Path $projectRoot 'requirements\runtime.lock.txt'
-$torchRequirementsPath = Join-Path $projectRoot 'requirements\torch-cu128.lock.txt'
 $defaultConfig = Get-Content -Raw -Encoding UTF8 -LiteralPath $defaultConfigPath | ConvertFrom-Json
 $assetLock = Get-Content -Raw -Encoding UTF8 -LiteralPath $assetLockPath | ConvertFrom-Json
+$torchRequirementsRelative = [string]$assetLock.torch.requirements
+$torchIndexUrl = ([string]$assetLock.torch.index_url).TrimEnd('/')
+$requirementsRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot 'requirements')).TrimEnd('\')
+if (-not $torchRequirementsRelative -or [IO.Path]::IsPathRooted($torchRequirementsRelative)) {
+    throw 'Некорректный относительный путь Torch lock в runtime-assets.lock.json.'
+}
+$torchRequirementsPath = [IO.Path]::GetFullPath((Join-Path $projectRoot $torchRequirementsRelative))
+if (-not $torchRequirementsPath.StartsWith($requirementsRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Torch lock обязан находиться внутри каталога requirements.'
+}
+if ($torchIndexUrl -notmatch '^https://download\.pytorch\.org/whl/(?:cu\d+|cpu)$') {
+    throw 'Разрешён только официальный HTTPS index PyTorch.'
+}
 
 if (-not $InstallRoot) {
     if (-not $env:LocalAppData) {
@@ -217,7 +229,7 @@ if (Test-RuntimePackages $venvPython) {
     Write-Host 'Устанавливаю проверенные версии библиотек Ксении...'
     & $venvPython -m pip install "pip==$([string]$assetLock.python.pip)"
     if ($LASTEXITCODE -ne 0) { throw 'Не удалось установить закреплённую версию pip.' }
-    & $venvPython -m pip install --upgrade --index-url https://download.pytorch.org/whl/cu128 `
+    & $venvPython -m pip install --upgrade --index-url $torchIndexUrl `
         --requirement $torchRequirementsPath
     if ($LASTEXITCODE -ne 0) { throw 'Не удалось установить проверенную CUDA-версию Torch.' }
     & $venvPython -m pip install --upgrade --requirement $runtimeRequirementsPath

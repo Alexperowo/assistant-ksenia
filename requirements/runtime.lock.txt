@@ -1,5 +1,5 @@
 # Exact Python environment captured from the verified Windows Python 3.12 runtime.
-# Torch is intentionally kept in torch-cu128.lock.txt because it uses a separate index.
+# Torch is intentionally kept in torch.lock.txt because its verified index is configured separately.
 antlr4-python3-runtime==4.9.3
 anyio==4.14.2
 av==18.0.0
@@ -42,7 +42,7 @@ PyYAML==6.0.3
 requests==2.34.2
 scipy==1.18.0
 selectolax==0.4.11
-setuptools==78.1.1
+setuptools==84.0.0
 silero==0.5.5
 six==1.17.0
 SoundCard==0.4.6

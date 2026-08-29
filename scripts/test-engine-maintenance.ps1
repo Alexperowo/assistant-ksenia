@@ -34,7 +34,9 @@ try {
     Copy-Item -LiteralPath (Join-Path $projectRoot 'config\default.json') -Destination (Join-Path $sandbox 'config\default.json')
     Copy-Item -LiteralPath (Join-Path $projectRoot 'config\runtime-assets.lock.json') -Destination (Join-Path $sandbox 'config\runtime-assets.lock.json')
     Copy-Item -LiteralPath (Join-Path $projectRoot 'requirements\runtime.lock.txt') -Destination (Join-Path $sandbox 'requirements\runtime.lock.txt')
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'requirements\torch-cu128.lock.txt') -Destination (Join-Path $sandbox 'requirements\torch-cu128.lock.txt')
+    $runtimeAssets = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $projectRoot 'config\runtime-assets.lock.json') | ConvertFrom-Json
+    $torchRequirements = [string]$runtimeAssets.torch.requirements
+    Copy-Item -LiteralPath (Join-Path $projectRoot $torchRequirements) -Destination (Join-Path $sandbox $torchRequirements)
 
     & (Join-Path $PSScriptRoot 'install-llama.ps1') -ProjectRoot $sandbox -CacheRoot $CacheRoot -Offline
     if ($LASTEXITCODE -ne 0) { throw 'Первая стадийная установка не прошла.' }
@@ -59,7 +61,7 @@ try {
         throw 'Хеши движка после стадийного переключения расходятся.'
     }
     $updateMetadata = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         update_id = 'test-update'
         project_root = $sandbox
         status = 'succeeded'
@@ -67,6 +69,10 @@ try {
         voice_was_running = $false
         engine_changed = $true
         runtime_changed = $false
+        engine_existed_before = $true
+        engine_sha256_before = $firstHash.ToLowerInvariant()
+        engine_version_before = $null
+        python_before = $null
         pip_before = $null
         engine_backup = Join-Path $backupRoot 'llama.cpp'
         config_backup = $null

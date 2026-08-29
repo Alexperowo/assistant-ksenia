@@ -1,10 +1,10 @@
 {
   "python": {
     "version": "3.12.10",
-    "pip": "25.0.1"
+    "pip": "26.2.1"
   },
   "packages": {
-    "torch": "2.11.0+cu128",
+    "torch": "2.13.0+cu126",
     "silero": "0.5.5",
     "vosk": "0.3.45",
     "sounddevice": "0.5.5",
@@ -16,6 +16,10 @@
     "ctranslate2": "4.8.1",
     "googlenewsdecoder": "0.1.7",
     "huggingface-hub": "1.27.0"
+  },
+  "torch": {
+    "requirements": "requirements/torch.lock.txt",
+    "index_url": "https://download.pytorch.org/whl/cu126"
   },
   "vosk": {
     "directory": "vosk-model-small-ru-0.22",
