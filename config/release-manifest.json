@@ -72,6 +72,7 @@
     "scripts/install-local-backend.ps1",
     "scripts/maintenance.py",
     "scripts/performance-report.py",
+    "scripts/test_model_cancellation.py",
     "scripts/model-assets.py",
     "scripts/download-model-assets.ps1",
     "scripts/runtime-paths.ps1",

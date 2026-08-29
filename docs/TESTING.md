@@ -112,6 +112,14 @@ python scripts\performance-report.py --json
 
 Регрессии performance harness проверяют вложенный и фоновый trace context, отсутствие утечки в следующую задачу, redaction, STT/TTS request correlation, первый LLM token, cancellation, повреждённый JSONL, rotation order, percentiles, неполные traces и исключение приглашения «Слушаю» из TTFA.
 
+Фактическая отмена streaming-запроса и завершение HTTP reader проверяются отдельно на уже запущенной модели:
+
+```powershell
+python scripts\test_model_cancellation.py --cancel-after-ms 500
+```
+
+Успех требует `active_reader_threads=0` и `stuck_reader_threads=0`; скрипт не запускает и не останавливает модель самостоятельно.
+
 ## Критерий завершения изменения
 
 - тест краснел на воспроизводимом дефекте или явно проверяет новый контракт;

@@ -25,6 +25,7 @@
 - Голос: Vosk для активации/остановки, faster-whisper для команды, Silero Xenia и SAPI-резерв.
 - Live v1 как отдельный opt-in контур: Vosk partial transcripts → hybrid turn detector → финальный faster-whisper, безопасные дельты LLM, отслеживаемые фразы TTS, barge-in state machine и раздельные generated/spoken ответы. Весь режим по умолчанию выключен до AEC/full-duplex-приёмки.
 - Сквозной performance harness: `trace_id/turn_id/task_id/request_id`, voice→STT→LLM→TTS milestones, cancellation latency, p50/p95 и явные неполные traces без отдельной telemetry-службы.
+- HTTP reader cancellation проверена живьём: socket shutdown не задерживает agent loop синхронным close, cleanup остаётся измеримым до нулевых active/stuck counters.
 - Память разговора, подтверждённые факты, межролевая передача и гибридный RAG с порогом уверенности и явным `no_match`.
 - Исследование через поиск, изолированный Chromium, стабильный порядок доказательств, приоритет официальных источников и проверку цен.
 - Разработка файлами в `workspace`, Windows Automation, клавиатура, мышь и браузер с неослабляемой политикой и пределом вопросов подтверждения. Запуск команд по умолчанию заблокирован до проверенной ОС-песочницы; `unsafe_host` — только явный legacy-режим.

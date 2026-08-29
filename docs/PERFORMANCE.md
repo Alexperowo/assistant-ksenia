@@ -71,6 +71,8 @@ python scripts\performance-report.py `
 
 Кроме waterfall рассчитываются безопасные длительности существующих компонентов: model start/stop, agent/tool selection, tool execution, RAG search, web research, STT, TTS и LLM. `completion_completed` отдельно пишет prompt/completion/total tokens и эффективную скорость всего HTTP completion. Streaming-запрос просит `stream_options.include_usage`; если конкретный совместимый backend не возвращает usage, поля остаются `null` и не попадают в статистику. Эта скорость полезна как пользовательская end-to-end метрика, но не заменяет нативные timings `llama.cpp` в модельном benchmark.
 
+Отменяемый HTTP transport наблюдает жизненный цикл вспомогательного reader thread. На каждой остановке доступны `active_reader_threads`, накопительный `cancelled_streams`, `reader_shutdown_latency_ms` и текущее число `stuck_reader_threads`. При отмене transport сначала делает `shutdown()` loopback-сокета, ждёт reader не более 100 мс и, если тот ещё занят, переносит `close()` в служебный daemon-thread. Неостановившийся reader отмечается warning и остаётся учтённым до фактического выхода; это сигнал для решения о замене transport, а не повод блокировать разговор или заранее переписывать весь HTTP-клиент.
+
 ## Приватность и совместимость
 
 - Схема JSONL остаётся append-only и обратно совместимой.

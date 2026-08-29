@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import queue
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -11,6 +12,7 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from butler.config import Settings
+from butler.diagnostics import current_trace_fields
 from butler.diagnostics import event as diagnostic_event
 from butler.diagnostics import milestone as diagnostic_milestone
 from butler.diagnostics import new_trace_id
@@ -19,6 +21,159 @@ from butler.local_auth import local_api_key
 
 class ChatError(RuntimeError):
     pass
+
+
+_READER_LOCK = threading.Lock()
+_ACTIVE_READER_THREADS = 0
+_CANCELLED_STREAMS = 0
+_STUCK_READER_THREADS = 0
+
+
+class _ReaderObservation:
+    def __init__(self, diagnostics_source: object, request_id: str) -> None:
+        self.diagnostics_source = diagnostics_source
+        self.request_id = request_id
+        self.trace_fields = current_trace_fields()
+        self.started = time.monotonic()
+        self.finished = threading.Event()
+        self.cancelled = False
+        self.stuck = False
+
+
+def _reader_counts() -> dict[str, int]:
+    with _READER_LOCK:
+        return {
+            "active_reader_threads": _ACTIVE_READER_THREADS,
+            "cancelled_streams": _CANCELLED_STREAMS,
+            "stuck_reader_threads": _STUCK_READER_THREADS,
+        }
+
+
+def _reader_started(observation: _ReaderObservation) -> None:
+    global _ACTIVE_READER_THREADS
+    with _READER_LOCK:
+        _ACTIVE_READER_THREADS += 1
+        counts = {
+            "active_reader_threads": _ACTIVE_READER_THREADS,
+            "cancelled_streams": _CANCELLED_STREAMS,
+            "stuck_reader_threads": _STUCK_READER_THREADS,
+        }
+    if observation.diagnostics_source is not None:
+        diagnostic_event(
+            observation.diagnostics_source,
+            "chat",
+            "reader_thread_started",
+            request_id=observation.request_id,
+            **observation.trace_fields,
+            **counts,
+        )
+
+
+def _reader_finished(observation: _ReaderObservation) -> None:
+    global _ACTIVE_READER_THREADS, _STUCK_READER_THREADS
+    with _READER_LOCK:
+        _ACTIVE_READER_THREADS = max(0, _ACTIVE_READER_THREADS - 1)
+        if observation.stuck:
+            _STUCK_READER_THREADS = max(0, _STUCK_READER_THREADS - 1)
+        counts = {
+            "active_reader_threads": _ACTIVE_READER_THREADS,
+            "cancelled_streams": _CANCELLED_STREAMS,
+            "stuck_reader_threads": _STUCK_READER_THREADS,
+        }
+        observation.finished.set()
+    if observation.diagnostics_source is not None:
+        diagnostic_event(
+            observation.diagnostics_source,
+            "chat",
+            "reader_thread_finished",
+            request_id=observation.request_id,
+            duration_ms=round((time.monotonic() - observation.started) * 1000),
+            cancelled=observation.cancelled,
+            **observation.trace_fields,
+            **counts,
+        )
+
+
+def _cancel_reader(
+    observation: _ReaderObservation,
+    response: object,
+    *,
+    wait_seconds: float = 0.1,
+) -> None:
+    global _CANCELLED_STREAMS, _STUCK_READER_THREADS
+    cancel_started = time.monotonic()
+    with _READER_LOCK:
+        if not observation.cancelled:
+            observation.cancelled = True
+            _CANCELLED_STREAMS += 1
+    try:
+        setattr(response, "_ksenia_reader_close_managed", True)
+    except (AttributeError, TypeError):
+        pass
+    raw = getattr(getattr(response, "fp", None), "raw", None)
+    response_socket = getattr(raw, "_sock", None)
+    socket_shutdown = False
+    if response_socket is not None:
+        try:
+            response_socket.shutdown(socket.SHUT_RDWR)
+            socket_shutdown = True
+        except OSError:
+            pass
+    stopped = observation.finished.wait(max(0.0, wait_seconds))
+    with _READER_LOCK:
+        if not stopped and observation.finished.is_set():
+            stopped = True
+        if not stopped and not observation.stuck:
+            observation.stuck = True
+            _STUCK_READER_THREADS += 1
+    close = getattr(response, "close", None)
+    if callable(close):
+        if stopped:
+            try:
+                close()
+            except OSError:
+                pass
+        else:
+            threading.Thread(target=_close_response, args=(response,), daemon=True).start()
+    with _READER_LOCK:
+        counts = {
+            "active_reader_threads": _ACTIVE_READER_THREADS,
+            "cancelled_streams": _CANCELLED_STREAMS,
+            "stuck_reader_threads": _STUCK_READER_THREADS,
+        }
+    if observation.diagnostics_source is not None:
+        diagnostic_event(
+            observation.diagnostics_source,
+            "chat",
+            "reader_shutdown_observed",
+            level="info" if stopped else "warning",
+            request_id=observation.request_id,
+            reader_shutdown_latency_ms=round(
+                (time.monotonic() - cancel_started) * 1000
+            ),
+            reader_stopped=stopped,
+            socket_shutdown=socket_shutdown,
+            **observation.trace_fields,
+            **counts,
+        )
+
+
+def _close_response(response: object) -> None:
+    close = getattr(response, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except OSError:
+        pass
+
+
+def _close_response_if_owned(response: object | None) -> None:
+    if response is None or bool(
+        getattr(response, "_ksenia_reader_close_managed", False)
+    ):
+        return
+    _close_response(response)
 
 
 def _optional_nonnegative_int(value: object) -> int | None:
@@ -123,10 +278,13 @@ def _cancellable_response_lines(
     checkpoint: Callable[[], None],
     *,
     poll_seconds: float = 0.1,
+    diagnostics_source: object = None,
+    request_id: str = "",
 ) -> Iterator[bytes]:
     """Read a possibly stalled HTTP stream without delaying cancellation."""
 
     messages: queue.Queue[tuple[str, object]] = queue.Queue()
+    observation = _ReaderObservation(diagnostics_source, request_id)
 
     def read_response() -> None:
         try:
@@ -136,23 +294,29 @@ def _cancellable_response_lines(
             messages.put(("error", exc))
         finally:
             messages.put(("done", None))
+            _reader_finished(observation)
 
+    _reader_started(observation)
     threading.Thread(target=read_response, daemon=True).start()
-    while True:
-        checkpoint()
-        try:
-            kind, value = messages.get(timeout=poll_seconds)
-        except queue.Empty:
-            continue
-        if kind == "done":
-            return
-        if kind == "error":
-            if isinstance(value, BaseException):
-                raise value
-            raise OSError("Чтение ответа модели завершилось неизвестной ошибкой.")
-        if not isinstance(value, bytes):
-            raise OSError("Сервер модели вернул строку потока неизвестного типа.")
-        yield value
+    try:
+        while True:
+            checkpoint()
+            try:
+                kind, value = messages.get(timeout=poll_seconds)
+            except queue.Empty:
+                continue
+            if kind == "done":
+                return
+            if kind == "error":
+                if isinstance(value, BaseException):
+                    raise value
+                raise OSError("Чтение ответа модели завершилось неизвестной ошибкой.")
+            if not isinstance(value, bytes):
+                raise OSError("Сервер модели вернул строку потока неизвестного типа.")
+            yield value
+    except BaseException:
+        _cancel_reader(observation, response)
+        raise
 
 
 def _cancellable_response_read(
@@ -160,29 +324,39 @@ def _cancellable_response_read(
     checkpoint: Callable[[], None],
     *,
     poll_seconds: float = 0.1,
+    diagnostics_source: object = None,
+    request_id: str = "",
 ) -> bytes:
     messages: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+    observation = _ReaderObservation(diagnostics_source, request_id)
 
     def read_response() -> None:
         try:
             messages.put(("value", response.read()))
         except BaseException as exc:
             messages.put(("error", exc))
+        finally:
+            _reader_finished(observation)
 
+    _reader_started(observation)
     threading.Thread(target=read_response, daemon=True).start()
-    while True:
-        checkpoint()
-        try:
-            kind, value = messages.get(timeout=poll_seconds)
-        except queue.Empty:
-            continue
-        if kind == "error":
-            if isinstance(value, BaseException):
-                raise value
-            raise OSError("Чтение ответа модели завершилось неизвестной ошибкой.")
-        if not isinstance(value, bytes):
-            raise OSError("Сервер модели вернул ответ неизвестного типа.")
-        return value
+    try:
+        while True:
+            checkpoint()
+            try:
+                kind, value = messages.get(timeout=poll_seconds)
+            except queue.Empty:
+                continue
+            if kind == "error":
+                if isinstance(value, BaseException):
+                    raise value
+                raise OSError("Чтение ответа модели завершилось неизвестной ошибкой.")
+            if not isinstance(value, bytes):
+                raise OSError("Сервер модели вернул ответ неизвестного типа.")
+            return value
+    except BaseException:
+        _cancel_reader(observation, response)
+        raise
 
 
 def count_chat_tokens(
@@ -195,6 +369,7 @@ def count_chat_tokens(
     message_list = normalize_system_messages(messages)
     content = json.dumps(message_list, ensure_ascii=False, separators=(",", ":"))
     started = time.monotonic()
+    request_id = new_trace_id()
     request = urllib.request.Request(
         f"http://{settings.host}:{settings.port}/tokenize",
         data=json.dumps(
@@ -206,13 +381,21 @@ def count_chat_tokens(
     try:
         if checkpoint is not None:
             checkpoint()
-        with urllib.request.urlopen(request, timeout=30) as response:
+        response = urllib.request.urlopen(request, timeout=30)
+        try:
             raw = (
-                _cancellable_response_read(response, checkpoint)
+                _cancellable_response_read(
+                    response,
+                    checkpoint,
+                    diagnostics_source=settings,
+                    request_id=request_id,
+                )
                 if checkpoint is not None
                 else response.read()
             )
             value = json.loads(raw.decode("utf-8", errors="replace"))
+        finally:
+            _close_response_if_owned(response)
         tokens = value.get("tokens", []) if isinstance(value, dict) else []
         if isinstance(tokens, list):
             diagnostic_event(
@@ -221,6 +404,7 @@ def count_chat_tokens(
                 "token_count_completed",
                 duration_ms=round((time.monotonic() - started) * 1000),
                 token_count=len(tokens),
+                request_id=request_id,
                 **_message_metrics(message_list),
             )
             return len(tokens)
@@ -232,6 +416,7 @@ def count_chat_tokens(
             level="warning",
             duration_ms=round((time.monotonic() - started) * 1000),
             error_type=type(exc).__name__,
+            request_id=request_id,
             **_message_metrics(message_list),
         )
     fallback = max(1, len(content) // 2)
@@ -288,36 +473,52 @@ def stream_chat(
     try:
         if checkpoint is not None:
             checkpoint()
-        with urllib.request.urlopen(request, timeout=600) as response:
+        response = urllib.request.urlopen(request, timeout=600)
+        try:
             lines = (
-                _cancellable_response_lines(response, checkpoint)
+                _cancellable_response_lines(
+                    response,
+                    checkpoint,
+                    diagnostics_source=settings,
+                    request_id=request_id,
+                )
                 if checkpoint is not None
                 else iter(response)
             )
-            for raw_line in lines:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if not payload or payload == "[DONE]":
-                    continue
-                try:
-                    event = json.loads(payload)
-                    delta = event["choices"][0].get("delta", {})
-                    content = delta.get("content")
-                except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-                    continue
-                if content:
-                    if first_token_ms is None:
-                        first_token_ms = round((time.monotonic() - started) * 1000)
-                        diagnostic_milestone(
-                            settings,
-                            "llm_first_token",
-                            request_id=request_id,
-                            first_token_ms=first_token_ms,
-                        )
-                    output_chars += len(str(content))
-                    yield str(content)
+            try:
+                for raw_line in lines:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if not payload or payload == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(payload)
+                        delta = event["choices"][0].get("delta", {})
+                        content = delta.get("content")
+                    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                        continue
+                    if content:
+                        if first_token_ms is None:
+                            first_token_ms = round(
+                                (time.monotonic() - started) * 1000
+                            )
+                            diagnostic_milestone(
+                                settings,
+                                "llm_first_token",
+                                request_id=request_id,
+                                first_token_ms=first_token_ms,
+                            )
+                        output_chars += len(str(content))
+                        yield str(content)
+            except BaseException:
+                close_lines = getattr(lines, "close", None)
+                if callable(close_lines):
+                    close_lines()
+                raise
+        finally:
+            _close_response_if_owned(response)
         if checkpoint is not None:
             checkpoint()
         completed = True
@@ -439,7 +640,8 @@ def complete_chat(
         )
 
     try:
-        with urllib.request.urlopen(request, timeout=600) as response:
+        response = urllib.request.urlopen(request, timeout=600)
+        try:
             if not streaming:
                 value = json.loads(response.read().decode("utf-8", errors="replace"))
             else:
@@ -448,7 +650,11 @@ def complete_chat(
                     checkpoint or (lambda: None),
                     on_content_delta=on_content_delta,
                     on_first_token=record_first_token,
+                    diagnostics_source=settings,
+                    request_id=request_id,
                 )
+        finally:
+            _close_response_if_owned(response)
         if not isinstance(value, dict) or not value.get("choices"):
             raise ChatError("Модель вернула пустой ответ.")
         first_choice = value.get("choices", [{}])[0]
@@ -550,6 +756,8 @@ def _read_complete_stream(
     *,
     on_content_delta: Callable[[str], None] | None = None,
     on_first_token: Callable[[], None] | None = None,
+    diagnostics_source: object = None,
+    request_id: str = "",
 ) -> dict[str, Any]:
     """Aggregate an OpenAI-compatible stream while remaining cancellable."""
     content_parts: list[str] = []
@@ -566,7 +774,12 @@ def _read_complete_stream(
         first_token_reported = True
         on_first_token()
 
-    for raw_line in _cancellable_response_lines(response, checkpoint):
+    for raw_line in _cancellable_response_lines(
+        response,
+        checkpoint,
+        diagnostics_source=diagnostics_source,
+        request_id=request_id,
+    ):
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line.startswith("data:"):
             continue

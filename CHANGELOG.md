@@ -5,6 +5,8 @@
 ## Не выпущено — 28 августа 2026
 
 - Added: лёгкий Performance / Acceptance Harness расширяет прежний безопасный JSONL сквозными `trace_id/turn_id/task_id/request_id`, monotonic timestamps и voice→STT→LLM→TTS/cancellation milestones без отдельной telemetry-службы.
+- Fixed: отмена streaming `llama.cpp` теперь сначала делает shutdown loopback-сокета и не блокирует разговор на синхронном `HTTPResponse.close()`; active/cancelled/stuck reader counters и shutdown latency остаются наблюдаемыми до фактической уборки.
+- Tests: добавлен живой cancellation-gate активной модели. На Laguna/PoolSide исходное воспроизведение заняло 2016 мс при отмене после 500 мс; после исправления три последовательных повтора завершили cancellation за 500–657 мс и вернули active/stuck readers к нулю.
 - Added: `scripts/performance-report.py` читает активный и ротированные журналы, переживает повреждённые строки, показывает неполные traces и считает `count/min/average/p50/p95/max`; служебное «Слушаю» и ранние статусы не подменяют TTFA ответа.
 - Changed: LLM transport фиксирует первый generated fragment, завершение и реальную cooperative cancellation; STT/TTS reader threads восстанавливают correlation только для своего `request_id`; agent/RAG/tool/model/research durations входят в общую измеряемую шкалу.
 - Privacy: identifiers не содержат пользовательского текста, а prompt/transcript/answer/query/commands и credentials остаются под прежней redaction policy. Старый JSONL читается без миграции.

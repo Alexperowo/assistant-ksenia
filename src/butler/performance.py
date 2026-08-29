@@ -55,6 +55,10 @@ _DIRECT_METRIC_FIELDS = frozenset(
         "completion_tokens",
         "total_tokens",
         "effective_completion_tokens_per_second",
+        "active_reader_threads",
+        "cancelled_streams",
+        "reader_shutdown_latency_ms",
+        "stuck_reader_threads",
     }
 )
 

@@ -1,15 +1,17 @@
 import json
+import socket
 import tempfile
 import threading
 import unittest
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from butler.chat import (
     SentenceChunker,
     _read_complete_stream,
+    _reader_counts,
     complete_chat,
     count_chat_tokens,
     default_max_tokens,
@@ -42,10 +44,20 @@ class _BlockingResponse(_FakeResponse):
         super().__init__(lines=())
         self.reader_started = threading.Event()
         self.release_reader = threading.Event()
+        self.response_socket = Mock()
+        self.response_socket.shutdown.side_effect = (
+            lambda _operation: self.release_reader.set()
+        )
+        self.fp = SimpleNamespace(
+            raw=SimpleNamespace(_sock=self.response_socket)
+        )
 
     def __exit__(self, _type, _value, _traceback):
         self.release_reader.set()
         return False
+
+    def close(self):
+        self.release_reader.set()
 
     def __iter__(self):
         self.reader_started.set()
@@ -56,6 +68,17 @@ class _BlockingResponse(_FakeResponse):
         self.reader_started.set()
         self.release_reader.wait(2)
         return b"{}"
+
+
+class _OneLineThenBlockingResponse(_BlockingResponse):
+    def __init__(self, line: bytes):
+        super().__init__()
+        self.line = line
+
+    def __iter__(self):
+        self.reader_started.set()
+        yield self.line
+        self.release_reader.wait(2)
 
 
 class SentenceChunkerTests(unittest.TestCase):
@@ -343,6 +366,28 @@ class ChatTransportTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "cancelled"):
                     next(stream)
 
+        blocking = _OneLineThenBlockingResponse(
+            (
+                "data: "
+                + json.dumps(events[0], ensure_ascii=False)
+                + "\n"
+            ).encode("utf-8")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self._settings(Path(directory))
+            with patch(
+                "butler.chat.urllib.request.urlopen", return_value=blocking
+            ):
+                abandoned = stream_chat(
+                    settings,
+                    self._messages(),
+                    checkpoint=lambda: None,
+                )
+                self.assertEqual(next(abandoned), "Первый")
+                abandoned.close()
+        self.assertTrue(blocking.release_reader.is_set())
+        self.assertEqual(_reader_counts()["active_reader_threads"], 0)
+
     def test_stream_cancellation_is_observed_while_http_reader_is_stalled(self):
         response = _BlockingResponse()
         checkpoint_calls = 0
@@ -355,7 +400,10 @@ class ChatTransportTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             settings = self._settings(Path(directory))
-            with patch("butler.chat.urllib.request.urlopen", return_value=response):
+            with (
+                patch("butler.chat.urllib.request.urlopen", return_value=response),
+                patch("butler.chat.diagnostic_event") as diagnostic_event,
+            ):
                 with self.assertRaisesRegex(RuntimeError, "while stalled"):
                     list(
                         stream_chat(
@@ -367,6 +415,16 @@ class ChatTransportTests(unittest.TestCase):
 
         self.assertTrue(response.reader_started.is_set())
         self.assertTrue(response.release_reader.is_set())
+        shutdown = next(
+            call
+            for call in diagnostic_event.call_args_list
+            if call.args[2] == "reader_shutdown_observed"
+        )
+        self.assertTrue(shutdown.kwargs["reader_stopped"])
+        self.assertTrue(shutdown.kwargs["socket_shutdown"])
+        self.assertEqual(shutdown.kwargs["stuck_reader_threads"], 0)
+        self.assertEqual(_reader_counts()["active_reader_threads"], 0)
+        response.response_socket.shutdown.assert_called_once_with(socket.SHUT_RDWR)
 
     def test_task_cancellation_is_recorded_as_llm_cancellation(self):
         response = _BlockingResponse()

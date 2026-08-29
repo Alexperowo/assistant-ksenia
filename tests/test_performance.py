@@ -88,6 +88,15 @@ class PerformanceTests(unittest.TestCase):
                 component="chat",
                 duration_ms=800,
             ),
+            _event(
+                "reader_shutdown_observed",
+                2410,
+                component="chat",
+                active_reader_threads=0,
+                cancelled_streams=1,
+                reader_shutdown_latency_ms=12,
+                stuck_reader_threads=0,
+            ),
             _event("voice_start", 4000, trace_id="trace-2"),
         ]
         report = build_report(LoadedEvents(tuple(events), 2, ()))
@@ -102,6 +111,12 @@ class PerformanceTests(unittest.TestCase):
         self.assertEqual(
             report.metrics["chat.completion_completed.duration_ms"].p50,
             800,
+        )
+        self.assertEqual(
+            report.metrics[
+                "chat.reader_shutdown_observed.reader_shutdown_latency_ms"
+            ].p50,
+            12,
         )
         rendered = format_report(report)
         self.assertIn("полных: 1", rendered)
