@@ -16,8 +16,10 @@ from butler.agent import (
 )
 from butler.chat import ChatError, complete_chat
 from butler.config import ConfigError, Settings
+from butler.diagnostics import bind_trace_context
 from butler.diagnostics import event as diagnostic_event
 from butler.diagnostics import exception as diagnostic_exception
+from butler.diagnostics import new_trace_id, trace_scope
 from butler.fast_intents import fast_intent_reply
 from butler.handoff import RoleHandoffStore
 from butler.instance_lock import SingleInstance
@@ -282,7 +284,10 @@ class RoutedAgentSession:
                 if idle_for >= heartbeat_seconds and emit:
                     emit("Ещё немного")
 
-        heartbeat = threading.Thread(target=still_working, daemon=True)
+        heartbeat = threading.Thread(
+            target=bind_trace_context(still_working),
+            daemon=True,
+        )
         heartbeat.start()
         try:
             if control is not None:
@@ -536,6 +541,35 @@ class RoutedAgentSession:
             )
 
     def ask(
+        self,
+        text: str,
+        *,
+        confirmed: bool = False,
+        max_steps: int = 8,
+        on_status: StatusCallback | None = None,
+        on_confirmation: ConfirmationCallback | None = None,
+        control: TaskControl | None = None,
+        on_final_delta: FinalDeltaCallback | None = None,
+    ) -> AgentReply:
+        trace_id = (
+            str(getattr(control, "trace_id", ""))
+            if control is not None and getattr(control, "trace_id", "")
+            else new_trace_id()
+        )
+        task_id = control.task_id if control is not None else ""
+        turn_id = getattr(control, "turn_id", "") if control is not None else ""
+        with trace_scope(trace_id=trace_id, turn_id=turn_id, task_id=task_id):
+            return self._ask_traced(
+                text,
+                confirmed=confirmed,
+                max_steps=max_steps,
+                on_status=on_status,
+                on_confirmation=on_confirmation,
+                control=control,
+                on_final_delta=on_final_delta,
+            )
+
+    def _ask_traced(
         self,
         text: str,
         *,

@@ -25,6 +25,7 @@ from butler.confirmation import confirmation_text
 from butler.config import Settings
 from butler.diagnostics import event as diagnostic_event
 from butler.diagnostics import exception as diagnostic_exception
+from butler.diagnostics import trace_scope
 from butler.model_manager import ModelManagerError
 from butler.orchestrator import RoutedAgentSession
 from butler.speech import SpeechAnnouncer
@@ -324,6 +325,8 @@ class LanApplication:
             "lan",
             "task_submitted",
             task_id=task.id,
+            trace_id=task.id,
+            turn_id=task.id,
             message=message,
             queue_size=self._queue.qsize(),
         )
@@ -460,43 +463,74 @@ class LanApplication:
             try:
                 started = time.monotonic()
                 diagnostic_event(
-                    self.settings, "lan", "task_started", task_id=task_id
+                    self.settings,
+                    "lan",
+                    "task_started",
+                    task_id=task_id,
+                    trace_id=task_id,
+                    turn_id=task_id,
                 )
-                control = TaskControl(self.task_journal, task_id)
+                control = TaskControl(
+                    self.task_journal,
+                    task_id,
+                    trace_id=task_id,
+                    turn_id=task_id,
+                )
                 self.store.update(
                     task_id,
                     "Начинаю",
                     expected_states={TaskState.QUEUED, TaskState.INTERRUPTED},
                 )
-                reply = self._session.ask(
-                    task["message"],
-                    on_status=lambda status, current=task_id: self._announce(current, status),
-                    on_confirmation=lambda name, arguments, message, current=task_id: self._confirm(
-                        current, name, arguments, message
-                    ),
-                    max_steps=self.settings.developer_max_steps,
-                    control=control,
-                )
+                with trace_scope(
+                    trace_id=task_id,
+                    turn_id=task_id,
+                    task_id=task_id,
+                ):
+                    reply = self._session.ask(
+                        task["message"],
+                        on_status=lambda status, current=task_id: self._announce(
+                            current, status
+                        ),
+                        on_confirmation=lambda name, arguments, message, current=task_id: self._confirm(
+                            current, name, arguments, message
+                        ),
+                        max_steps=self.settings.developer_max_steps,
+                        control=control,
+                    )
                 self.store.update(task_id, "Готово", answer=reply.text)
                 diagnostic_event(
                     self.settings,
                     "lan",
                     "task_completed",
                     task_id=task_id,
+                    trace_id=task_id,
+                    turn_id=task_id,
                     duration_ms=round((time.monotonic() - started) * 1000),
                     answer=reply.text,
                 )
-                self.speech.say(reply.text)
+                with trace_scope(
+                    trace_id=task_id,
+                    turn_id=task_id,
+                    task_id=task_id,
+                ):
+                    self.speech.say(reply.text)
             except TaskCancelled:
                 diagnostic_event(
                     self.settings,
                     "lan",
                     "task_cancelled",
                     task_id=task_id,
+                    trace_id=task_id,
+                    turn_id=task_id,
                     duration_ms=round((time.monotonic() - started) * 1000),
                 )
                 self.store.update(task_id, "Отменено")
-                self.speech.say("Задача отменена.")
+                with trace_scope(
+                    trace_id=task_id,
+                    turn_id=task_id,
+                    task_id=task_id,
+                ):
+                    self.speech.say("Задача отменена.")
             except (ChatError, ModelManagerError, OSError, KeyError) as exc:
                 diagnostic_exception(
                     self.settings,
@@ -504,10 +538,17 @@ class LanApplication:
                     "task_failed",
                     exc,
                     task_id=task_id,
+                    trace_id=task_id,
+                    turn_id=task_id,
                     duration_ms=round((time.monotonic() - started) * 1000),
                 )
                 self.store.update(task_id, "Ошибка", error=str(exc))
-                self.speech.say(spoken_agent_error(exc))
+                with trace_scope(
+                    trace_id=task_id,
+                    turn_id=task_id,
+                    task_id=task_id,
+                ):
+                    self.speech.say(spoken_agent_error(exc))
             finally:
                 self._queue.task_done()
 

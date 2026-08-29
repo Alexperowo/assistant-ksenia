@@ -9,11 +9,14 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from butler.diagnostics import current_trace_fields
 from butler.diagnostics import event as diagnostic_event
 from butler.diagnostics import exception as diagnostic_exception
+from butler.diagnostics import milestone as diagnostic_milestone
+from butler.diagnostics import trace_scope
 from butler.speech_text import normalize_for_speech
 
 
@@ -56,6 +59,7 @@ class _PendingSpeech:
     spoken_text: str
     result: dict[str, bool]
     on_complete: SpeechCompletionCallback | None = None
+    trace_fields: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -65,6 +69,7 @@ class _SapiSpeech:
     spoken_text: str
     on_complete: SpeechCompletionCallback | None = None
     cancelled: bool = False
+    trace_fields: dict[str, str] = field(default_factory=dict)
 
 
 class SpeechAnnouncer:
@@ -324,18 +329,42 @@ class SpeechAnnouncer:
                 if bool(worker_event.get("audio_suspiciously_short", False))
                 else "info"
             )
+            request_id = str(worker_event.get("id", ""))
+            with self._lock:
+                traced_pending = self._pending.get(request_id)
+            trace_fields = (
+                dict(traced_pending.trace_fields or {})
+                if traced_pending is not None
+                else {}
+            )
             diagnostic_event(
                 self.diagnostics_source,
                 "tts",
                 f"worker_{event_name}",
                 level=event_level,
+                request_id=request_id,
+                **trace_fields,
                 **{
                     str(key): value
                     for key, value in worker_event.items()
                     if key != "event"
                 },
             )
-            request_id = str(worker_event.get("id", ""))
+            if event_name == "speech_started" and request_id:
+                diagnostic_milestone(
+                    self.diagnostics_source,
+                    "tts_first_chunk_ready",
+                    request_id=request_id,
+                    synthesis_ms=worker_event.get("synthesis_ms", 0),
+                    **trace_fields,
+                )
+                diagnostic_milestone(
+                    self.diagnostics_source,
+                    "audio_first_played",
+                    request_id=request_id,
+                    output_route=worker_event.get("output_route", ""),
+                    **trace_fields,
+                )
             if not request_id or event_name != "speech_done":
                 continue
             with self._lock:
@@ -350,6 +379,21 @@ class SpeechAnnouncer:
                 cancelled=bool(worker_event.get("cancelled", False)),
                 engine="silero",
             )
+            diagnostic_milestone(
+                self.diagnostics_source,
+                "audio_finished",
+                request_id=request_id,
+                ok=completion.ok,
+                cancelled=completion.cancelled,
+                **trace_fields,
+            )
+            if completion.cancelled:
+                diagnostic_milestone(
+                    self.diagnostics_source,
+                    "audio_actually_stopped",
+                    request_id=request_id,
+                    **trace_fields,
+                )
             self._complete_pending(pending, completion)
 
         self._worker_ready.set()
@@ -387,7 +431,8 @@ class SpeechAnnouncer:
         if pending.on_complete is None:
             return
         try:
-            pending.on_complete(completion)
+            with trace_scope(**(pending.trace_fields or {})):
+                pending.on_complete(completion)
         except Exception as exc:
             diagnostic_event(
                 self.diagnostics_source,
@@ -422,6 +467,7 @@ class SpeechAnnouncer:
                 spoken_text=text,
                 result=result,
                 on_complete=on_complete,
+                trace_fields=current_trace_fields(),
             )
             try:
                 self._worker.stdin.write(
@@ -508,6 +554,7 @@ class SpeechAnnouncer:
                 original_text=original_text if original_text is not None else text,
                 spoken_text=text,
                 on_complete=on_complete,
+                trace_fields=current_trace_fields(),
             )
             with self._lock:
                 self._sapi_processes[process] = sapi_speech
@@ -532,6 +579,15 @@ class SpeechAnnouncer:
                     worker_pid=process.pid,
                     returncode=returncode,
                     detail=detail,
+                    **(completed.trace_fields or {}),
+                )
+                diagnostic_milestone(
+                    self.diagnostics_source,
+                    "audio_finished",
+                    request_id=completed.request_id,
+                    ok=returncode == 0,
+                    cancelled=completed.cancelled,
+                    **(completed.trace_fields or {}),
                 )
                 self._complete_sapi(completed, returncode == 0)
                 return returncode == 0
@@ -570,6 +626,7 @@ class SpeechAnnouncer:
             spoken_text=speech.spoken_text,
             result={},
             on_complete=speech.on_complete,
+            trace_fields=dict(speech.trace_fields or {}),
         )
         self._complete_pending(
             pending,
@@ -589,6 +646,9 @@ class SpeechAnnouncer:
         try:
             returncode = process.wait()
             detail = process.stderr.read().strip() if process.stderr is not None else ""
+            with self._lock:
+                tracked = self._sapi_processes.get(process)
+            trace_fields = dict(tracked.trace_fields) if tracked is not None else {}
             diagnostic_event(
                 self.diagnostics_source,
                 "tts",
@@ -597,11 +657,27 @@ class SpeechAnnouncer:
                 worker_pid=process.pid,
                 returncode=returncode,
                 detail=detail,
+                **trace_fields,
             )
         finally:
             with self._lock:
                 completed = self._sapi_processes.pop(process, None)
             if completed is not None:
+                diagnostic_milestone(
+                    self.diagnostics_source,
+                    "audio_finished",
+                    request_id=completed.request_id,
+                    ok=returncode == 0,
+                    cancelled=completed.cancelled,
+                    **(completed.trace_fields or {}),
+                )
+                if completed.cancelled:
+                    diagnostic_milestone(
+                        self.diagnostics_source,
+                        "audio_actually_stopped",
+                        request_id=completed.request_id,
+                        **(completed.trace_fields or {}),
+                    )
                 self._complete_sapi(completed, returncode == 0)
 
     def stop(self) -> None:

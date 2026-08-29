@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from butler.diagnostics import current_trace_fields
 from butler.speech import SpeechAnnouncer, SpeechCompletion, _PendingSpeech
 
 
@@ -91,6 +92,60 @@ class SpeechPrivacyTests(unittest.TestCase):
             self.assertTrue(waiter.is_set())
             self.assertTrue(result["ok"])
             self.assertNotIn("1", announcer._pending)
+
+    def test_worker_milestones_and_callback_restore_request_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = SimpleNamespace(
+                runtime_dir=root / "runtime",
+                raw={"diagnostics": {"enabled": False}},
+            )
+            announcer = SpeechAnnouncer(root, diagnostics_source=settings)
+            observed = []
+            announcer._pending["trace-request"] = _PendingSpeech(
+                waiter=None,
+                original_text="Фраза.",
+                spoken_text="Фраза.",
+                result={},
+                on_complete=lambda _result: observed.append(current_trace_fields()),
+                trace_fields={"trace_id": "trace-tts", "task_id": "task-tts"},
+            )
+            worker = MagicMock()
+            worker.stdout = io.StringIO(
+                json.dumps(
+                    {
+                        "event": "speech_started",
+                        "id": "trace-request",
+                        "synthesis_ms": 25,
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "event": "speech_done",
+                        "id": "trace-request",
+                        "ok": True,
+                    }
+                )
+                + "\n"
+            )
+            worker.poll.return_value = 0
+
+            with patch("butler.speech.diagnostic_milestone") as milestone:
+                announcer._read_worker_events(worker)
+
+            names = [call.args[1] for call in milestone.call_args_list]
+            self.assertEqual(
+                names,
+                ["tts_first_chunk_ready", "audio_first_played", "audio_finished"],
+            )
+            self.assertTrue(
+                all(call.kwargs["trace_id"] == "trace-tts" for call in milestone.call_args_list)
+            )
+            self.assertEqual(
+                observed,
+                [{"trace_id": "trace-tts", "task_id": "task-tts"}],
+            )
 
     def test_tracked_speech_callback_waits_for_worker_completion(self):
         with tempfile.TemporaryDirectory() as directory:

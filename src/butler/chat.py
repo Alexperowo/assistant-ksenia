@@ -12,11 +12,22 @@ from typing import Any
 
 from butler.config import Settings
 from butler.diagnostics import event as diagnostic_event
+from butler.diagnostics import milestone as diagnostic_milestone
+from butler.diagnostics import new_trace_id
 from butler.local_auth import local_api_key
 
 
 class ChatError(RuntimeError):
     pass
+
+
+def _optional_nonnegative_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def default_max_tokens(settings: Settings) -> int:
@@ -242,6 +253,7 @@ def stream_chat(
         {
             "messages": message_list,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "temperature": temperature,
             "max_tokens": selected_max_tokens,
         },
@@ -254,6 +266,7 @@ def stream_chat(
         method="POST",
     )
     started = time.monotonic()
+    request_id = new_trace_id()
     first_token_ms: int | None = None
     output_chars = 0
     completed = False
@@ -261,9 +274,16 @@ def stream_chat(
         settings,
         "chat",
         "stream_started",
+        request_id=request_id,
         max_tokens=selected_max_tokens,
         temperature=temperature,
         **_message_metrics(message_list),
+    )
+    diagnostic_milestone(
+        settings,
+        "llm_request_start",
+        request_id=request_id,
+        streaming=True,
     )
     try:
         if checkpoint is not None:
@@ -290,6 +310,12 @@ def stream_chat(
                 if content:
                     if first_token_ms is None:
                         first_token_ms = round((time.monotonic() - started) * 1000)
+                        diagnostic_milestone(
+                            settings,
+                            "llm_first_token",
+                            request_id=request_id,
+                            first_token_ms=first_token_ms,
+                        )
                     output_chars += len(str(content))
                     yield str(content)
         if checkpoint is not None:
@@ -303,6 +329,7 @@ def stream_chat(
             level="error",
             http_status=exc.code,
             duration_ms=round((time.monotonic() - started) * 1000),
+            request_id=request_id,
         )
         detail = exc.read().decode("utf-8", errors="replace")
         raise ChatError(f"Сервер модели вернул ошибку {exc.code}: {detail}") from exc
@@ -314,8 +341,18 @@ def stream_chat(
             level="error",
             error_type=type(exc).__name__,
             duration_ms=round((time.monotonic() - started) * 1000),
+            request_id=request_id,
         )
         raise ChatError(f"Не удалось связаться с локальной моделью: {exc}") from exc
+    except Exception as exc:
+        if type(exc).__name__ in {"TaskCancelled", "LiveInterrupted"}:
+            diagnostic_milestone(
+                settings,
+                "llm_actually_cancelled",
+                request_id=request_id,
+                error_type=type(exc).__name__,
+            )
+        raise
     finally:
         diagnostic_event(
             settings,
@@ -325,6 +362,13 @@ def stream_chat(
             duration_ms=round((time.monotonic() - started) * 1000),
             first_token_ms=first_token_ms,
             output_chars=output_chars,
+            request_id=request_id,
+        )
+        diagnostic_milestone(
+            settings,
+            "llm_generation_end",
+            request_id=request_id,
+            outcome="completed" if completed else "closed",
         )
 
 
@@ -349,6 +393,8 @@ def complete_chat(
         "temperature": temperature,
         "max_tokens": selected_max_tokens,
     }
+    if streaming:
+        payload["stream_options"] = {"include_usage": True}
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
@@ -359,16 +405,39 @@ def complete_chat(
         method="POST",
     )
     started = time.monotonic()
+    request_id = new_trace_id()
+    first_token_ms: int | None = None
+    outcome = "failed"
     diagnostic_event(
         settings,
         "chat",
         "completion_started",
+        request_id=request_id,
         max_tokens=selected_max_tokens,
         temperature=temperature,
         streaming=streaming,
         tool_count=len(tools or []),
         **_message_metrics(message_list),
     )
+    diagnostic_milestone(
+        settings,
+        "llm_request_start",
+        request_id=request_id,
+        streaming=streaming,
+    )
+
+    def record_first_token() -> None:
+        nonlocal first_token_ms
+        if first_token_ms is not None:
+            return
+        first_token_ms = round((time.monotonic() - started) * 1000)
+        diagnostic_milestone(
+            settings,
+            "llm_first_token",
+            request_id=request_id,
+            first_token_ms=first_token_ms,
+        )
+
     try:
         with urllib.request.urlopen(request, timeout=600) as response:
             if not streaming:
@@ -378,6 +447,7 @@ def complete_chat(
                     response,
                     checkpoint or (lambda: None),
                     on_content_delta=on_content_delta,
+                    on_first_token=record_first_token,
                 )
         if not isinstance(value, dict) or not value.get("choices"):
             raise ChatError("Модель вернула пустой ответ.")
@@ -386,11 +456,19 @@ def complete_chat(
         if not isinstance(message, dict):
             message = {}
         tool_calls = message.get("tool_calls", [])
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        usage = value.get("usage", {})
+        usage = usage if isinstance(usage, dict) else {}
+        prompt_tokens = _optional_nonnegative_int(usage.get("prompt_tokens"))
+        completion_tokens = _optional_nonnegative_int(usage.get("completion_tokens"))
+        total_tokens = _optional_nonnegative_int(usage.get("total_tokens"))
         diagnostic_event(
             settings,
             "chat",
             "completion_completed",
-            duration_ms=round((time.monotonic() - started) * 1000),
+            request_id=request_id,
+            duration_ms=elapsed_ms,
+            first_token_ms=first_token_ms,
             output_chars=len(str(message.get("content", ""))),
             reasoning_chars=len(
                 str(message.get("reasoning_content", message.get("reasoning", "")))
@@ -401,8 +479,18 @@ def complete_chat(
                 if isinstance(first_choice, dict)
                 else ""
             ),
-            usage=value.get("usage", {}),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            effective_completion_tokens_per_second=(
+                round(completion_tokens * 1000 / elapsed_ms, 3)
+                if completion_tokens is not None and elapsed_ms > 0
+                else None
+            ),
+            usage_available=bool(usage),
+            usage=usage,
         )
+        outcome = "completed"
         return value
     except urllib.error.HTTPError as exc:
         diagnostic_event(
@@ -412,6 +500,7 @@ def complete_chat(
             level="error",
             http_status=exc.code,
             duration_ms=round((time.monotonic() - started) * 1000),
+            request_id=request_id,
         )
         detail = exc.read().decode("utf-8", errors="replace")
         raise ChatError(f"Сервер модели вернул ошибку {exc.code}: {detail}") from exc
@@ -422,6 +511,7 @@ def complete_chat(
             "completion_invalid_json",
             level="error",
             duration_ms=round((time.monotonic() - started) * 1000),
+            request_id=request_id,
         )
         raise ChatError("Сервер модели вернул некорректный JSON.") from exc
     except (OSError, urllib.error.URLError) as exc:
@@ -432,8 +522,26 @@ def complete_chat(
             level="error",
             error_type=type(exc).__name__,
             duration_ms=round((time.monotonic() - started) * 1000),
+            request_id=request_id,
         )
         raise ChatError(f"Не удалось связаться с локальной моделью: {exc}") from exc
+    except Exception as exc:
+        if type(exc).__name__ in {"TaskCancelled", "LiveInterrupted"}:
+            outcome = "cancelled"
+            diagnostic_milestone(
+                settings,
+                "llm_actually_cancelled",
+                request_id=request_id,
+                error_type=type(exc).__name__,
+            )
+        raise
+    finally:
+        diagnostic_milestone(
+            settings,
+            "llm_generation_end",
+            request_id=request_id,
+            outcome=outcome,
+        )
 
 
 def _read_complete_stream(
@@ -441,6 +549,7 @@ def _read_complete_stream(
     checkpoint: Callable[[], None],
     *,
     on_content_delta: Callable[[str], None] | None = None,
+    on_first_token: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Aggregate an OpenAI-compatible stream while remaining cancellable."""
     content_parts: list[str] = []
@@ -448,6 +557,15 @@ def _read_complete_stream(
     calls: dict[int, dict[str, Any]] = {}
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
+    first_token_reported = False
+
+    def report_first_token() -> None:
+        nonlocal first_token_reported
+        if first_token_reported or on_first_token is None:
+            return
+        first_token_reported = True
+        on_first_token()
+
     for raw_line in _cancellable_response_lines(response, checkpoint):
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line.startswith("data:"):
@@ -471,15 +589,20 @@ def _read_complete_stream(
             continue
         if delta.get("content") is not None:
             content_delta = str(delta["content"])
+            if content_delta:
+                report_first_token()
             content_parts.append(content_delta)
             if on_content_delta is not None:
                 on_content_delta(content_delta)
         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
         if reasoning is not None:
+            if str(reasoning):
+                report_first_token()
             reasoning_parts.append(str(reasoning))
         for raw_call in delta.get("tool_calls", []) or []:
             if not isinstance(raw_call, dict):
                 continue
+            report_first_token()
             index = int(raw_call.get("index", len(calls)))
             call = calls.setdefault(
                 index,

@@ -360,9 +360,18 @@ class DurableTaskStore:
 
 
 class TaskControl:
-    def __init__(self, store: DurableTaskStore, task_id: str) -> None:
+    def __init__(
+        self,
+        store: DurableTaskStore,
+        task_id: str,
+        *,
+        trace_id: str = "",
+        turn_id: str = "",
+    ) -> None:
         self.store = store
         self.task_id = task_id
+        self.trace_id = trace_id
+        self.turn_id = turn_id
 
     def checkpoint(self) -> None:
         self.store.checkpoint(self.task_id)

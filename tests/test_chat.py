@@ -16,6 +16,7 @@ from butler.chat import (
     normalize_system_messages,
     stream_chat,
 )
+from butler.tasking import TaskCancelled
 
 
 class _FakeResponse:
@@ -156,6 +157,25 @@ class SentenceChunkerTests(unittest.TestCase):
             value["choices"][0]["message"]["content"], "Первая вторая"
         )
 
+    def test_complete_stream_reports_first_generated_delta_once(self):
+        events = [
+            {"choices": [{"delta": {"reasoning_content": "Думаю"}}]},
+            {"choices": [{"delta": {"content": "Ответ"}}]},
+        ]
+        response = [
+            ("data: " + json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8")
+            for event in events
+        ]
+        first_tokens = []
+
+        _read_complete_stream(
+            response,
+            lambda: None,
+            on_first_token=lambda: first_tokens.append(True),
+        )
+
+        self.assertEqual(first_tokens, [True])
+
 
 class ChatTransportTests(unittest.TestCase):
     def _settings(self, runtime_dir: Path):
@@ -180,7 +200,10 @@ class ChatTransportTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             settings = self._settings(Path(directory))
-            with patch("butler.chat.urllib.request.urlopen", return_value=response) as urlopen:
+            with (
+                patch("butler.chat.urllib.request.urlopen", return_value=response) as urlopen,
+                patch("butler.chat.diagnostic_event") as diagnostic_event,
+            ):
                 result = complete_chat(settings, self._messages())
 
         request = urlopen.call_args.args[0]
@@ -192,6 +215,14 @@ class ChatTransportTests(unittest.TestCase):
             "Основные правила.\n\nТолько итог.",
         )
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 600)
+        completed = next(
+            call
+            for call in diagnostic_event.call_args_list
+            if call.args[2] == "completion_completed"
+        )
+        self.assertFalse(completed.kwargs["usage_available"])
+        self.assertIsNone(completed.kwargs["prompt_tokens"])
+        self.assertIsNone(completed.kwargs["completion_tokens"])
 
     def test_tokenizer_transport_normalizes_the_same_messages(self):
         response = _FakeResponse({"tokens": [1, 2, 3]})
@@ -249,7 +280,36 @@ class ChatTransportTests(unittest.TestCase):
         payload = json.loads(request.data.decode("utf-8"))
         self.assertEqual(chunks, ["Ответ"])
         self.assertEqual([item["role"] for item in payload["messages"]], ["system", "user"])
+        self.assertEqual(payload["stream_options"], {"include_usage": True})
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 600)
+
+    def test_stream_transport_emits_correlated_llm_milestones(self):
+        event = {"choices": [{"delta": {"content": "Ответ"}}]}
+        response = _FakeResponse(
+            lines=[
+                ("data: " + json.dumps(event, ensure_ascii=False) + "\n").encode(
+                    "utf-8"
+                )
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self._settings(Path(directory))
+            with (
+                patch("butler.chat.urllib.request.urlopen", return_value=response),
+                patch("butler.chat.diagnostic_milestone") as milestone,
+            ):
+                self.assertEqual(
+                    list(stream_chat(settings, self._messages())),
+                    ["Ответ"],
+                )
+
+        names = [call.args[1] for call in milestone.call_args_list]
+        self.assertEqual(
+            names,
+            ["llm_request_start", "llm_first_token", "llm_generation_end"],
+        )
+        request_ids = {call.kwargs["request_id"] for call in milestone.call_args_list}
+        self.assertEqual(len(request_ids), 1)
 
     def test_stream_checkpoint_stops_before_next_delta(self):
         events = [
@@ -307,6 +367,35 @@ class ChatTransportTests(unittest.TestCase):
 
         self.assertTrue(response.reader_started.is_set())
         self.assertTrue(response.release_reader.is_set())
+
+    def test_task_cancellation_is_recorded_as_llm_cancellation(self):
+        response = _BlockingResponse()
+        checkpoint_calls = 0
+
+        def checkpoint() -> None:
+            nonlocal checkpoint_calls
+            checkpoint_calls += 1
+            if checkpoint_calls >= 2:
+                raise TaskCancelled("cancelled")
+
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self._settings(Path(directory))
+            with (
+                patch("butler.chat.urllib.request.urlopen", return_value=response),
+                patch("butler.chat.diagnostic_milestone") as milestone,
+            ):
+                with self.assertRaises(TaskCancelled):
+                    list(
+                        stream_chat(
+                            settings,
+                            self._messages(),
+                            checkpoint=checkpoint,
+                        )
+                    )
+
+        names = [call.args[1] for call in milestone.call_args_list]
+        self.assertIn("llm_actually_cancelled", names)
+        self.assertEqual(names[-1], "llm_generation_end")
 
 
 if __name__ == "__main__":

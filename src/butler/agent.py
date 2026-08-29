@@ -10,6 +10,7 @@ from typing import Any, Callable
 from butler.approval import approval_scope, reusable_approval
 from butler.chat import ChatError, complete_chat, count_chat_tokens
 from butler.config import Settings
+from butler.diagnostics import bind_trace_context
 from butler.diagnostics import event as diagnostic_event
 from butler.diagnostics import exception as diagnostic_exception
 from butler.memory import ConversationMemory
@@ -490,7 +491,10 @@ class AgentSession:
                 if idle_for >= heartbeat_seconds:
                     emit("Ещё немного", allow_repeat=True)
 
-        heartbeat = threading.Thread(target=still_working, daemon=True)
+        heartbeat = threading.Thread(
+            target=bind_trace_context(still_working),
+            daemon=True,
+        )
         heartbeat.start()
         self.messages.append({"role": "user", "content": text})
         events: list[AgentToolEvent] = []
@@ -555,6 +559,7 @@ class AgentSession:
                     tool_event_count=len(events),
                     message_count=len(request_messages),
                 )
+                model_step_started = time.monotonic()
                 final_text_stream = _SafeFinalTextStream(
                     on_final_delta if final_turn else None
                 )
@@ -596,7 +601,23 @@ class AgentSession:
                     final_turn=final_turn,
                     tool_call_count=len(calls) if isinstance(calls, list) else 0,
                     answer_chars=len(str(message.get("content") or "")),
+                    duration_ms=round(
+                        (time.monotonic() - model_step_started) * 1000
+                    ),
                 )
+                if calls:
+                    diagnostic_event(
+                        self.settings,
+                        "agent",
+                        "tool_selection_completed",
+                        step=step,
+                        tool_call_count=(
+                            len(calls) if isinstance(calls, list) else 0
+                        ),
+                        duration_ms=round(
+                            (time.monotonic() - model_step_started) * 1000
+                        ),
+                    )
                 if not calls:
                     emit("Формулирую ответ")
                     answer = str(message.get("content") or "").strip()

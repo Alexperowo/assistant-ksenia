@@ -6,7 +6,15 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from butler.diagnostics import event, safe_url, text_metadata
+from butler.diagnostics import (
+    bind_trace_context,
+    current_trace_fields,
+    event,
+    new_trace_id,
+    safe_url,
+    text_metadata,
+    trace_scope,
+)
 
 
 class DiagnosticsTests(unittest.TestCase):
@@ -101,6 +109,54 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(saved["pid"], os.getpid())
             self.assertEqual(saved["reported_pid"], 999999)
             self.assertEqual(saved["reported_session_id"], "forged")
+
+    def test_trace_scope_is_nested_and_does_not_leak(self):
+        self.assertEqual(current_trace_fields(), {})
+        trace_id = new_trace_id()
+        with trace_scope(trace_id=trace_id, turn_id=7, ignored="value"):
+            self.assertEqual(
+                current_trace_fields(),
+                {"trace_id": trace_id, "turn_id": "7"},
+            )
+            with trace_scope(task_id="task-1"):
+                self.assertEqual(
+                    current_trace_fields(),
+                    {
+                        "trace_id": trace_id,
+                        "turn_id": "7",
+                        "task_id": "task-1",
+                    },
+                )
+            self.assertNotIn("task_id", current_trace_fields())
+        self.assertEqual(current_trace_fields(), {})
+
+    def test_trace_fields_are_written_but_cannot_replace_event_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self._settings(Path(directory))
+            with trace_scope(trace_id="trace-1", task_id="task-1"):
+                event(settings, "test", "traced", trace_id="trace-explicit")
+            saved = json.loads(
+                (Path(directory) / "logs" / "diagnostics.jsonl").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(saved["trace_id"], "trace-explicit")
+            self.assertEqual(saved["task_id"], "task-1")
+            self.assertIsInstance(saved["monotonic_ns"], int)
+
+    def test_trace_snapshot_can_be_bound_to_a_background_thread(self):
+        observed = []
+        with trace_scope(trace_id="trace-thread", task_id="task-thread"):
+            target = bind_trace_context(
+                lambda: observed.append(current_trace_fields())
+            )
+        thread = threading.Thread(target=target)
+        thread.start()
+        thread.join()
+        self.assertEqual(
+            observed,
+            [{"trace_id": "trace-thread", "task_id": "task-thread"}],
+        )
 
 
 if __name__ == "__main__":

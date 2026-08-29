@@ -13,7 +13,7 @@
 ### 1. Статический и быстрый слой
 
 - синтаксис PowerShell, JSON и Python;
-- не менее 329 unit/integration-тестов;
+- не менее 343 unit/integration-тестов;
 - отсутствие неожиданных warnings и skips;
 - три полных shuffled-order запуска;
 - тайм-ауты сети/subprocess и запрет shell;
@@ -102,6 +102,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test-clean-packa
 ```
 
 Временная папка удаляется только после проверки, что она находится внутри `runtime/distribution-tests` и имеет ожидаемое имя. Параметр `-KeepWorkingDirectory` сохраняет её для ручного разбора ошибки.
+
+Сводка реальных задержек и полноты traces:
+
+```powershell
+python scripts\performance-report.py
+python scripts\performance-report.py --json
+```
+
+Регрессии performance harness проверяют вложенный и фоновый trace context, отсутствие утечки в следующую задачу, redaction, STT/TTS request correlation, первый LLM token, cancellation, повреждённый JSONL, rotation order, percentiles, неполные traces и исключение приглашения «Слушаю» из TTFA.
 
 ## Критерий завершения изменения
 

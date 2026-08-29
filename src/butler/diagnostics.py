@@ -10,11 +10,14 @@ import threading
 import time
 import traceback
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 
 from butler.atomic_io import exclusive_file_lock
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -22,6 +25,10 @@ _LOCK = threading.RLock()
 _SEQUENCE = itertools.count(1)
 _PROCESS_STARTED = time.monotonic()
 _SESSION_ID = os.environ.get("BUTLER_SESSION_ID", "").strip() or uuid.uuid4().hex[:16]
+_TRACE_FIELDS: ContextVar[dict[str, str]] = ContextVar(
+    "butler_diagnostic_trace_fields", default={}
+)
+_TRACE_FIELD_NAMES = frozenset({"run_id", "trace_id", "turn_id", "task_id"})
 _SENSITIVE_KEYS = {
     "answer",
     "authorization",
@@ -58,7 +65,10 @@ _SAFE_METADATA_SUFFIXES = (
 _SAFE_METADATA_KEYS = {
     "command_name",
     "request_id",
+    "run_id",
     "task_id",
+    "trace_id",
+    "turn_id",
     "worker_pid",
 }
 _RESERVED_EVENT_KEYS = {
@@ -66,6 +76,7 @@ _RESERVED_EVENT_KEYS = {
     "event",
     "level",
     "pid",
+    "monotonic_ns",
     "process_uptime_ms",
     "sequence",
     "session_id",
@@ -82,6 +93,48 @@ _URL = re.compile(r"https?://[^\s<>\"']+")
 
 def session_id() -> str:
     return _SESSION_ID
+
+
+def new_trace_id() -> str:
+    """Return an opaque local correlation id without user content."""
+    return uuid.uuid4().hex
+
+
+def current_trace_fields() -> dict[str, str]:
+    """Return a detached snapshot suitable for an async request record."""
+    return dict(_TRACE_FIELDS.get())
+
+
+@contextmanager
+def trace_scope(**fields: object) -> Iterator[dict[str, str]]:
+    """Attach stable correlation fields to diagnostics in the current context.
+
+    Context variables intentionally do not leak into unrelated threads. Services
+    with long-lived reader threads capture ``current_trace_fields()`` when they
+    enqueue a request and restore the snapshot while handling its result.
+    """
+    inherited = current_trace_fields()
+    for key, value in fields.items():
+        normalized = str(key).casefold()
+        if normalized not in _TRACE_FIELD_NAMES or value in (None, ""):
+            continue
+        inherited[normalized] = str(value)
+    token = _TRACE_FIELDS.set(inherited)
+    try:
+        yield dict(inherited)
+    finally:
+        _TRACE_FIELDS.reset(token)
+
+
+def bind_trace_context(callback: Callable[..., Any]) -> Callable[..., Any]:
+    """Bind the current correlation snapshot to a future thread callback."""
+    fields = current_trace_fields()
+
+    def traced(*args: object, **kwargs: object) -> Any:
+        with trace_scope(**fields):
+            return callback(*args, **kwargs)
+
+    return traced
 
 
 def enabled(source: object) -> bool:
@@ -222,16 +275,21 @@ def event(
         if not enabled:
             return None
         target = runtime_dir / "logs" / "diagnostics.jsonl"
+        combined_fields: dict[str, object] = {
+            **current_trace_fields(),
+            **fields,
+        }
         safe_fields = {
             (
                 f"reported_{key}"
                 if str(key).casefold() in _RESERVED_EVENT_KEYS
                 else str(key)
             ): safe_value(value, str(key))
-            for key, value in fields.items()
+            for key, value in combined_fields.items()
         }
         payload = {
             "time": datetime.now(timezone.utc).isoformat(),
+            "monotonic_ns": time.monotonic_ns(),
             "session_id": _SESSION_ID,
             "sequence": next(_SEQUENCE),
             "process_uptime_ms": round((time.monotonic() - _PROCESS_STARTED) * 1000),
@@ -253,6 +311,15 @@ def event(
         return target
     except Exception:
         return None
+
+
+def milestone(
+    source: object,
+    name: str,
+    **fields: object,
+) -> Path | None:
+    """Record one privacy-safe timestamp in an end-to-end performance trace."""
+    return event(source, "performance", name, milestone=True, **fields)
 
 
 def exception(

@@ -30,6 +30,8 @@ from butler.config import (
 from butler.doctor import run_checks
 from butler.diagnostics import event as diagnostic_event
 from butler.diagnostics import exception as diagnostic_exception
+from butler.diagnostics import milestone as diagnostic_milestone
+from butler.diagnostics import new_trace_id, trace_scope
 from butler.diagnostic_report import format_summary, summarize
 from butler.instance_lock import SingleInstance
 from butler.lan import run_lan_server
@@ -774,9 +776,12 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                     flush=True,
                 )
             speech.stop()
-            event = recognizer.listen_after_prompt(
-                lambda: speech.say_and_wait("Слушаю.")
-            )
+            trace_id = new_trace_id()
+            turn_id = new_trace_id()
+            with trace_scope(trace_id=trace_id, turn_id=turn_id):
+                event = recognizer.listen_after_prompt(
+                    lambda: speech.say_and_wait("Слушаю.")
+                )
         except WakeListenerTimeout:
             # The wake worker is periodically reopened so a transient Bluetooth
             # problem can recover. An idle window is normal and must stay silent.
@@ -811,6 +816,8 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             settings,
             "voice_agent",
             "command_recognized",
+            trace_id=trace_id,
+            turn_id=turn_id,
             transcript=user_text,
             engine=event.get("engine", ""),
             device=event.get("model_device", ""),
@@ -828,11 +835,12 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
         if normalized_voice in {"ксения слушай", "ксения"}:
             print("Распознана только повторная фраза активации; задача не отправлена модели.")
             try:
-                event = recognizer.listen_after_prompt(
-                    lambda: speech.say_and_wait(
-                        "Я очистила старую запись. Теперь скажите саму задачу."
+                with trace_scope(trace_id=trace_id, turn_id=turn_id):
+                    event = recognizer.listen_after_prompt(
+                        lambda: speech.say_and_wait(
+                            "Я очистила старую запись. Теперь скажите саму задачу."
+                        )
                     )
-                )
             except SpeechRecognitionError as exc:
                 print(f"Ошибка микрофона: {exc}")
                 speech.say_and_wait(_spoken_microphone_error(exc))
@@ -935,9 +943,16 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             "voice_agent",
             "task_started",
             task_id=task.id,
+            trace_id=trace_id,
+            turn_id=turn_id,
             request=user_text,
         )
-        control = TaskControl(task_store, task.id)
+        control = TaskControl(
+            task_store,
+            task.id,
+            trace_id=trace_id,
+            turn_id=turn_id,
+        )
         task_store.transition(task.id, TaskState.RUNNING, "Начинаю")
         task_finished = threading.Event()
         agent_finished = threading.Event()
@@ -994,6 +1009,12 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                         wake_event=event_name,
                     )
                     continue
+                diagnostic_milestone(
+                    settings,
+                    "interrupt_detected",
+                    task_id=task.id,
+                    source=event_name,
+                )
                 response_only = live_output is not None and agent_finished.is_set()
                 if not response_only:
                     try:
@@ -1017,7 +1038,18 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                 )
                 return
 
-        stop_monitor = threading.Thread(target=monitor_voice_stop, daemon=True)
+        def monitor_voice_stop_traced() -> None:
+            with trace_scope(
+                trace_id=trace_id,
+                turn_id=turn_id,
+                task_id=task.id,
+            ):
+                monitor_voice_stop()
+
+        stop_monitor = threading.Thread(
+            target=monitor_voice_stop_traced,
+            daemon=True,
+        )
         stop_monitor.start()
         live_snapshot = None
 
@@ -1033,22 +1065,37 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                 live_output.accept_delta(live_token, delta)
 
         try:
-            reply = session.ask(
-                user_text,
-                on_status=report_status,
-                on_confirmation=confirm_action,
-                max_steps=settings.developer_max_steps,
-                control=control,
-                on_final_delta=accept_final_delta if live_enabled else None,
-            )
+            with trace_scope(
+                trace_id=trace_id,
+                turn_id=turn_id,
+                task_id=task.id,
+            ):
+                reply = session.ask(
+                    user_text,
+                    on_status=report_status,
+                    on_confirmation=confirm_action,
+                    max_steps=settings.developer_max_steps,
+                    control=control,
+                    on_final_delta=accept_final_delta if live_enabled else None,
+                )
             agent_finished.set()
             if live_output is not None and live_token is not None:
-                live_output.finish_response(live_token)
+                with trace_scope(
+                    trace_id=trace_id,
+                    turn_id=turn_id,
+                    task_id=task.id,
+                ):
+                    live_output.finish_response(live_token)
                 if not live_output.session.wait_until_settled(
                     live_token.turn_id,
                     timeout=live_playback_timeout,
                 ):
-                    live_output.interrupt("playback_timeout")
+                    with trace_scope(
+                        trace_id=trace_id,
+                        turn_id=turn_id,
+                        task_id=task.id,
+                    ):
+                        live_output.interrupt("playback_timeout")
                     diagnostic_event(
                         settings,
                         "voice_agent",
@@ -1072,13 +1119,23 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                         spoken_chars=len(live_snapshot.spoken_text),
                     )
                     live_enabled = False
-                    speech.say_and_wait(
-                        "Потоковый режим безопасно выключен: память ответа не совпала. "
-                        "Обычный голосовой режим продолжит работу."
-                    )
+                    with trace_scope(
+                        trace_id=trace_id,
+                        turn_id=turn_id,
+                        task_id=task.id,
+                    ):
+                        speech.say_and_wait(
+                            "Потоковый режим безопасно выключен: память ответа не совпала. "
+                            "Обычный голосовой режим продолжит работу."
+                        )
         except TaskCancelled:
             if live_output is not None:
-                live_snapshot = live_output.interrupt("task_cancelled")
+                with trace_scope(
+                    trace_id=trace_id,
+                    turn_id=turn_id,
+                    task_id=task.id,
+                ):
+                    live_snapshot = live_output.interrupt("task_cancelled")
                 session.commit_spoken_reply(
                     live_snapshot.generated_text,
                     live_snapshot.spoken_text,
@@ -1100,14 +1157,26 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                 "voice_agent",
                 "task_cancelled",
                 task_id=task.id,
+                trace_id=trace_id,
+                turn_id=turn_id,
                 duration_ms=round((time.monotonic() - task_started) * 1000),
             )
             print("Задача отменена.")
-            speech.say_and_wait("Задача отменена.")
+            with trace_scope(
+                trace_id=trace_id,
+                turn_id=turn_id,
+                task_id=task.id,
+            ):
+                speech.say_and_wait("Задача отменена.")
             continue
         except ChatError as exc:
             if live_output is not None:
-                live_snapshot = live_output.interrupt("agent_error")
+                with trace_scope(
+                    trace_id=trace_id,
+                    turn_id=turn_id,
+                    task_id=task.id,
+                ):
+                    live_snapshot = live_output.interrupt("agent_error")
                 session.commit_spoken_reply(
                     live_snapshot.generated_text,
                     live_snapshot.spoken_text,
@@ -1118,6 +1187,8 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                 "task_failed",
                 exc,
                 task_id=task.id,
+                trace_id=trace_id,
+                turn_id=turn_id,
                 duration_ms=round((time.monotonic() - task_started) * 1000),
             )
             task_store.transition(
@@ -1134,7 +1205,12 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                 resumable=True,
             )
             print(f"Ошибка агента: {exc}")
-            speech.say_and_wait(_spoken_agent_error(exc))
+            with trace_scope(
+                trace_id=trace_id,
+                turn_id=turn_id,
+                task_id=task.id,
+            ):
+                speech.say_and_wait(_spoken_agent_error(exc))
             continue
         finally:
             task_finished.set()
@@ -1158,18 +1234,30 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             "voice_agent",
             "task_completed",
             task_id=task.id,
+            trace_id=trace_id,
+            turn_id=turn_id,
             duration_ms=round((time.monotonic() - task_started) * 1000),
             answer=reply.text,
         )
         print(f"Ксения: {reply.text}\n")
         if live_output is not None and trusted_task_used:
-            speech.say_and_wait(TRUSTED_TASK_FINISHED)
+            with trace_scope(
+                trace_id=trace_id,
+                turn_id=turn_id,
+                task_id=task.id,
+            ):
+                speech.say_and_wait(TRUSTED_TASK_FINISHED)
         elif live_output is None:
             # The final answer is more important than queued progress messages.
             speech.stop()
             if trusted_task_used:
                 speech.say(TRUSTED_TASK_FINISHED)
-            speech.say(reply.text)
+            with trace_scope(
+                trace_id=trace_id,
+                turn_id=turn_id,
+                task_id=task.id,
+            ):
+                speech.say(reply.text)
 
 
 def _agent_chat(settings, speech: SpeechAnnouncer) -> int:
@@ -1216,16 +1304,27 @@ def _agent_chat(settings, speech: SpeechAnnouncer) -> int:
                 )
                 return approved
 
+            trace_id = new_trace_id()
             task = task_store.create(user_text, channel="console")
-            control = TaskControl(task_store, task.id)
-            task_store.transition(task.id, TaskState.RUNNING, "Начинаю")
-            reply = session.ask(
-                user_text,
-                on_status=report_status,
-                on_confirmation=confirm_action,
-                max_steps=settings.developer_max_steps,
-                control=control,
+            control = TaskControl(
+                task_store,
+                task.id,
+                trace_id=trace_id,
+                turn_id=task.id,
             )
+            task_store.transition(task.id, TaskState.RUNNING, "Начинаю")
+            with trace_scope(
+                trace_id=trace_id,
+                turn_id=task.id,
+                task_id=task.id,
+            ):
+                reply = session.ask(
+                    user_text,
+                    on_status=report_status,
+                    on_confirmation=confirm_action,
+                    max_steps=settings.developer_max_steps,
+                    control=control,
+                )
             task_store.transition(
                 task.id,
                 TaskState.COMPLETED,
@@ -1237,7 +1336,12 @@ def _agent_chat(settings, speech: SpeechAnnouncer) -> int:
             for event in reply.tool_events:
                 print(f"[инструмент: {event.name} → {event.result.status}]")
             print(f"Ксения: {reply.text}\n")
-            speech.say(reply.text)
+            with trace_scope(
+                trace_id=trace_id,
+                turn_id=task.id,
+                task_id=task.id,
+            ):
+                speech.say(reply.text)
         except TaskCancelled:
             print("Задача отменена.\n")
             speech.say("Задача отменена.")

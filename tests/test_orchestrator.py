@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 from butler.config import load_settings
 from butler.chat import ChatError
 from butler.agent import AgentReply
+from butler.diagnostics import current_trace_fields
 from butler.instance_lock import SingleInstance
 from butler.handoff import RoleHandoffStore
 from butler.orchestrator import (
@@ -24,6 +25,25 @@ from butler.tools import ToolResult
 
 
 class OrchestratorTests(unittest.TestCase):
+    def test_public_request_restores_task_trace_for_entire_route(self):
+        session = RoutedAgentSession(load_settings())
+        observed = []
+
+        def routed(*_args, **_kwargs):
+            observed.append(current_trace_fields())
+            return AgentReply("Готово", ())
+
+        session._ask_traced = Mock(side_effect=routed)
+        control = SimpleNamespace(task_id="task-route", trace_id="trace-route")
+
+        reply = session.ask("Проверка", control=control)
+
+        self.assertEqual(reply.text, "Готово")
+        self.assertEqual(
+            observed,
+            [{"trace_id": "trace-route", "task_id": "task-route"}],
+        )
+
     def test_capability_roles_select_models_without_changing_tools(self):
         settings = load_settings()
         raw = deepcopy(settings.raw)

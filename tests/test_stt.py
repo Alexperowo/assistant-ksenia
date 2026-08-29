@@ -65,6 +65,72 @@ class SpeechRecognizerTests(unittest.TestCase):
             self.assertEqual(call.kwargs["signal_level"], 1736)
             self.assertNotIn("level", call.kwargs)
 
+    def test_worker_progress_restores_trace_and_emits_first_partial_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = SimpleNamespace(
+                root=root,
+                runtime_dir=root / "runtime",
+                raw={"diagnostics": {"enabled": False}, "voice": {}},
+            )
+            recognizer = SpeechRecognizer(settings)
+            recognizer._request_trace_fields["17"] = {
+                "trace_id": "trace-stt",
+                "task_id": "task-stt",
+            }
+            worker = MagicMock()
+            worker.stdout = io.StringIO(
+                "\n".join(
+                    json.dumps(item, ensure_ascii=False)
+                    for item in (
+                        {"event": "voice_started", "id": "17"},
+                        {
+                            "event": "partial_transcript",
+                            "id": "17",
+                            "text": "личная команда",
+                            "text_chars": 14,
+                        },
+                        {
+                            "event": "partial_transcript",
+                            "id": "17",
+                            "text": "личная команда целиком",
+                            "text_chars": 21,
+                        },
+                        {
+                            "event": "capture_completed",
+                            "id": "17",
+                            "endpoint_reason": "complete_transcript",
+                        },
+                    )
+                )
+                + "\n"
+            )
+
+            with (
+                patch("butler.stt.diagnostic_event") as diagnostic,
+                patch("butler.stt.diagnostic_milestone") as milestone,
+            ):
+                recognizer._read_service(worker)
+
+            self.assertTrue(
+                all(
+                    call.kwargs["trace_id"] == "trace-stt"
+                    for call in diagnostic.call_args_list
+                )
+            )
+            names = [call.args[1] for call in milestone.call_args_list]
+            self.assertEqual(
+                names,
+                ["voice_start", "stt_partial_first", "voice_end", "turn_detected"],
+            )
+            partial = next(
+                call
+                for call in milestone.call_args_list
+                if call.args[1] == "stt_partial_first"
+            )
+            self.assertEqual(partial.kwargs["partial_transcript_chars"], 14)
+            self.assertNotIn("text", partial.kwargs)
+
     def test_progress_events_do_not_finish_a_listen_request(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -86,7 +86,7 @@ flowchart LR
 
 На текущей системе Александра с Windows 11, RTX 2080 Ti 22 ГБ и 48 ГБ ОЗУ проверены:
 
-- 329 unit/integration-тестов и три дополнительных прогона в случайном порядке;
+- 343 unit/integration-теста и три дополнительных прогона в случайном порядке;
 - официальный `llama.cpp b10621` (stable v0.3.0), CUDA 12.4, с закреплёнными SHA-256;
 - отдельный закреплённый PoolSide backend commit `06f8ceb` для Laguna/DFlash, с patch provenance и SHA-256 runtime-файлов;
 - конфигурационно-управляемые DFlash, MTP, multimodal projector и квантованный KV;
@@ -154,6 +154,7 @@ INSTALL.cmd -InstallRoot "<каталог среды>" -ModelStorageRoot "<ка�
 | [DATA-AND-MIGRATIONS.md](docs/DATA-AND-MIGRATIONS.md) | Память, базы и миграции |
 | [SECURITY.md](docs/SECURITY.md) | Модель угроз и технические ограничения |
 | [TESTING.md](docs/TESTING.md) | Стратегия автоматических и живых проверок |
+| [PERFORMANCE.md](docs/PERFORMANCE.md) | Сквозные trace_id, milestones, p50/p95 и измерение Live-задержек |
 | [MAINTENANCE.md](docs/MAINTENANCE.md) | Обновление и откат |
 | [DECISIONS.md](docs/DECISIONS.md) | Причины ключевых архитектурных решений |
 

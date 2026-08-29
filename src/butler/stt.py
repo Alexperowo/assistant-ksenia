@@ -11,8 +11,10 @@ from pathlib import Path
 from typing import Callable
 
 from butler.config import Settings
+from butler.diagnostics import current_trace_fields
 from butler.diagnostics import event as diagnostic_event
 from butler.diagnostics import exception as diagnostic_exception
+from butler.diagnostics import milestone as diagnostic_milestone
 
 
 class SpeechRecognitionError(RuntimeError):
@@ -96,6 +98,9 @@ class SpeechRecognizer:
         self._counter = 0
         self._fallback_reason_logged = False
         self._lock = threading.RLock()
+        self._request_trace_lock = threading.Lock()
+        self._request_trace_fields: dict[str, dict[str, str]] = {}
+        self._partial_milestones: set[str] = set()
         atexit.register(self.close)
 
     def _read_service(self, process: subprocess.Popen[str]) -> None:
@@ -115,6 +120,18 @@ class SpeechRecognizer:
                 continue
             if isinstance(worker_event, dict):
                 event_name = str(worker_event.get("event", "unknown"))
+                request_id = str(worker_event.get("id", ""))
+                with self._request_trace_lock:
+                    trace_fields = dict(
+                        self._request_trace_fields.get(request_id, {})
+                    )
+                    first_partial = (
+                        event_name == "partial_transcript"
+                        and bool(request_id)
+                        and request_id not in self._partial_milestones
+                    )
+                    if first_partial:
+                        self._partial_milestones.add(request_id)
                 worker_fields = {
                     (
                         "signal_level"
@@ -130,8 +147,42 @@ class SpeechRecognizer:
                     self.settings,
                     "stt",
                     f"worker_{event_name}",
+                    request_id=request_id,
+                    **trace_fields,
                     **worker_fields,
                 )
+                if event_name == "voice_started":
+                    diagnostic_milestone(
+                        self.settings,
+                        "voice_start",
+                        request_id=request_id,
+                        **trace_fields,
+                    )
+                elif event_name == "capture_completed":
+                    diagnostic_milestone(
+                        self.settings,
+                        "voice_end",
+                        request_id=request_id,
+                        endpoint_reason=worker_event.get("endpoint_reason", ""),
+                        **trace_fields,
+                    )
+                    diagnostic_milestone(
+                        self.settings,
+                        "turn_detected",
+                        request_id=request_id,
+                        endpoint_reason=worker_event.get("endpoint_reason", ""),
+                        **trace_fields,
+                    )
+                if first_partial:
+                    diagnostic_milestone(
+                        self.settings,
+                        "stt_partial_first",
+                        request_id=request_id,
+                        partial_transcript_chars=len(
+                            str(worker_event.get("text", ""))
+                        ),
+                        **trace_fields,
+                    )
                 self._events.put(worker_event)
         self._events.put({"event": "worker_exit"})
 
@@ -289,6 +340,11 @@ class SpeechRecognizer:
                 return None
             self._counter += 1
             request_id = str(self._counter)
+            with self._request_trace_lock:
+                self._request_trace_fields = {
+                    request_id: current_trace_fields()
+                }
+                self._partial_milestones.discard(request_id)
             started = time.monotonic()
             diagnostic_event(
                 self.settings,
@@ -358,6 +414,9 @@ class SpeechRecognizer:
                         continue
                     break
             except (BrokenPipeError, OSError, queue.Empty) as exc:
+                with self._request_trace_lock:
+                    self._request_trace_fields.pop(request_id, None)
+                    self._partial_milestones.discard(request_id)
                 diagnostic_exception(
                     self.settings,
                     "stt",
@@ -372,6 +431,9 @@ class SpeechRecognizer:
                     "повторная запись без нового приглашения не запущена."
                 ) from exc
             if event.get("event") != "transcript":
+                with self._request_trace_lock:
+                    self._request_trace_fields.pop(request_id, None)
+                    self._partial_milestones.discard(request_id)
                 diagnostic_event(
                     self.settings,
                     "stt",
@@ -394,6 +456,16 @@ class SpeechRecognizer:
                 model_device=event.get("model_device", ""),
                 **_audio_telemetry(event),
             )
+            diagnostic_milestone(
+                self.settings,
+                "stt_final",
+                request_id=request_id,
+                engine=event.get("engine", ""),
+                model_device=event.get("model_device", ""),
+            )
+            with self._request_trace_lock:
+                self._request_trace_fields.pop(request_id, None)
+                self._partial_milestones.discard(request_id)
             return event
 
     def listen_after_prompt(
@@ -528,6 +600,13 @@ class SpeechRecognizer:
             engine=event.get("engine", ""),
             **_audio_telemetry(event),
         )
+        diagnostic_milestone(
+            self.settings,
+            "stt_final",
+            engine=event.get("engine", ""),
+            model_device=event.get("model_device", ""),
+            fallback=True,
+        )
         return event
 
     def close(self) -> None:
@@ -539,6 +618,9 @@ class SpeechRecognizer:
             self._reader = None
             self._stderr_reader = None
             self._service_info = {}
+        with self._request_trace_lock:
+            self._request_trace_fields.clear()
+            self._partial_milestones.clear()
         if process is None:
             return
         try:

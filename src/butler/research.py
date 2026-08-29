@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from butler.agent import AgentReply, AgentSession, AgentToolEvent, StatusCallback
 from butler.chat import ChatError, complete_chat
 from butler.config import Settings
+from butler.diagnostics import bind_trace_context
 from butler.diagnostics import event as diagnostic_event
 from butler.diagnostics import exception as diagnostic_exception
 from butler.tasking import TaskControl
@@ -617,7 +618,10 @@ class ResearchCoordinator:
                     + _russian_count(included_source_count, "источник", "источника", "источников")
                 )
 
-        heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+        heartbeat_thread = threading.Thread(
+            target=bind_trace_context(heartbeat),
+            daemon=True,
+        )
         heartbeat_thread.start()
         try:
             response = complete_chat(

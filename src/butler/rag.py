@@ -5,6 +5,7 @@ import math
 import os
 import re
 import sqlite3
+import time
 from array import array
 from collections.abc import Iterable, Sequence
 from contextlib import closing
@@ -513,6 +514,7 @@ class HybridRagIndex:
         clean_query = re.sub(r"\s+", " ", str(query or "")).strip()
         if not clean_query:
             return []
+        started = time.monotonic()
         limit = max(1, min(int(limit), 30))
         min_vector_similarity = float(min_vector_similarity)
         if not math.isfinite(min_vector_similarity) or not 0 <= min_vector_similarity <= 1:
@@ -611,6 +613,7 @@ class HybridRagIndex:
             candidate_count=len(candidate_ids),
             accepted_candidate_count=len(combined),
             indexed_chunk_count=len(rows),
+            duration_ms=round((time.monotonic() - started) * 1000),
             embedding_model=embedder.model_id,
             min_vector_similarity=min_vector_similarity,
         )

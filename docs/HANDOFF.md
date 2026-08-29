@@ -13,6 +13,7 @@
 3. Откройте `config/user.json` только для понимания путей; не публикуйте и не заменяйте его.
 4. Проверьте `runtime/state.json`, фактический PID и командную строку процесса модели.
 5. Прочитайте конец `runtime/audit/latest.txt` и последние безопасные события `runtime/logs/diagnostics.jsonl`.
+   Для конкретной медленной реплики выполните `python scripts\performance-report.py --trace-id <trace_id>`; схема и границы измерений описаны в `docs/PERFORMANCE.md`.
 6. Запустите `AUDIT.cmd`, если состояние компьютера позволяет выполнить тяжёлые проверки.
 7. Сверьте незакрытые пункты в `docs/ROADMAP.md`.
 
@@ -23,6 +24,7 @@
 - Семантический каталог без модельных ветвлений в коде: `generalist` Laguna+DFlash и `reasoning` Qwen+MTP/mmproj по 96K; выключенный 16K `candidate` — точно закреплённый conFIGur8tor Ornith APEX MTP Fixed. Старый A/B другого SC117-файла к нему не относится.
 - Голос: Vosk для активации/остановки, faster-whisper для команды, Silero Xenia и SAPI-резерв.
 - Live v1 как отдельный opt-in контур: Vosk partial transcripts → hybrid turn detector → финальный faster-whisper, безопасные дельты LLM, отслеживаемые фразы TTS, barge-in state machine и раздельные generated/spoken ответы. Весь режим по умолчанию выключен до AEC/full-duplex-приёмки.
+- Сквозной performance harness: `trace_id/turn_id/task_id/request_id`, voice→STT→LLM→TTS milestones, cancellation latency, p50/p95 и явные неполные traces без отдельной telemetry-службы.
 - Память разговора, подтверждённые факты, межролевая передача и гибридный RAG с порогом уверенности и явным `no_match`.
 - Исследование через поиск, изолированный Chromium, стабильный порядок доказательств, приоритет официальных источников и проверку цен.
 - Разработка файлами в `workspace`, Windows Automation, клавиатура, мышь и браузер с неослабляемой политикой и пределом вопросов подтверждения. Запуск команд по умолчанию заблокирован до проверенной ОС-песочницы; `unsafe_host` — только явный legacy-режим.

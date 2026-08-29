@@ -15,6 +15,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from butler.chat import complete_chat  # noqa: E402
 from butler.config import load_settings  # noqa: E402
+from butler.diagnostics import new_trace_id, trace_scope  # noqa: E402
 from butler.model_manager import ModelManager  # noqa: E402
 
 
@@ -36,19 +37,26 @@ def main() -> int:
         return 1
 
     started = time.monotonic()
-    response = complete_chat(
-        settings,
-        [
-            {
-                "role": "system",
-                "content": "Ты локальная русскоязычная помощница Ксения. Выполни формат буквально.",
-            },
-            {"role": "user", "content": "Ответь ровно одним словом: Ксения"},
-        ],
-        tools=None,
-        temperature=0.0,
-        max_tokens=24,
-    )
+    trace_id = new_trace_id()
+    with trace_scope(
+        run_id="active-model-smoke",
+        trace_id=trace_id,
+        turn_id=trace_id,
+    ):
+        response = complete_chat(
+            settings,
+            [
+                {
+                    "role": "system",
+                    "content": "Ты локальная русскоязычная помощница Ксения. Выполни формат буквально.",
+                },
+                {"role": "user", "content": "Ответь ровно одним словом: Ксения"},
+            ],
+            tools=None,
+            temperature=0.0,
+            max_tokens=24,
+            checkpoint=lambda: None,
+        )
     message = response["choices"][0].get("message", {})
     answer = str(message.get("content") or "").strip()
     words = re.findall(r"[а-яё]+", answer.casefold())
@@ -60,6 +68,7 @@ def main() -> int:
             "passed": passed,
             "role": state.role,
             "pid": state.pid,
+            "trace_id": trace_id,
             "answer": answer,
             "duration_seconds": round(time.monotonic() - started, 3),
             "actual_context": int(metadata.get("n_ctx", state.actual_context) or 0),
