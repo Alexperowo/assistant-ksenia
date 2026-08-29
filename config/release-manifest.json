@@ -50,6 +50,7 @@
     "docs/AUDIT.md",
     "docs/HANDOFF.md",
     "docs/TRANSFER-2026-08-28.md",
+    "docs/TRANSFER-2026-08-29.md",
     "docs/INSTALLATION.md",
     "docs/MAINTENANCE.md",
     "docs/CONFIGURATION.md",
@@ -67,10 +68,12 @@
     "scripts/hardware-report.ps1",
     "scripts/install-runtime.ps1",
     "scripts/install-llama.ps1",
+    "scripts/install-local-backend.ps1",
     "scripts/maintenance.py",
     "scripts/model-assets.py",
     "scripts/download-model-assets.ps1",
     "scripts/runtime-paths.ps1",
+    "config/patches/poolside-speculative-draft-model.patch",
     "scripts/update.ps1",
     "scripts/rollback-update.ps1",
     "scripts/test-clean-package-install.ps1",
@@ -147,7 +150,8 @@
       "dist",
       "runtime",
       "tools/downloads",
-      "tools/llama.cpp"
+      "tools/llama.cpp",
+      "tools/llama.poolside"
     ],
     "excluded_files": [
       "config/user.json",
@@ -176,7 +180,7 @@
     "workspace"
   ],
   "quality_gate": {
-    "minimum_tests": 326,
+    "minimum_tests": 329,
     "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1"
   },
   "models": {

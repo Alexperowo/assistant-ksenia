@@ -1,10 +1,86 @@
 {
+  "schema_version": 2,
   "engine": "llama.cpp",
-  "release": "b10241",
-  "commit": "9bd4c09ea",
+  "release": "b10621",
+  "commit": "c1d0e7a00",
   "cuda": "12.4",
   "assets": {
-    "llama-b10241-bin-win-cuda-12.4-x64.zip": "47F57855A390C95F8F28B3B5DC28CA0E0FE227B2A380D65F239CA89625BA3AB9",
+    "llama-b10621-bin-win-cuda-12.4-x64.zip": "81C2FF62E14B549CD5C766CCDD5C61F09E821A171655C3047BDCCFDDC2D1A1E2",
     "cudart-llama-bin-win-cuda-12.4-x64.zip": "8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6"
+  },
+  "backends": {
+    "official": {
+      "distribution": "official-release",
+      "executable": "tools/llama.cpp/llama-server.exe",
+      "repository": "https://github.com/ggml-org/llama.cpp.git",
+      "release": "b10621",
+      "commit": "c1d0e7a004015f23bc0233470b747b596f29b264",
+      "version_build": "10621",
+      "version_commit": "c1d0e7a00",
+      "capabilities": {
+        "cors_controls": true
+      }
+    },
+    "poolside": {
+      "distribution": "verified-local-build",
+      "executable": "tools/llama.poolside/llama-server.exe",
+      "repository": "https://github.com/poolsideai/llama.cpp.git",
+      "branch": "laguna",
+      "commit": "06f8cebd7fe728687be3d19f8bdedb70d75883af",
+      "version_build": "1",
+      "version_commit": "06f8ceb",
+      "patch": {
+        "path": "config/patches/poolside-speculative-draft-model.patch",
+        "sha256": "B075420D2B2315B62217564B5634A3062A27CE86FDCE5C6DD9A0E97554FDB448"
+      },
+      "build": {
+        "generator": "Ninja",
+        "configuration": "Release",
+        "compiler": "MSVC 19.44.35228.0",
+        "cuda": "13.3",
+        "cuda_architectures": "75"
+      },
+      "capabilities": {
+        "cors_controls": false
+      },
+      "runtime_files": {
+        "llama-server.exe": {
+          "size": 10752,
+          "sha256": "2B09F0532FD747023A3F756FB082BEC22FFD305272335E3A06D476DC7CCBB755"
+        },
+        "llama-server-impl.dll": {
+          "size": 13967360,
+          "sha256": "C1C2A308FD9695DC4D5E03B7098D8E44FEED75C82159E7565669012536E80821"
+        },
+        "llama-common.dll": {
+          "size": 9274368,
+          "sha256": "12D852862859F12DF0CB7D9797D472BA4963B50D146F67073A770BA5AC855CC1"
+        },
+        "llama.dll": {
+          "size": 2248704,
+          "sha256": "9E1F8A016298FB68A94439F2185765DCBA775AD8D892F1580771E10DD35110AC"
+        },
+        "ggml.dll": {
+          "size": 67072,
+          "sha256": "2BC6F7D62572849EF7DA115A871B99B70669A4DB2378EFBF469EB46FBAE0C257"
+        },
+        "ggml-base.dll": {
+          "size": 647168,
+          "sha256": "B71924474CE50A8AA59834823B7D2FF5C44C6FDBEC00F0789D0EF3B2D0A0917A"
+        },
+        "ggml-cpu.dll": {
+          "size": 896000,
+          "sha256": "63229A12A2D8A6FB96B28924436B7848223991F00301C6DB9831A6981611E931"
+        },
+        "ggml-cuda.dll": {
+          "size": 51861504,
+          "sha256": "64BDB48BF2EA1FFD3B0AE25236C0C783D4A4C77D3C1C6D83C78E710DD457696B"
+        },
+        "mtmd.dll": {
+          "size": 990720,
+          "sha256": "90625AFA0686BB823F21FBE7D924376783E8E3F0784F68D1F7883DAE997926D0"
+        }
+      }
+    }
   }
 }

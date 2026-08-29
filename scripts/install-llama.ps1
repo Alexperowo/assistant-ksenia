@@ -67,7 +67,11 @@ function Get-EngineVersionText {
 
 function Test-ExpectedVersion {
     param([string]$Text)
-    return $Text -match "version:\s*$([Regex]::Escape($buildNumber))\s+\($([Regex]::Escape($commit))\)"
+    $escapedBuild = [Regex]::Escape($buildNumber)
+    $escapedCommit = [Regex]::Escape($commit)
+    $legacyFormat = $Text -match "version:\s*$escapedBuild\s+\($escapedCommit\)"
+    $currentFormat = $Text -match "version:\s*\S+\s+\(build\s+$escapedBuild,\s+commit\s+$escapedCommit\)"
+    return $legacyFormat -or $currentFormat
 }
 
 function Test-Archive {

@@ -12,6 +12,7 @@
 *.js text eol=lf
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
+config/patches/*.patch text eol=lf -whitespace
 
 *.png binary
 *.jpg binary

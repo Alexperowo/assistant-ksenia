@@ -17,9 +17,31 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import validate_release  # noqa: E402
+import maintenance  # noqa: E402
 
 
 class DistributionTests(unittest.TestCase):
+    def test_engine_version_parser_accepts_supported_upstream_formats(self):
+        self.assertTrue(
+            maintenance.engine_version_matches(
+                "version: 10241 (9bd4c09ea)", "10241", "9bd4c09ea"
+            )
+        )
+        self.assertTrue(
+            maintenance.engine_version_matches(
+                "version: 0.3.0-dev (build 10621, commit c1d0e7a00)",
+                "10621",
+                "c1d0e7a00",
+            )
+        )
+        self.assertFalse(
+            maintenance.engine_version_matches(
+                "version: 0.3.0-dev (build 10621, commit deadbeef00)",
+                "10621",
+                "c1d0e7a00",
+            )
+        )
+
     def test_source_tree_matches_machine_readable_release_contract(self):
         report = validate_release.validate(ROOT, package_mode=False)
         self.assertTrue(report["ok"])
@@ -136,12 +158,13 @@ class DistributionTests(unittest.TestCase):
     def test_forbidden_path_guard_handles_nested_and_case_variants(self):
         rules = {
             "excluded_files": ["config/user.json"],
-            "excluded_path_parts": ["runtime", "tools/llama.cpp"],
+            "excluded_path_parts": ["runtime", "tools/llama.cpp", "tools/llama.poolside"],
             "forbidden_extensions": [".gguf", ".key"],
         }
         self.assertTrue(validate_release._path_is_forbidden("CONFIG/user.json", rules))
         self.assertTrue(validate_release._path_is_forbidden("runtime/logs/a.json", rules))
         self.assertTrue(validate_release._path_is_forbidden("tools/llama.cpp/x.dll", rules))
+        self.assertTrue(validate_release._path_is_forbidden("tools/llama.poolside/x.dll", rules))
         self.assertTrue(validate_release._path_is_forbidden("models/BRAIN.GGUF", rules))
         self.assertFalse(validate_release._path_is_forbidden("src/butler/agent.py", rules))
 
@@ -285,6 +308,7 @@ class DistributionTests(unittest.TestCase):
     def test_update_is_locked_staged_audited_and_reversible(self):
         updater = (SCRIPTS / "update.ps1").read_text(encoding="utf-8-sig")
         engine = (SCRIPTS / "install-llama.ps1").read_text(encoding="utf-8-sig")
+        local_backend = (SCRIPTS / "install-local-backend.ps1").read_text(encoding="utf-8-sig")
         rollback = (SCRIPTS / "rollback-update.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("[switch]$CheckOnly", updater)
         self.assertIn("engine.lock.json", (SCRIPTS / "maintenance.py").read_text(encoding="utf-8"))
@@ -292,6 +316,9 @@ class DistributionTests(unittest.TestCase):
         self.assertIn("check.ps1", updater)
         self.assertIn(".llama-stage-", engine)
         self.assertIn("Get-FileHash -Algorithm SHA256", engine)
+        self.assertIn("runtime_files", local_backend)
+        self.assertIn("Get-FileHash -Algorithm SHA256", local_backend)
+        self.assertIn(".backend-stage-", local_backend)
         self.assertIn("rollback-displaced-engine-", rollback)
         self.assertIn("engine_sha256_before", updater)
         self.assertIn("engine_version_before", updater)

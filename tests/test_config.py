@@ -414,6 +414,9 @@ class ConfigTests(unittest.TestCase):
         generalist = settings.model("generalist")
         reasoning = settings.model("reasoning")
 
+        self.assertEqual(generalist.backend.name, "poolside")
+        self.assertEqual(reasoning.backend.name, "official")
+        self.assertNotEqual(generalist.backend.executable, reasoning.backend.executable)
         self.assertEqual(generalist.acceleration_type, "draft-dflash")
         self.assertIsNotNone(generalist.draft_model_path)
         self.assertEqual(reasoning.acceleration_type, "draft-mtp")
@@ -424,6 +427,23 @@ class ConfigTests(unittest.TestCase):
                 self.assertEqual(len(artifact["source_revision"]), 40)
                 self.assertEqual(len(artifact["sha256"]), 64)
                 self.assertNotIn(":\\", artifact["filename"])
+
+    def test_unknown_model_backend_fails_during_configuration_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            defaults = json.loads(
+                (Path(__file__).resolve().parents[1] / "config" / "default.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            defaults["models"]["generalist"]["backend"] = "missing"
+            (root / "config" / "default.json").write_text(
+                json.dumps(defaults), encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(ConfigError, "Неизвестный backend"):
+                load_settings(root)
 
     def test_declared_draft_acceleration_requires_a_draft_artifact(self):
         with tempfile.TemporaryDirectory() as directory:

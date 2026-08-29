@@ -81,6 +81,25 @@ class ModelManagerTests(unittest.TestCase):
         self.assertIn("--mmproj", reasoning_command)
         self.assertNotIn("--model-draft", reasoning_command)
 
+    def test_profile_backend_controls_executable_and_supported_cors_flags(self):
+        settings = load_settings()
+        manager = ModelManager(settings)
+        generalist = settings.model("generalist")
+        reasoning = settings.model("reasoning")
+
+        generalist_command = manager.build_command(generalist)
+        reasoning_command = manager.build_command(reasoning)
+
+        self.assertEqual(generalist_command[0], str(generalist.backend.executable))
+        self.assertEqual(reasoning_command[0], str(reasoning.backend.executable))
+        self.assertNotIn("--cors-origins", generalist_command)
+        self.assertNotIn("--no-cors-credentials", generalist_command)
+        self.assertIn("--cors-origins", reasoning_command)
+        self.assertIn("--no-cors-credentials", reasoning_command)
+        for command in (generalist_command, reasoning_command):
+            self.assertIn("--api-key-file", command)
+            self.assertIn("127.0.0.1", command)
+
     def test_unknown_port_owner_is_never_treated_as_new_model(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

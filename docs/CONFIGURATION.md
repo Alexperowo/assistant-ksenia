@@ -18,6 +18,8 @@
 | `assistant` | имя, роль по умолчанию, голосовые статусы |
 | `paths` | `llama-server`, модели и runtime |
 | `server` | только loopback, порт и время запуска |
+| `engine_backends` | переносимые executable и проверенные возможности LLM-runtime |
+| `default_engine_backend` | fallback backend для профиля без явного назначения |
 | `voice` | Python, Vosk, Whisper, устройство, паузы и тайм-ауты |
 | `live` | opt-in потоковая озвучка, размер фраз и предел ожидания playback |
 | `browser` | Chromium и постоянный профиль |
@@ -49,12 +51,12 @@
 
 ## Декларативный каталог профилей
 
-Каждый профиль содержит `artifacts.model` и при необходимости `artifacts.draft` или `artifacts.projector`. Каждый распространяемый артефакт закрепляет `source_repo`, полный 40-символьный `source_revision`, исходное имя, ожидаемый размер и SHA-256. Раздел `acceleration` объявляет только поддержанные движком значения `none`, `draft-mtp`, `draft-dflash` или `draft-dspark`; для DFlash/DSpark обязателен отдельный draft-артефакт. Число speculative tokens ограничено 1–32, а параметры GPU принимают только неотрицательное число, `auto` или `all`.
+Каждый профиль содержит ссылку `backend`, `artifacts.model` и при необходимости `artifacts.draft` или `artifacts.projector`. Backend обязан существовать в `engine_backends`; неизвестное имя даёт отказ при загрузке конфигурации. Каждый распространяемый артефакт закрепляет `source_repo`, полный 40-символьный `source_revision`, исходное имя, ожидаемый размер и SHA-256. Раздел `acceleration` объявляет только поддержанные движком значения `none`, `draft-mtp`, `draft-dflash` или `draft-dspark`; для DFlash/DSpark обязателен отдельный draft-артефакт. Число speculative tokens ограничено 1–32, а параметры GPU принимают только неотрицательное число, `auto` или `all`.
 
 Текущие назначения:
 
-- `generalist`: Laguna XS 2.1 APEX I-Quality + DFlash, 96K;
-- `reasoning`: Qwen 3.8 27B Opus Distill v2 + MTP + projector, 96K;
+- `generalist`: Laguna XS 2.1 APEX I-Quality + DFlash, PoolSide backend, 96K;
+- `reasoning`: Qwen 3.8 27B Opus Distill v2 + MTP + projector, официальный backend, 96K;
 - `candidate`: conFIGur8tor Ornith 1.5 35B-A3B APEX MTP Fixed, 16K, `draft-mtp`, `experimental: true`, `enabled: false` до собственного A/B.
 
 Новый GGUF сначала добавляется отдельным выключенным кандидатом. Штатная команда `python scripts\model-assets.py download candidate` загружает все объявленные артефакты только из закреплённых commit и принимает их после совпадения размера и полного SHA-256. `python scripts\model-assets.py verify candidate` не обращается к сети и проверяет уже разрешённые локальные пути. PowerShell-вход `scripts\download-model-assets.ps1 -Profile candidate` использует тот же код и каталог.
@@ -62,6 +64,8 @@
 Перед первым runtime-запуском полный SHA-256 проверяется ещё раз и записывается в `runtime/models/integrity.json` только вместе с file identity и временными метками. Повторный запуск доверяет записи лишь пока эта сигнатура полностью совпадает; изменившийся файл перечитывается. Символическая ссылка вместо GGUF запрещена.
 
 Конкретные названия и launch flags допустимы только в этой декларативной записи и её тесте-контракте. В `src` и эксплуатационных скриптах запрещены ветвления по семейству, прежние идентификаторы профилей и абсолютные пути машины; это проверяется автоматическим тестом дистрибутива.
+
+PoolSide не притворяется официальной сборкой. Его полный upstream commit, ветка, локальный patch, параметры сборки и SHA-256 девяти runtime-файлов находятся в `engine.lock.json`. Установщик `scripts/install-local-backend.ps1` принимает только явно указанный каталог уже собранного runtime, проверяет lock целиком, переключает каталог стадийно и сохраняет прежнюю версию. Он не скачивает случайный `latest` и не компилирует недоверенный исходный код во время обычного обновления.
 
 ## Контекст и память
 

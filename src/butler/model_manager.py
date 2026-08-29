@@ -74,6 +74,11 @@ class ModelManager:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
+    def _server_for(self, profile: ModelProfile) -> Path:
+        if profile.backend is None:
+            return self.settings.llama_server
+        return profile.backend.executable
+
     @property
     def _integrity_cache_path(self) -> Path:
         return self.settings.runtime_dir / "models" / "integrity.json"
@@ -150,8 +155,9 @@ class ModelManager:
                 )
         # Create the key before llama.cpp opens its key file during startup.
         local_api_key(self.settings)
+        server = self._server_for(profile)
         command = [
-            str(self.settings.llama_server),
+            str(server),
             "--model",
             str(profile.model_path),
         ]
@@ -172,11 +178,12 @@ class ModelManager:
             str(profile.gpu_layers),
             "--api-key-file",
             str(api_key_file(self.settings)),
-            "--cors-origins",
-            "localhost",
-            "--no-cors-credentials",
             ]
         )
+        if profile.backend is None or profile.backend.cors_controls:
+            command.extend(
+                ["--cors-origins", "localhost", "--no-cors-credentials"]
+            )
         if profile.acceleration_type != "none":
             command.extend(["--spec-type", profile.acceleration_type])
         if profile.acceleration_max_tokens:
@@ -325,6 +332,7 @@ class ModelManager:
 
     def start(self, role: str, wait: bool = True) -> RuntimeState:
         profile = self.settings.model(role)
+        server = self._server_for(profile)
         started = time.monotonic()
         diagnostic_event(
             self.settings,
@@ -338,14 +346,15 @@ class ModelManager:
             has_projector=profile.projector_path is not None,
             reasoning=profile.reasoning,
             wait=wait,
+            backend=(profile.backend.name if profile.backend is not None else "default"),
         )
         if not profile.enabled:
             diagnostic_event(
                 self.settings, "model_manager", "profile_disabled", level="error", role=role
             )
             raise ModelManagerError(f"Профиль «{role}» отключён в конфигурации.")
-        if not self.settings.llama_server.is_file():
-            raise ModelManagerError(f"Не найден llama-server: {self.settings.llama_server}")
+        if not server.is_file():
+            raise ModelManagerError(f"Не найден llama-server backend-а профиля {role}: {server}")
         artifacts = (
             (
                 "model",
@@ -452,7 +461,7 @@ class ModelManager:
         try:
             process = subprocess.Popen(
                 self.build_command(profile),
-                cwd=str(self.settings.llama_server.parent),
+                cwd=str(server.parent),
                 stdin=subprocess.DEVNULL,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
@@ -475,7 +484,7 @@ class ModelManager:
         state = RuntimeState(
             pid=process.pid,
             role=role,
-            executable=str(self.settings.llama_server.resolve()),
+            executable=str(server.resolve()),
             model=str(profile.model_path),
             started_at=datetime.now(timezone.utc).isoformat(),
             launch_signature=signature,
@@ -529,7 +538,7 @@ class ModelManager:
                     )
                     return state
                 time.sleep(0.5)
-            terminate_verified_process(process.pid, self.settings.llama_server)
+            terminate_verified_process(process.pid, server)
             try:
                 self.settings.state_file.unlink()
             except FileNotFoundError:

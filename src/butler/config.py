@@ -106,6 +106,13 @@ def _resolve(root: Path, raw: str) -> Path:
 
 
 @dataclass(frozen=True)
+class EngineBackend:
+    name: str
+    executable: Path
+    cors_controls: bool = True
+
+
+@dataclass(frozen=True)
 class ModelProfile:
     role: str
     label: str
@@ -127,6 +134,7 @@ class ModelProfile:
     acceleration_type: str = "none"
     acceleration_max_tokens: int = 0
     draft_gpu_layers: int | str = 0
+    backend: EngineBackend | None = None
 
 
 @dataclass(frozen=True)
@@ -179,6 +187,45 @@ class Settings:
     @property
     def state_file(self) -> Path:
         return self.runtime_dir / "state.json"
+
+    def engine_backend(self, name: str) -> EngineBackend:
+        backends = self.raw.get("engine_backends")
+        if backends is None:
+            if name != "default":
+                raise ConfigError(f"Неизвестный backend модели: {name}")
+            return EngineBackend(name=name, executable=self.llama_server)
+        if not isinstance(backends, Mapping):
+            raise ConfigError("Раздел engine_backends должен быть объектом.")
+        try:
+            item = backends[name]
+        except KeyError as exc:
+            raise ConfigError(f"Неизвестный backend модели: {name}") from exc
+        if not isinstance(item, Mapping):
+            raise ConfigError(f"Backend модели {name} повреждён.")
+        executable = str(item.get("executable", "")).strip()
+        if not executable:
+            raise ConfigError(f"Backend модели {name} не содержит executable.")
+        capabilities = item.get("capabilities", {})
+        if not isinstance(capabilities, Mapping):
+            raise ConfigError(f"Capabilities backend-а {name} повреждены.")
+        cors_controls = capabilities.get("cors_controls", True)
+        if not isinstance(cors_controls, bool):
+            raise ConfigError(
+                f"engine_backends.{name}.capabilities.cors_controls должен быть логическим."
+            )
+        return EngineBackend(
+            name=name,
+            executable=_resolve(self.root, executable),
+            cors_controls=cors_controls,
+        )
+
+    def engine_backend_names(self) -> tuple[str, ...]:
+        backends = self.raw.get("engine_backends")
+        if backends is None:
+            return ("default",)
+        if not isinstance(backends, Mapping):
+            raise ConfigError("Раздел engine_backends должен быть объектом.")
+        return tuple(str(name) for name in backends)
 
     def _model_roots(self) -> tuple[Path, ...]:
         configured = self.raw.get("paths", {}).get("model_search_dirs", [])
@@ -275,6 +322,19 @@ class Settings:
             raise ConfigError(
                 f"Флаги enabled/experimental профиля {role} должны быть логическими."
             )
+        default_backend = (
+            "default"
+            if self.raw.get("engine_backends") is None
+            else str(self.raw.get("default_engine_backend", "")).strip()
+        )
+        if not default_backend:
+            raise ConfigError(
+                "Конфигурация с engine_backends должна содержать default_engine_backend."
+            )
+        backend_name = str(item.get("backend", default_backend)).strip()
+        if not backend_name:
+            raise ConfigError(f"Профиль {role} содержит пустой backend.")
+        backend = self.engine_backend(backend_name)
         model_path, expected_size, sha256 = self._artifact(
             role, item, "model", required=True
         )
@@ -358,6 +418,7 @@ class Settings:
             acceleration_type=acceleration_type,
             acceleration_max_tokens=acceleration_max_tokens,
             draft_gpu_layers=draft_gpu_layers,
+            backend=backend,
         )
 
     @staticmethod

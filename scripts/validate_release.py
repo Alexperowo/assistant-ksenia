@@ -276,6 +276,57 @@ def _validate_versions(root: Path, manifest: dict[str, Any]) -> None:
     for name, digest in assets.items():
         if not str(name).endswith(".zip") or not re.fullmatch(r"[A-Fa-f0-9]{64}", str(digest)):
             raise ValidationError(f"Некорректный asset/hash llama.cpp: {name}")
+    backends = engine.get("backends")
+    if not isinstance(backends, dict) or len(backends) < 2:
+        raise ValidationError("engine.lock.json должен закреплять все используемые backends.")
+    official_release_count = 0
+    for name, backend in backends.items():
+        if not isinstance(backend, dict):
+            raise ValidationError(f"Backend {name} должен быть объектом.")
+        executable = str(backend.get("executable", "")).replace("\\", "/")
+        pure = PurePosixPath(executable)
+        if not executable or pure.is_absolute() or ".." in pure.parts:
+            raise ValidationError(f"Некорректный executable backend-а {name}.")
+        if not re.fullmatch(r"[0-9a-f]{40}", str(backend.get("commit", ""))):
+            raise ValidationError(f"Backend {name} не закреплён полным commit.")
+        if not str(backend.get("version_build", "")) or not str(
+            backend.get("version_commit", "")
+        ):
+            raise ValidationError(f"Backend {name} не содержит version lock.")
+        distribution = str(backend.get("distribution", ""))
+        if distribution not in {"official-release", "verified-local-build"}:
+            raise ValidationError(f"Неизвестный distribution backend-а {name}.")
+        official_release_count += int(distribution == "official-release")
+        if distribution != "verified-local-build":
+            continue
+        runtime_files = backend.get("runtime_files")
+        if not isinstance(runtime_files, dict) or "llama-server.exe" not in runtime_files:
+            raise ValidationError(f"Локальный backend {name} не содержит runtime manifest.")
+        for filename, locked_file in runtime_files.items():
+            if Path(filename).name != filename or not isinstance(locked_file, dict):
+                raise ValidationError(f"Некорректный runtime-файл backend-а {name}: {filename}")
+            if int(locked_file.get("size", 0)) <= 0 or not re.fullmatch(
+                r"[A-Fa-f0-9]{64}", str(locked_file.get("sha256", ""))
+            ):
+                raise ValidationError(f"Runtime lock backend-а {name} повреждён: {filename}")
+        patch = backend.get("patch")
+        if not isinstance(patch, dict):
+            raise ValidationError(f"Локальный backend {name} не содержит patch provenance.")
+        patch_path = (root / str(patch.get("path", ""))).resolve()
+        try:
+            patch_path.relative_to((root / "config" / "patches").resolve())
+        except ValueError as error:
+            raise ValidationError(
+                f"Patch локального backend-а {name} находится вне config/patches."
+            ) from error
+        if not patch_path.is_file() or _sha256(patch_path).casefold() != str(
+            patch.get("sha256", "")
+        ).casefold():
+            raise ValidationError(
+                f"Patch локального backend-а {name} не совпадает с SHA-256 lock."
+            )
+    if official_release_count != 1:
+        raise ValidationError("Требуется ровно один official-release backend.")
 
 
 def _validate_requirements(root: Path, manifest: dict[str, Any]) -> None:

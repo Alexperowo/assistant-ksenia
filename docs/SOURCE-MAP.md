@@ -7,7 +7,7 @@
 | Файл | Ответственность | Связан с |
 |---|---|---|
 | `cli.py` | Команды, меню, текстовый и голосовой интерфейсы, локальное включение доверенной задачи | почти все сервисы; постепенно декомпозировать |
-| `config.py` | deep-merge default/user, typed model/draft/projector profiles, acceleration, reasoning и атомарная запись личных overrides | `default.json`, тесты конфигурации |
+| `config.py` | deep-merge default/user, typed engine/model/draft/projector profiles, acceleration, reasoning и атомарная запись личных overrides | `default.json`, тесты конфигурации |
 | `doctor.py` | проверка среды, моделей, памяти, GPU и баз | `model_manager`, хранилища |
 | `atomic_io.py` | атомарная запись/копирование, fsync и межпроцессные file locks | persistent JSON, журналы, диагностика и файловые транзакции |
 | `schema_validation.py` | строгая проверка вложенных аргументов tools до Permission Broker и executor | `agent`, `tools` |
@@ -18,7 +18,7 @@
 
 | Файл | Ответственность | Критические инварианты |
 |---|---|---|
-| `model_manager.py` | одна активная LLM, конфигурационная команда DFlash/MTP/mmproj, PID, порт и целостность всех нужных GGUF | неизвестный процесс не завершать; loopback; bounded wait; size + полный SHA-256 до первого Popen; cache только для неизменной file identity |
+| `model_manager.py` | одна активная LLM, декларативный выбор backend-а, команда DFlash/MTP/mmproj, PID, порт и целостность всех нужных GGUF | неизвестный процесс не завершать; loopback; API-key; bounded wait; size + полный SHA-256 до первого Popen; cache только для неизменной file identity |
 | `chat.py` | OpenAI-совместимый HTTP, stream, tokenizer, system normalization и отменяемое чтение ответа | один первый system; timeout; локальный ключ; checkpoint даже при зависшем socket read |
 | `agent.py` | цикл tool calling одной модели | общий лимит шагов/инструментов/вопросов подтверждения, checkpoint отмены |
 | `orchestrator.py` | выбор роли, планирование и исполнение разными моделями | планировщик только читает; handoff сохраняется |
@@ -98,6 +98,7 @@
 |---|---|
 | `install-runtime.ps1` | Python, точные пакеты, browser и speech pack |
 | `install-llama.ps1` | проверенная стадийная установка движка |
+| `install-local-backend.ps1` | стадийная установка закреплённого локально собранного backend-а по runtime manifest |
 | `update.ps1` | применение только одобренных lock-версий |
 | `rollback-update.ps1` | возврат последней сохранённой установки |
 | `hardware-report.ps1` | read-only инвентарь и стартовый профиль |

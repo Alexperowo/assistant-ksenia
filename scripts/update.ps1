@@ -25,9 +25,11 @@ function Get-Status {
 
 function Show-Status {
     param([object]$Status)
-    $engineText = if ($Status.engine.matches) { 'совпадает' } else { 'требует обновления' }
+    foreach ($backend in @($Status.engine_backends)) {
+        $backendText = if ($backend.matches) { 'совпадает' } else { 'требует обновления' }
+        Write-Host "LLM backend $($backend.name): $backendText; commit $($backend.expected_commit)."
+    }
     $pythonText = if ($Status.python.matches) { 'совпадает' } else { 'требует обновления' }
-    Write-Host "llama.cpp: $engineText; ожидается $($Status.engine.expected_release) ($($Status.engine.expected_commit))."
     Write-Host "Python: $pythonText; установлен $($Status.python.actual), ожидается $($Status.python.expected)."
     $mismatches = @($Status.packages | Where-Object { -not $_.matches })
     if ($mismatches.Count -eq 0) {
@@ -60,13 +62,26 @@ if (-not $PythonPath) {
 }
 $status = Get-Status
 Show-Status $status
+$localBackendMismatches = @(
+    $status.engine_backends | Where-Object {
+        -not $_.matches -and $_.distribution -eq 'verified-local-build'
+    }
+)
 if ($CheckOnly) {
     if ($status.all_components_match) {
         Write-Host 'Проверка завершена: обновление компонентов не требуется.'
+    } elseif ($localBackendMismatches.Count -gt 0) {
+        $names = ($localBackendMismatches | ForEach-Object { $_.name }) -join ', '
+        Write-Host "Проверка завершена: нужна проверенная локальная сборка backend-а: $names."
     } else {
         Write-Host 'Проверка завершена: UPDATE.cmd может применить одобренные версии.'
     }
     exit 0
+}
+
+if ($localBackendMismatches.Count -gt 0) {
+    $names = ($localBackendMismatches | ForEach-Object { $_.name }) -join ', '
+    throw "Локальные backend-ы требуют проверенной сборки: $names. Используйте scripts\install-local-backend.ps1 с явным SourceDirectory."
 }
 
 if ($status.all_components_match) {
@@ -134,7 +149,7 @@ try {
     }
 
     if (-not $status.engine.matches) {
-        $managedServer = [IO.Path]::GetFullPath((Join-Path $projectRoot 'tools\llama.cpp\llama-server.exe'))
+        $managedServer = [IO.Path]::GetFullPath([string]$status.engine.expected_path)
         if ([IO.Path]::GetFullPath([string]$status.engine.path) -ne $managedServer) {
             throw "Настроен внешний llama-server; автоматическое обновление запрещено: $($status.engine.path)"
         }

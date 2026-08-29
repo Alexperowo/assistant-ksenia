@@ -10,7 +10,7 @@
 
 - Windows 11 x64;
 - NVIDIA RTX 2080 Ti с 22 ГБ VRAM и 48 ГБ ОЗУ;
-- закреплённый официальный `llama.cpp b10241`, CUDA 12.4; более новый commit рассматривается отдельно и не устанавливается ради модели без полного engine gate;
+- закреплённый официальный `llama.cpp b10621` (stable v0.3.0), CUDA 12.4, для Qwen/Ornith; закреплённый PoolSide commit `06f8ceb` для Laguna/DFlash; новый runtime рассматривается отдельно и не устанавливается ради модели без полного engine gate;
 - одновременно работает одна крупная LLM;
 - целевой контекст рабочих профилей 96K, KV `K=Q8_0`, `V=Q4_0`;
 - обязательны русский язык, Jinja chat template, tool/function calling, код, исследование и восстановление после ошибочного tool result;
@@ -18,8 +18,8 @@
 
 Текущие профили для сравнения:
 
-- `generalist`: Laguna XS 2.1 APEX I-Quality + отдельный DFlash;
-- `reasoning`: Qwen 3.8 27B Opus Distill v2 + MTP + multimodal projector;
+- `generalist`: Laguna XS 2.1 APEX I-Quality + отдельный DFlash на PoolSide backend;
+- `reasoning`: Qwen 3.8 27B Opus Distill v2 + MTP + multimodal projector на официальном backend;
 - `candidate`: выключенный conFIGur8tor Ornith 1.5 35B-A3B APEX MTP Fixed, точный артефакт закреплён, но собственный 16K MTP on/off gate ещё не выполнялся; старый A/B SC117 к нему не относится.
 
 Для каждого кандидата укажи:

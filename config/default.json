@@ -16,6 +16,21 @@
     "port": 18080,
     "startup_timeout_seconds": 120
   },
+  "engine_backends": {
+    "official": {
+      "executable": "tools/llama.cpp/llama-server.exe",
+      "capabilities": {
+        "cors_controls": true
+      }
+    },
+    "poolside": {
+      "executable": "tools/llama.poolside/llama-server.exe",
+      "capabilities": {
+        "cors_controls": false
+      }
+    }
+  },
+  "default_engine_backend": "official",
   "diagnostics": {
     "enabled": true,
     "max_file_mb": 8,
@@ -185,6 +200,7 @@
   "models": {
     "generalist": {
       "label": "Laguna XS 2.1 APEX I-Quality + DFlash",
+      "backend": "poolside",
       "artifacts": {
         "model": {
           "filename": "Laguna-XS-2.1-APEX-I-Quality.gguf",
@@ -239,6 +255,7 @@
     },
     "reasoning": {
       "label": "Qwen 3.8 27B Opus Distill v2 + MTP + Vision",
+      "backend": "official",
       "artifacts": {
         "model": {
           "filename": "Qwen3.8-27B-Opus-Distill-v2-Q4_K_M.gguf",
@@ -295,6 +312,7 @@
     },
     "candidate": {
       "label": "Кандидат Ornith 1.5 35B-A3B APEX MTP Fixed",
+      "backend": "official",
       "artifacts": {
         "model": {
           "filename": "ornith15-trained-head.gguf",

@@ -1,0 +1,38 @@
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+index 5ec3f62..0865671 100644
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -2310,8 +2310,9 @@ common_speculative_init_result::common_speculative_init_result(
+                                     COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
+     GGML_ASSERT(has_draft || spec_mtp);
+ 
+-    auto mparams = common_model_params_to_llama(params);
+-    auto cparams = common_context_params_to_llama(params);
++    auto params_spec = common_base_params_to_speculative(params);
++    auto mparams = common_model_params_to_llama(params_spec);
++    auto cparams = common_context_params_to_llama(params_spec);
+ 
+     if (spec_mtp) {
+         cparams.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+@@ -2324,10 +2325,10 @@ common_speculative_init_result::common_speculative_init_result(
+ 
+     std::string model_path;
+     if (has_draft) {
+-        model_path = params.speculative.draft.mparams.path;
++        model_path = params_spec.model.path;
+         LOG_TRC("%s: loading draft model '%s'\n", __func__, model_path.c_str());
+ 
+-        llama_model * model_dft = llama_model_load_from_file(params.model.path.c_str(), mparams);
++        llama_model * model_dft = llama_model_load_from_file(model_path.c_str(), mparams);
+         if (model_dft == NULL) {
+             LOG_ERR("%s: failed to load draft model, '%s'\n", __func__, model_path.c_str());
+             return;
+@@ -2337,7 +2338,7 @@ common_speculative_init_result::common_speculative_init_result(
+ 
+         llama_context * ctx_dft = llama_init_from_model(model_dft, cparams);
+         if (ctx_dft == nullptr) {
+-            LOG_ERR("%s: failed to create MTP context\n", __func__);
++            LOG_ERR("%s: failed to create draft context\n", __func__);
+             return;
+         }
+ 

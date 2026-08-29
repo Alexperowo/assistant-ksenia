@@ -356,14 +356,16 @@ def run_checks(settings: Settings, *, installation_mode: bool = False) -> list[C
         )
     except OSError:
         checks.append(Check("Место для моделей", False, str(settings.models_dir)))
-    checks.append(
-        Check(
-            "llama-server",
-            settings.llama_server.is_file(),
-            str(settings.llama_server),
-            required=False,
+    for backend_name in settings.engine_backend_names():
+        backend = settings.engine_backend(backend_name)
+        checks.append(
+            Check(
+                f"LLM backend: {backend_name}",
+                backend.executable.is_file(),
+                str(backend.executable),
+                required=False,
+            )
         )
-    )
     for role in settings.model_roles():
         profile = settings.model(role)
         artifacts = [

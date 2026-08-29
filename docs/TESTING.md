@@ -13,12 +13,13 @@
 ### 1. Статический и быстрый слой
 
 - синтаксис PowerShell, JSON и Python;
-- не менее 326 unit/integration-тестов;
+- не менее 329 unit/integration-тестов;
 - отсутствие неожиданных warnings и skips;
 - три полных shuffled-order запуска;
 - тайм-ауты сети/subprocess и запрет shell;
 - Live state machine: накопление Vosk-partials, hybrid turn detector, приватность partial-диагностики, cancellation-before-audio-stop, поздние/out-of-order callbacks, отказ playback и раздельные generated/spoken данные;
 - конфигурация без личного `user.json`;
+- декларативный выбор backend-а, отказ неизвестного backend-а и различия CLI capabilities при неизменных loopback/API-key границах;
 - отсутствие названий модельных семейств и абсолютных путей машины в исполняемом коде/скриптах;
 - декларативные model/draft/projector-артефакты, acceleration-контракты и fail-closed проверка их размеров до старта;
 - машинная проверка release manifest.
@@ -86,6 +87,12 @@ BUILD-RELEASE.cmd
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\test-engine-maintenance.ps1
+```
+
+PoolSide и другие локально собранные runtime устанавливаются только из явно указанного каталога, после проверки версии, patch provenance и SHA-256 каждого runtime-файла:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\install-local-backend.ps1 -BackendName poolside -SourceDirectory "<проверенный bin>"
 ```
 
 Smoke-test именно собранного ZIP в изолированной папке (скачивает отдельный Chromium, но пропускает `llama.cpp` и все веса моделей):
