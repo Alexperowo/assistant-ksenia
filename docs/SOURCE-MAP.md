@@ -7,8 +7,10 @@
 | Файл | Ответственность | Связан с |
 |---|---|---|
 | `cli.py` | Команды, меню, текстовый и голосовой интерфейсы, локальное включение доверенной задачи | почти все сервисы; постепенно декомпозировать |
-| `config.py` | загрузка default/user, профили, reasoning и запись настроек | `default.json`, тесты конфигурации |
+| `config.py` | deep-merge default/user, typed model/draft/projector profiles, acceleration, reasoning и атомарная запись личных overrides | `default.json`, тесты конфигурации |
 | `doctor.py` | проверка среды, моделей, памяти, GPU и баз | `model_manager`, хранилища |
+| `atomic_io.py` | атомарная запись/копирование, fsync и межпроцессные file locks | persistent JSON, журналы, диагностика и файловые транзакции |
+| `schema_validation.py` | строгая проверка вложенных аргументов tools до Permission Broker и executor | `agent`, `tools` |
 | `instance_lock.py` | запрет второго экземпляра критического интерфейса | CLI/LAN/voice |
 | `user_messages.py` | безопасные короткие сообщения об ошибках | CLI и голос |
 
@@ -16,24 +18,25 @@
 
 | Файл | Ответственность | Критические инварианты |
 |---|---|---|
-| `model_manager.py` | одна активная LLM, команда запуска, PID, порт, размер GGUF | неизвестный процесс не завершать; loopback; bounded wait |
-| `chat.py` | OpenAI-совместимый HTTP, stream, tokenizer, system normalization | один первый system; timeout; локальный ключ |
+| `model_manager.py` | одна активная LLM, конфигурационная команда DFlash/MTP/mmproj, PID, порт и целостность всех нужных GGUF | неизвестный процесс не завершать; loopback; bounded wait; size + полный SHA-256 до первого Popen; cache только для неизменной file identity |
+| `chat.py` | OpenAI-совместимый HTTP, stream, tokenizer, system normalization и отменяемое чтение ответа | один первый system; timeout; локальный ключ; checkpoint даже при зависшем socket read |
 | `agent.py` | цикл tool calling одной модели | общий лимит шагов/инструментов/вопросов подтверждения, checkpoint отмены |
 | `orchestrator.py` | выбор роли, планирование и исполнение разными моделями | планировщик только читает; handoff сохраняется |
-| `model_catalog.py` | безопасное перечисление GGUF | только configured model root |
+| `model_catalog.py` | безопасное перечисление GGUF | только `models_dir` и `model_search_dirs`, относительные пути от корня проекта |
+| `model_assets.py` | закреплённое происхождение, загрузка и SHA-256 GGUF | полный commit; безопасное имя; без ambient token |
 | `model_evaluation.py` | русский A/B и критерии кандидата | детерминированные проверки, недоверенные данные |
 
 ## Инструменты и безопасность
 
 | Файл | Ответственность |
 |---|---|
-| `tools.py` | схемы и исполнение файлов, браузера, Windows, памяти, RAG |
+| `tools.py` | схемы и исполнение файлов, браузера, Windows, памяти, RAG; целиковая запись только создаёт новый путь, существующий текст меняется точной однозначной заменой |
 | `permissions.py` | политика allow/confirm/deny и неослабляемый минимум безопасности |
 | `approval.py` | область и повторное использование подтверждения |
 | `confirmation.py` | понятное описание конкретного действия |
 | `trusted_task.py` | локальный одноразовый жетон следующей задачи, срок, атомарное потребление и статусы |
-| `developer.py` | ограниченный запуск разрешённых программ без shell |
-| `journal.py` | резервная копия, SHA-256 и безопасная отмена файлов |
+| `developer.py` | fail-closed выбор command backend, проверка argv/workspace и явно небезопасный legacy host-runner | неизвестный backend не запускается; `unsafe_host` требует точного признания риска; shell запрещён |
+| `journal.py` | сериализованная транзакция mutation + undo-record, резервная копия, SHA-256 и безопасная отмена файлов |
 | `sensitive_data.py` | запрет секретных путей и расширений |
 | `processes.py` | идентификация и подтверждённое завершение Windows-процесса |
 | `procedures.py` | чтение проверенных процедур без traversal |
@@ -53,15 +56,17 @@
 
 | Файл | Ответственность |
 |---|---|
-| `wake.py` | Vosk listener для активации и остановки |
-| `stt.py` | управление faster-whisper и записью команды |
-| `speech.py` | очередь TTS, Silero/SAPI, остановка и статусы |
+| `wake.py` | Vosk listener для активации/остановки и явная передача единственного микрофона голосовому подтверждению |
+| `stt.py` | управление faster-whisper, Vosk-partial callbacks и записью команды |
+| `speech.py` | очередь TTS, подтверждённый ready/error Silero worker, SAPI-резерв, сериализованная остановка и callback полного завершения фразы |
+| `live.py` | независимая state machine Live, streaming TTS, barge-in и разделение generated/spoken; cancellation event ставится до audio stop, произнесённым считается только непрерывный завершённый префикс |
+| `turn_detection.py` | чистое накопление Vosk partial/final сегментов и hybrid turn detector по транскрипту, VAD и времени тишины |
 | `speech_text.py` | русское произношение чисел, дат и времени |
 | `media_buttons.py` | AVRCP/медиакнопка как опциональная активация |
 | `resilience.py` | bounded backoff повторяющихся ошибок |
 | `scripts/audio_input.py` | выбор и открытие реального аудиовхода |
 | `scripts/wake_worker.py` | дочерний процесс Vosk |
-| `scripts/stt_worker.py`, `stt_service.py` | дочерний/долгоживущий faster-whisper |
+| `scripts/stt_worker.py`, `stt_service.py` | дочерний/долгоживущий faster-whisper; в opt-in Live сервис дополнительно использует закреплённый Vosk для partial endpointing |
 | `scripts/voice_worker.py` | Silero-синтез и WAV |
 | `scripts/pcm_audio.py` | совместимость PCM/audioop на Python 3.12 |
 
@@ -74,7 +79,7 @@
 | `handoff.py` | план, запрос, ошибки и результат между ролями |
 | `rag.py` | FTS5, векторы, chunking, RRF, порог смыслового совпадения и цитаты строк |
 | `embeddings.py` | временный CPU `llama-server` для embeddings |
-| `tasking.py` | долговечное состояние, пауза, отмена и восстановление |
+| `tasking.py` | долговечное состояние, пауза, отмена, восстановление и раздельные generated/spoken ответы Live |
 
 ## Интерфейсы и диагностика
 
@@ -96,8 +101,11 @@
 | `update.ps1` | применение только одобренных lock-версий |
 | `rollback-update.ps1` | возврат последней сохранённой установки |
 | `hardware-report.ps1` | read-only инвентарь и стартовый профиль |
-| `build-release.ps1` | чистый архив без моделей и личных данных |
+| `build-release.ps1` | чистый архив без моделей и личных данных; по умолчанию только из чистого Git-дерева |
 | `validate_release.py` | машинная проверка исходного дерева/архива |
+| `scripts/model-assets.py` | явная загрузка/проверка закреплённого GGUF вне автоматической установки |
+| `scripts/download-model-assets.ps1` | общий PowerShell-вход загрузки профиля или отдельного артефакта |
+| `scripts/runtime-paths.ps1` | единый переносимый resolver Python 3.12 без фиксированных дисков |
 
 ## Где находятся тесты
 

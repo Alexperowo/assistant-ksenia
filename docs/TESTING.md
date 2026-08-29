@@ -13,16 +13,19 @@
 ### 1. Статический и быстрый слой
 
 - синтаксис PowerShell, JSON и Python;
-- не менее 217 unit/integration-тестов;
+- не менее 326 unit/integration-тестов;
 - отсутствие неожиданных warnings и skips;
 - три полных shuffled-order запуска;
 - тайм-ауты сети/subprocess и запрет shell;
+- Live state machine: накопление Vosk-partials, hybrid turn detector, приватность partial-диагностики, cancellation-before-audio-stop, поздние/out-of-order callbacks, отказ playback и раздельные generated/spoken данные;
 - конфигурация без личного `user.json`;
+- отсутствие названий модельных семейств и абсолютных путей машины в исполняемом коде/скриптах;
+- декларативные model/draft/projector-артефакты, acceleration-контракты и fail-closed проверка их размеров до старта;
 - машинная проверка release manifest.
 
 ### 2. Локальная живая интеграция
 
-- активная LLM отвечает по-русски и сообщает реальный контекст;
+- каждый включённый рабочий профиль отдельно отвечает по-русски, сообщает реальный контекст и подтверждает заявленное DFlash/MTP/mmproj по журналу;
 - RAG использует настоящий embedding server;
 - LAN поднимается на временном порту, проверяет 401/200 и освобождает порт;
 - Silero создаёт полный WAV, faster-whisper на CUDA распознаёт начало, середину и конец;
@@ -45,6 +48,7 @@
 - JBL dictation;
 - пять wake-активаций;
 - «Ксения стоп»;
+- после AEC: перебивание на середине длинного ответа без самоперебивания и ложной памяти;
 - сенсорный жест;
 - LAN с телефона;
 - безопасная разработка и отмена;
@@ -63,7 +67,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1
 Только машинная структура релиза:
 
 ```powershell
-C:\butler-venv\Scripts\python.exe scripts\validate_release.py
+python scripts\validate_release.py
 ```
 
 Проверка установленных версий без изменений:
