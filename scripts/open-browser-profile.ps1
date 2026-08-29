@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $defaultConfig = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'config\default.json') | ConvertFrom-Json
 $userConfigPath = Join-Path $projectRoot 'config\user.json'

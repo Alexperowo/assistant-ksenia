@@ -5,6 +5,7 @@ import asyncio
 import ipaddress
 import json
 import re
+import socket
 import sys
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -24,9 +25,13 @@ _SEARCH_PROVIDER_HOSTS = frozenset(
 
 
 def public_http_url(value: object) -> bool:
+    raw = str(value or "")
+    if not raw or "\\" in raw or any(ord(character) < 32 or ord(character) == 127 for character in raw):
+        return False
     try:
-        parsed = urlparse(str(value or ""))
+        parsed = urlparse(raw)
         hostname = (parsed.hostname or "").casefold().rstrip(".")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
     except ValueError:
         return False
     if parsed.scheme not in {"http", "https"} or not hostname:
@@ -36,10 +41,43 @@ def public_http_url(value: object) -> bool:
     if hostname == "localhost" or hostname.endswith((".localhost", ".local")):
         return False
     try:
+        legacy_ipv4 = ipaddress.ip_address(socket.inet_ntoa(socket.inet_aton(hostname)))
+    except OSError:
+        legacy_ipv4 = None
+    if legacy_ipv4 is not None:
+        return legacy_ipv4.is_global
+    try:
         address = ipaddress.ip_address(hostname)
     except ValueError:
-        return True
-    return address.is_global
+        address = None
+    if address is not None:
+        return address.is_global
+    try:
+        ascii_hostname = hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    labels = ascii_hostname.split(".")
+    if (
+        len(ascii_hostname) > 253
+        or any(not label or len(label) > 63 for label in labels)
+        or any(label.startswith("-") or label.endswith("-") for label in labels)
+    ):
+        return False
+    try:
+        resolved = socket.getaddrinfo(
+            ascii_hostname,
+            port,
+            type=socket.SOCK_STREAM,
+        )
+    except (OSError, UnicodeError):
+        return False
+    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for item in resolved:
+        try:
+            addresses.append(ipaddress.ip_address(str(item[4][0]).split("%", 1)[0]))
+        except (IndexError, TypeError, ValueError):
+            return False
+    return bool(addresses) and all(address.is_global for address in addresses)
 
 
 def normalize_search_result_url(value: object, base_url: str = "https://duckduckgo.com/") -> str:
@@ -315,6 +353,8 @@ async def process_request(context, mode: str, value: str, max_text: int) -> dict
                     await route.abort("blockedbyclient")
 
             await page.route("**/*", guard_local_network)
+            if hasattr(page, "route_web_socket"):
+                await page.route_web_socket("**/*", lambda web_socket: web_socket.close())
             actions = []
             if mode == "search":
                 # Bing otherwise inherits an arbitrary profile/geolocation locale.
@@ -525,18 +565,37 @@ async def run() -> int:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as playwright:
-        context = await playwright.chromium.launch_persistent_context(
-            user_data_dir=args.profile,
-            executable_path=args.executable,
-            headless=args.headless == "true",
-            args=["--disable-gpu", "--no-first-run", "--no-default-browser-check"],
-            viewport={"width": 1440, "height": 900},
-        )
-        try:
-            result = await process_request(context, args.mode, value, args.max_text)
-            print(json.dumps(result, ensure_ascii=False))
-        finally:
-            await context.close()
+        launch_arguments = ["--disable-gpu", "--no-first-run", "--no-default-browser-check"]
+        if args.mode == "interact":
+            context = await playwright.chromium.launch_persistent_context(
+                user_data_dir=args.profile,
+                executable_path=args.executable,
+                headless=args.headless == "true",
+                args=launch_arguments,
+                viewport={"width": 1440, "height": 900},
+                service_workers="block",
+            )
+            try:
+                result = await process_request(context, args.mode, value, args.max_text)
+            finally:
+                await context.close()
+        else:
+            browser = await playwright.chromium.launch(
+                executable_path=args.executable,
+                headless=args.headless == "true",
+                args=launch_arguments,
+            )
+            context = await browser.new_context(
+                java_script_enabled=False,
+                service_workers="block",
+                viewport={"width": 1440, "height": 900},
+            )
+            try:
+                result = await process_request(context, args.mode, value, args.max_text)
+            finally:
+                await context.close()
+                await browser.close()
+        print(json.dumps(result, ensure_ascii=False))
     return 0
 
 

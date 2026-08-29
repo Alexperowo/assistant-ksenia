@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import os
 import secrets
 from pathlib import Path
 
+from butler.atomic_io import atomic_write_text, exclusive_file_lock
 from butler.config import Settings
 
 
@@ -22,22 +22,15 @@ def local_api_key(settings: Settings) -> str:
     Windows user.
     """
     path = api_key_file(settings)
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            value = line.strip()
-            if value and not value.startswith("#"):
-                return value
-    except FileNotFoundError:
-        pass
+    with exclusive_file_lock(path):
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                value = line.strip()
+                if value and not value.startswith("#"):
+                    return value
+        except FileNotFoundError:
+            pass
 
-    key = secrets.token_urlsafe(32)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(key + "\n", encoding="utf-8")
-    try:
-        os.chmod(temporary, 0o600)
-    except OSError:
-        # Windows ACLs normally inherit the current user's project access.
-        pass
-    temporary.replace(path)
-    return key
+        key = secrets.token_urlsafe(32)
+        atomic_write_text(path, key + "\n", mode=0o600)
+        return key

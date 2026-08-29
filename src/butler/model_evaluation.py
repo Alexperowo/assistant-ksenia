@@ -4,7 +4,8 @@ import json
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from typing import Any
 
 from butler.chat import complete_chat, count_chat_tokens
@@ -62,6 +63,25 @@ class EvaluationCase:
     tools: list[dict[str, Any]] | None
     max_tokens: int
     check: Callable[[dict[str, Any]], tuple[bool, str]]
+
+
+def with_mtp_mode(settings: Settings, role: str, *, enabled: bool) -> Settings:
+    """Return an in-memory profile with MTP explicitly enabled or disabled."""
+
+    raw = deepcopy(settings.raw)
+    try:
+        profile = raw["models"][role]
+        acceleration = profile.get("acceleration", {})
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"Неизвестный профиль модели: {role}") from exc
+    if not isinstance(acceleration, dict):
+        raise ValueError(f"Профиль модели {role} содержит повреждённое acceleration.")
+    profile["acceleration"] = dict(acceleration)
+    if enabled:
+        profile["acceleration"].update({"type": "draft-mtp", "max_tokens": 2})
+    else:
+        profile["acceleration"].update({"type": "none", "max_tokens": 0})
+    return replace(settings, raw=raw)
 
 
 def _message(response: dict[str, Any]) -> dict[str, Any]:
@@ -319,7 +339,7 @@ def base_cases() -> list[EvaluationCase]:
                 },
             ),
             tools=None,
-            max_tokens=480,
+            max_tokens=768,
             check=check_structured_russian_plan,
         ),
     ]

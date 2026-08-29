@@ -28,11 +28,10 @@ $defaultConfig = Get-Content -Raw -Encoding UTF8 -LiteralPath $defaultConfigPath
 $assetLock = Get-Content -Raw -Encoding UTF8 -LiteralPath $assetLockPath | ConvertFrom-Json
 
 if (-not $InstallRoot) {
-    $InstallRoot = if (Test-Path -LiteralPath 'D:\') {
-        'D:\AI\Butler'
-    } else {
-        Join-Path $env:LocalAppData 'Ksenia\Butler'
+    if (-not $env:LocalAppData) {
+        throw 'Не определён LocalAppData; передайте каталог явно через -InstallRoot.'
     }
+    $InstallRoot = Join-Path $env:LocalAppData 'Ksenia\Butler'
 }
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $pythonVersion = [string]$assetLock.python.version
@@ -134,13 +133,18 @@ function Test-WhisperModel {
 }
 
 function Move-ToInstallerQuarantine {
-    param([string]$Path)
+    param([string]$Path, [string]$AllowedRoot)
     if (-not (Test-Path -LiteralPath $Path)) { return }
+    $resolvedPath = [IO.Path]::GetFullPath($Path)
+    $resolvedRoot = [IO.Path]::GetFullPath($AllowedRoot).TrimEnd('\')
+    if (-not $resolvedPath.StartsWith($resolvedRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Отказ от перемещения пути вне управляемого каталога: $resolvedPath"
+    }
     $quarantine = Join-Path $downloadRoot 'quarantine'
     New-Item -ItemType Directory -Force -Path $quarantine | Out-Null
     $leaf = Split-Path -Leaf $Path
-    $destination = Join-Path $quarantine ("$leaf.invalid-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-    Move-Item -LiteralPath $Path -Destination $destination
+    $destination = Join-Path $quarantine ("$leaf.invalid-" + [Guid]::NewGuid().ToString('N'))
+    Move-Item -LiteralPath $resolvedPath -Destination $destination
     Write-Warning "Повреждённый файл изолирован: $destination"
 }
 
@@ -156,7 +160,12 @@ if (Test-Path -LiteralPath $userConfigPath) {
 $runtimeCandidates = [Collections.Generic.List[string]]::new()
 $configuredPython = [string](Get-EffectiveValue $config $defaultConfig 'voice' 'python' '')
 if ($configuredPython) { $runtimeCandidates.Add($configuredPython) }
-$runtimeCandidates.Add('C:\butler-venv\Scripts\python.exe')
+if ($env:KSENIA_PYTHON) { $runtimeCandidates.Add([string]$env:KSENIA_PYTHON) }
+if ($env:VIRTUAL_ENV) {
+    $runtimeCandidates.Add((Join-Path $env:VIRTUAL_ENV 'Scripts\python.exe'))
+}
+$runtimeCandidates.Add((Join-Path $projectRoot '.venv\Scripts\python.exe'))
+$runtimeCandidates.Add((Join-Path $projectRoot 'venv\Scripts\python.exe'))
 $runtimeCandidates.Add((Join-Path $defaultVenvRoot 'Scripts\python.exe'))
 $venvPython = $runtimeCandidates | Where-Object { Test-Python $_ } | Select-Object -First 1
 
@@ -165,7 +174,7 @@ if ($venvPython) {
 } else {
     $baseCandidates = @(
         (Join-Path $env:LocalAppData 'Programs\Python\Python312\python.exe'),
-        'C:\Program Files\Python312\python.exe',
+        (Join-Path $env:ProgramFiles 'Python312\python.exe'),
         (Join-Path $pythonRoot 'python.exe')
     )
     $python = $baseCandidates | Where-Object { Test-Python $_ } | Select-Object -First 1
@@ -274,18 +283,29 @@ Set-Property $browser 'profile_dir' ([IO.Path]::GetFullPath($profileDir))
 $wakeModelRaw = [string](Get-EffectiveValue $config $defaultConfig 'voice' 'wake_model' 'runtime/voice/vosk-model-small-ru-0.22')
 $wakeModelPath = Resolve-ProjectPath $wakeModelRaw
 $wakeReady = $wakeModelPath -and (Test-Path -LiteralPath (Join-Path $wakeModelPath 'conf\model.conf') -PathType Leaf)
+$voiceRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot 'runtime\voice'))
+$wakeModelInsideManagedRoot = $wakeModelPath -and [IO.Path]::GetFullPath($wakeModelPath).StartsWith(
+    $voiceRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase
+)
+if (-not $wakeReady -and -not $wakeModelInsideManagedRoot) {
+    Write-Warning 'Настроенная внешняя wake-модель не готова и оставлена без изменений; установка продолжится в управляемый runtime.'
+    $wakeModelRaw = "runtime/voice/$([string]$assetLock.vosk.directory)"
+    $wakeModelPath = [IO.Path]::GetFullPath((Join-Path $projectRoot $wakeModelRaw))
+    $wakeReady = Test-Path -LiteralPath (Join-Path $wakeModelPath 'conf\model.conf') -PathType Leaf
+    $wakeModelInsideManagedRoot = $true
+}
 if (-not $wakeReady -and -not $SkipSpeechModels) {
     New-Item -ItemType Directory -Force -Path $downloadRoot | Out-Null
     $voskArchive = Join-Path $downloadRoot ([string]$assetLock.vosk.archive)
     if (Test-Path -LiteralPath $voskArchive) {
         $archiveValid = (Get-Item -LiteralPath $voskArchive).Length -eq [int64]$assetLock.vosk.size_bytes -and
             (Get-FileHash -Algorithm SHA256 -LiteralPath $voskArchive).Hash -eq [string]$assetLock.vosk.sha256
-        if (-not $archiveValid) { Move-ToInstallerQuarantine $voskArchive }
+        if (-not $archiveValid) { Move-ToInstallerQuarantine $voskArchive -AllowedRoot $downloadRoot }
     }
     if (-not (Test-Path -LiteralPath $voskArchive)) {
         Write-Host 'Скачиваю компактную русскую модель голосовой активации Vosk...'
         $partial = "$voskArchive.partial"
-        if (Test-Path -LiteralPath $partial) { Move-ToInstallerQuarantine $partial }
+        if (Test-Path -LiteralPath $partial) { Move-ToInstallerQuarantine $partial -AllowedRoot $downloadRoot }
         try {
             Start-BitsTransfer -Source ([string]$assetLock.vosk.url) -Destination $partial
         }
@@ -294,12 +314,11 @@ if (-not $wakeReady -and -not $SkipSpeechModels) {
         }
         if ((Get-Item -LiteralPath $partial).Length -ne [int64]$assetLock.vosk.size_bytes -or
             (Get-FileHash -Algorithm SHA256 -LiteralPath $partial).Hash -ne [string]$assetLock.vosk.sha256) {
-            Move-ToInstallerQuarantine $partial
+            Move-ToInstallerQuarantine $partial -AllowedRoot $downloadRoot
             throw 'Контрольная сумма Vosk не совпала.'
         }
         Move-Item -LiteralPath $partial -Destination $voskArchive
     }
-    $voiceRoot = Join-Path $projectRoot 'runtime\voice'
     $extractRoot = Join-Path $voiceRoot ('.vosk-install-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
     try {
@@ -308,7 +327,9 @@ if (-not $wakeReady -and -not $SkipSpeechModels) {
         if (-not (Test-Path -LiteralPath (Join-Path $extracted 'conf\model.conf') -PathType Leaf)) {
             throw 'Архив Vosk не содержит ожидаемую структуру модели.'
         }
-        if (Test-Path -LiteralPath $wakeModelPath) { Move-ToInstallerQuarantine $wakeModelPath }
+        if (Test-Path -LiteralPath $wakeModelPath) {
+            Move-ToInstallerQuarantine $wakeModelPath -AllowedRoot $voiceRoot
+        }
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $wakeModelPath) | Out-Null
         Move-Item -LiteralPath $extracted -Destination $wakeModelPath
     }
@@ -326,13 +347,46 @@ $modelsRoot = if ($ModelStorageRoot) {
     [IO.Path]::GetFullPath($ModelStorageRoot)
 } elseif ($configuredModelsIsUsable) {
     [IO.Path]::GetFullPath($configuredModels)
-} elseif (Test-Path -LiteralPath 'D:\') {
-    'D:\AI\Models'
 } else {
     Join-Path $InstallRoot 'Models'
 }
 New-Item -ItemType Directory -Force -Path $modelsRoot | Out-Null
 Set-Property $paths 'models_dir' $modelsRoot
+
+$speechModelsRoot = Join-Path $modelsRoot 'Speech'
+$ttsModelPath = Join-Path $speechModelsRoot ([string]$assetLock.silero_tts.filename)
+$ttsModelValid = (Test-Path -LiteralPath $ttsModelPath -PathType Leaf) -and
+    (Get-Item -LiteralPath $ttsModelPath).Length -eq [int64]$assetLock.silero_tts.size_bytes -and
+    (Get-FileHash -Algorithm SHA256 -LiteralPath $ttsModelPath).Hash -eq [string]$assetLock.silero_tts.sha256
+if ((Test-Path -LiteralPath $ttsModelPath) -and -not $ttsModelValid) {
+    Move-ToInstallerQuarantine $ttsModelPath -AllowedRoot $modelsRoot
+}
+if (-not $ttsModelValid -and -not $SkipSpeechModels) {
+    New-Item -ItemType Directory -Force -Path $speechModelsRoot, $downloadRoot | Out-Null
+    $ttsPartial = Join-Path $downloadRoot (([string]$assetLock.silero_tts.filename) + '.partial')
+    if (Test-Path -LiteralPath $ttsPartial) {
+        Move-ToInstallerQuarantine $ttsPartial -AllowedRoot $downloadRoot
+    }
+    Write-Host 'Скачиваю закреплённый локальный голос Silero...'
+    try {
+        Start-BitsTransfer -Source ([string]$assetLock.silero_tts.url) -Destination $ttsPartial
+    }
+    catch {
+        Invoke-WebRequest -UseBasicParsing -Uri ([string]$assetLock.silero_tts.url) -OutFile $ttsPartial -TimeoutSec 900
+    }
+    if ((Get-Item -LiteralPath $ttsPartial).Length -ne [int64]$assetLock.silero_tts.size_bytes -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $ttsPartial).Hash -ne [string]$assetLock.silero_tts.sha256) {
+        Move-ToInstallerQuarantine $ttsPartial -AllowedRoot $downloadRoot
+        throw 'Контрольная сумма Silero TTS не совпала.'
+    }
+    Move-Item -LiteralPath $ttsPartial -Destination $ttsModelPath
+    $ttsModelValid = $true
+}
+if ($ttsModelValid) {
+    Set-Property $voice 'tts_model_path' ([IO.Path]::GetFullPath($ttsModelPath))
+    Set-Property $voice 'tts_model_expected_size_bytes' ([int64]$assetLock.silero_tts.size_bytes)
+    Set-Property $voice 'tts_model_sha256' ([string]$assetLock.silero_tts.sha256)
+}
 
 $configuredWhisper = [string](Get-EffectiveValue $config $defaultConfig 'voice' 'stt_model' '')
 $whisperPath = if (Test-WhisperModel $configuredWhisper) {
@@ -372,10 +426,17 @@ if (Test-WhisperModel $whisperPath) {
     Write-Host 'Веса Vosk/Whisper пропущены; их нужно установить отдельным model pack.'
 }
 
-$temporary = "$userConfigPath.tmp"
+$temporary = Join-Path (Split-Path -Parent $userConfigPath) ('.' + (Split-Path -Leaf $userConfigPath) + '.' + [Guid]::NewGuid().ToString('N') + '.tmp')
 $json = $config | ConvertTo-Json -Depth 30
-[IO.File]::WriteAllText($temporary, $json + "`n", $utf8)
-Move-Item -Force -LiteralPath $temporary -Destination $userConfigPath
+try {
+    [IO.File]::WriteAllText($temporary, $json + "`n", $utf8)
+    Move-Item -Force -LiteralPath $temporary -Destination $userConfigPath
+}
+finally {
+    if (Test-Path -LiteralPath $temporary) {
+        Remove-Item -Force -LiteralPath $temporary -ErrorAction SilentlyContinue
+    }
+}
 
 try { & (Join-Path $PSScriptRoot 'hardware-report.ps1') | Out-Host } catch { Write-Warning $_.Exception.Message }
 if (-not $SkipShortcuts) { & (Join-Path $PSScriptRoot 'install-shortcuts.ps1') }

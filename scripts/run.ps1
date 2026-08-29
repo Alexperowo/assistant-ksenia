@@ -8,30 +8,12 @@ $utf8 = [System.Text.UTF8Encoding]::new()
 [Console]::InputEncoding = $utf8
 [Console]::OutputEncoding = $utf8
 $OutputEncoding = $utf8
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $env:PYTHONPATH = Join-Path $projectRoot 'src'
-
-$pythonCandidates = [System.Collections.Generic.List[string]]::new()
-$userConfigPath = Join-Path $projectRoot 'config\user.json'
-if (Test-Path -LiteralPath $userConfigPath) {
-    try {
-        $userConfig = Get-Content -Raw -LiteralPath $userConfigPath | ConvertFrom-Json
-        if ($userConfig.voice.python) { $pythonCandidates.Add([string]$userConfig.voice.python) }
-    }
-    catch {}
-}
-$pythonCandidates.Add('D:\AI\Butler\venv\Scripts\python.exe')
-$pythonCandidates.Add('C:\butler-venv\Scripts\python.exe')
-$pythonCandidates.Add((Join-Path $env:LocalAppData 'Ksenia\Butler\venv\Scripts\python.exe'))
-$python = $null
-foreach ($candidate in $pythonCandidates) {
-    if (-not (Test-Path -LiteralPath $candidate)) { continue }
-    try {
-        & $candidate --version *> $null
-        if ($LASTEXITCODE -eq 0) { $python = $candidate; break }
-    }
-    catch { continue }
-}
+. (Join-Path $PSScriptRoot 'runtime-paths.ps1')
+$python = Resolve-KseniaPython -ProjectRoot $projectRoot
 if (-not $python) {
     try {
         & (Join-Path $PSScriptRoot 'speak.ps1') -Text (

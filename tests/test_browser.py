@@ -2,9 +2,10 @@ import unittest
 import json
 import sys
 import tempfile
+import socket
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from butler.browser import (
     BrowserError,
@@ -28,8 +29,39 @@ class BrowserSafetyTests(unittest.TestCase):
         self.assertFalse(public_http_url("http://127.0.0.1:18080/health"))
         self.assertFalse(public_http_url("http://192.168.0.1/"))
         self.assertFalse(public_http_url("http://localhost:8765/"))
+        self.assertFalse(public_http_url("http://2130706433:8765/"))
+        self.assertFalse(public_http_url("http://127.1:8765/"))
         self.assertFalse(public_http_url("https://user:secret@example.com/"))
-        self.assertTrue(public_http_url("https://example.com/product"))
+        with patch(
+            "butler.browser.socket.getaddrinfo",
+            return_value=[
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+            ],
+        ):
+            self.assertTrue(public_http_url("https://example.com/product"))
+
+    def test_domain_resolving_to_private_address_is_rejected(self):
+        with patch(
+            "butler.browser.socket.getaddrinfo",
+            return_value=[
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))
+            ],
+        ):
+            self.assertFalse(public_http_url("https://public-looking.example/"))
+
+    def test_read_only_modes_do_not_use_authenticated_persistent_profile(self):
+        reader = object.__new__(BrowserReader)
+        reader.persistent = True
+        reader.settings = SimpleNamespace(raw={"diagnostics": {"enabled": False}})
+        reader._validate = lambda _mode: None
+        reader._read_persistent = Mock(return_value={"unexpected": True})
+        reader._read_once = Mock(return_value={"results": []})
+
+        result = reader.read("search", "безопасный запрос")
+
+        self.assertEqual(result, {"results": []})
+        reader._read_persistent.assert_not_called()
+        reader._read_once.assert_called_once()
 
     def test_request_value_is_sent_over_stdin_not_process_arguments(self):
         with tempfile.TemporaryDirectory() as directory:

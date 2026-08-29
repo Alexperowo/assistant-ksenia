@@ -12,6 +12,8 @@ import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+from butler.atomic_io import exclusive_file_lock
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -243,7 +245,7 @@ def event(
         encoded = (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
             "utf-8"
         )
-        with _LOCK:
+        with _LOCK, exclusive_file_lock(target, timeout=2.0):
             target.parent.mkdir(parents=True, exist_ok=True)
             rotate_file(target, max_bytes, backup_count, len(encoded))
             with target.open("ab") as log:

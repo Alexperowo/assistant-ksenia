@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from butler.atomic_io import atomic_write_text, exclusive_file_lock
+
 
 class ConversationMemory:
     """Durable conversation state with atomic writes and conservative recovery."""
@@ -34,17 +36,17 @@ class ConversationMemory:
         return result
 
     def save(self, messages: list[dict[str, Any]]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": 1,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "messages": messages[-self.max_messages :],
         }
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        temporary.replace(self.path)
+        with exclusive_file_lock(self.path):
+            atomic_write_text(
+                self.path,
+                json.dumps(payload, ensure_ascii=False, indent=2),
+            )
 
     def clear(self) -> None:
-        self.path.unlink(missing_ok=True)
+        with exclusive_file_lock(self.path):
+            self.path.unlink(missing_ok=True)

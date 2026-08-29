@@ -13,6 +13,18 @@ from audio_input import open_best_input_stream
 from pcm_audio import ratecv, rms
 
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
+
+from butler.turn_detection import (  # noqa: E402
+    AdaptiveNoiseGate,
+    HybridTurnDetector,
+    StreamingTurnEndpoint,
+    TurnDecision,
+)
+
+
 _CUDA_DLL_HANDLES: list[object] = []
 
 
@@ -44,6 +56,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compute-type", default="int8_float16")
     parser.add_argument("--silence-seconds", type=float, default=0.85)
     parser.add_argument("--no-speech-timeout-seconds", type=float, default=10.0)
+    parser.add_argument("--semantic-endpointing", action="store_true")
+    parser.add_argument("--turn-complete-silence-seconds", type=float, default=0.45)
+    parser.add_argument("--turn-ordinary-silence-seconds", type=float, default=0.85)
+    parser.add_argument("--turn-incomplete-silence-seconds", type=float, default=2.2)
     return parser.parse_args()
 
 
@@ -96,7 +112,34 @@ def _input_metadata(opened) -> dict[str, object]:
     }
 
 
-def capture_phrase(args, max_seconds: int, before_capture=None, on_event=None):
+def load_vosk_model(model_path: Path):
+    from vosk import Model, SetLogLevel
+
+    SetLogLevel(-1)
+    return Model(str(model_path))
+
+
+def make_streaming_endpoint(model, args) -> StreamingTurnEndpoint:
+    from vosk import KaldiRecognizer
+
+    detector = HybridTurnDetector(
+        complete_silence_seconds=args.turn_complete_silence_seconds,
+        ordinary_silence_seconds=args.turn_ordinary_silence_seconds,
+        incomplete_silence_seconds=args.turn_incomplete_silence_seconds,
+    )
+    return StreamingTurnEndpoint(
+        KaldiRecognizer(model, args.sample_rate),
+        detector,
+    )
+
+
+def capture_phrase(
+    args,
+    max_seconds: int,
+    before_capture=None,
+    on_event=None,
+    partial_model=None,
+):
     import sounddevice as sd
 
     audio_queue: queue.Queue[bytes] = queue.Queue()
@@ -130,8 +173,8 @@ def capture_phrase(args, max_seconds: int, before_capture=None, on_event=None):
         resample_state = None
         pre_roll: deque[bytes] = deque(maxlen=4)
         captured = bytearray()
-        noise_levels: list[int] = []
-        threshold = 220
+        noise_gate = AdaptiveNoiseGate(minimum_threshold=220, multiplier=2.2)
+        threshold = noise_gate.threshold
         speech_started = False
         last_voice = time.monotonic()
         level_sum = 0
@@ -140,6 +183,19 @@ def capture_phrase(args, max_seconds: int, before_capture=None, on_event=None):
         peak_level = 0
         voice_started_ms: int | None = None
         endpoint_reason = "max_duration"
+        partial_transcript_chars = 0
+        endpoint = None
+        endpoint_error_type = ""
+        if partial_model is not None:
+            try:
+                endpoint = make_streaming_endpoint(partial_model, args)
+            except Exception as exc:
+                endpoint_error_type = type(exc).__name__
+                if on_event is not None:
+                    on_event(
+                        "semantic_endpointing_unavailable",
+                        error_type=endpoint_error_type,
+                    )
         if on_event is not None:
             on_event(
                 "capture_started",
@@ -164,12 +220,32 @@ def capture_phrase(args, max_seconds: int, before_capture=None, on_event=None):
             chunk_count += 1
             level_sum += level
             peak_level = max(peak_level, level)
-            if not speech_started and len(noise_levels) < 4:
-                noise_levels.append(level)
-                threshold = max(160, int((sum(noise_levels) / len(noise_levels)) * 2.2))
             now = time.monotonic()
             pre_roll.append(data)
-            if level >= threshold:
+            voice_active = noise_gate.observe(level) if not speech_started else level >= threshold
+            threshold = noise_gate.threshold
+            endpoint_observation = None
+            if endpoint is not None and (speech_started or voice_active):
+                endpoint_pcm = (
+                    b"".join(pre_roll) if voice_active and not speech_started else data
+                )
+                endpoint_observation = endpoint.observe(
+                    endpoint_pcm,
+                    speech_active=voice_active,
+                    at=now,
+                )
+                partial_transcript_chars = len(endpoint_observation.transcript)
+                if (
+                    endpoint_observation.transcript_changed
+                    and endpoint_observation.transcript
+                    and on_event is not None
+                ):
+                    on_event(
+                        "partial_transcript",
+                        text=endpoint_observation.transcript,
+                        text_chars=partial_transcript_chars,
+                    )
+            if voice_active:
                 voiced_chunk_count += 1
                 if not speech_started:
                     speech_started = True
@@ -189,16 +265,32 @@ def capture_phrase(args, max_seconds: int, before_capture=None, on_event=None):
                 last_voice = now
             elif speech_started:
                 captured.extend(data)
-                if now - last_voice >= args.silence_seconds:
+                fixed_silence_elapsed = now - last_voice
+                semantic_end = (
+                    endpoint_observation is not None
+                    and endpoint_observation.decision == TurnDecision.END_TURN
+                )
+                semantic_blank_timeout = (
+                    endpoint_observation is not None
+                    and not endpoint_observation.transcript
+                    and fixed_silence_elapsed
+                    >= args.turn_incomplete_silence_seconds
+                )
+                if semantic_end or semantic_blank_timeout:
+                    endpoint_reason = (
+                        "semantic_end_of_speech"
+                        if semantic_end
+                        else "semantic_no_transcript_timeout"
+                    )
+                    break
+                if endpoint is None and fixed_silence_elapsed >= args.silence_seconds:
                     endpoint_reason = "end_of_speech"
                     break
         capture_seconds = time.monotonic() - capture_started_at
         telemetry = {
             **_input_metadata(opened),
             "threshold": threshold,
-            "noise_floor": round(sum(noise_levels) / len(noise_levels))
-            if noise_levels
-            else 0,
+            "noise_floor": noise_gate.noise_floor,
             "average_level": round(level_sum / chunk_count) if chunk_count else 0,
             "peak_level": peak_level,
             "chunk_count": chunk_count,
@@ -207,6 +299,9 @@ def capture_phrase(args, max_seconds: int, before_capture=None, on_event=None):
             "voice_started_ms": voice_started_ms,
             "capture_seconds": round(capture_seconds, 2),
             "endpoint_reason": endpoint_reason,
+            "semantic_endpointing": endpoint is not None,
+            "semantic_endpointing_error_type": endpoint_error_type,
+            "partial_transcript_chars": partial_transcript_chars,
         }
         if on_event is not None:
             on_event("capture_completed", **telemetry)
@@ -235,11 +330,15 @@ def whisper_text(model, pcm: bytes, sample_rate: int) -> str:
     return " ".join(segment.text.strip() for segment in segments).strip()
 
 
-def vosk_text(model_path: Path, pcm: bytes, sample_rate: int) -> str:
-    from vosk import KaldiRecognizer, Model, SetLogLevel
+def vosk_text(model_or_path, pcm: bytes, sample_rate: int) -> str:
+    from vosk import KaldiRecognizer
 
-    SetLogLevel(-1)
-    recognizer = KaldiRecognizer(Model(str(model_path)), sample_rate)
+    model = (
+        load_vosk_model(model_or_path)
+        if isinstance(model_or_path, Path)
+        else model_or_path
+    )
+    recognizer = KaldiRecognizer(model, sample_rate)
     recognizer.AcceptWaveform(pcm)
     return str(json.loads(recognizer.FinalResult()).get("text", "")).strip()
 
@@ -247,6 +346,19 @@ def vosk_text(model_path: Path, pcm: bytes, sample_rate: int) -> str:
 def main() -> int:
     args = parse_args()
     model, device, compute_type = load_whisper(args)
+    partial_model = None
+    partial_error_type = ""
+    if args.semantic_endpointing:
+        try:
+            partial_model = load_vosk_model(args.fallback_model)
+        except Exception as exc:
+            partial_error_type = type(exc).__name__
+            print(
+                "STT semantic endpointing unavailable: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
     print(
         json.dumps(
             {
@@ -254,6 +366,9 @@ def main() -> int:
                 "engine": "faster-whisper",
                 "device": device,
                 "compute_type": compute_type,
+                "semantic_endpointing_requested": args.semantic_endpointing,
+                "semantic_endpointing": partial_model is not None,
+                "semantic_endpointing_error_type": partial_error_type,
             },
             ensure_ascii=False,
         ),
@@ -316,6 +431,7 @@ def main() -> int:
                     min(120, max(2, int(command.get("max_seconds", 25)))),
                     before_capture=wait_for_start if prepare_before_prompt else None,
                     on_event=emit_capture_event,
+                    partial_model=partial_model,
                 )
                 text = ""
                 engine = "faster-whisper"
@@ -326,7 +442,15 @@ def main() -> int:
                 except Exception as exc:
                     whisper_error = str(exc)
                 if not text:
-                    text = vosk_text(args.fallback_model, pcm, args.sample_rate)
+                    text = vosk_text(
+                        (
+                            partial_model
+                            if partial_model is not None
+                            else args.fallback_model
+                        ),
+                        pcm,
+                        args.sample_rate,
+                    )
                     engine = "vosk-fallback"
                 if not text:
                     raise RuntimeError(whisper_error or "Речь не распознана.")

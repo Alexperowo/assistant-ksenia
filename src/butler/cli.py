@@ -14,13 +14,14 @@ from typing import Callable, TypeVar
 
 from butler.chat import ChatError, SentenceChunker, stream_chat
 from butler.approval import approval_explanation
+from butler.atomic_io import atomic_write_text
 from butler.confirmation import confirmation_text
 from butler.config import (
     ConfigError,
     load_settings,
     reasoning_label,
     response_budget_label,
-    set_user_model,
+    set_user_capability_model,
     set_user_headset_control,
     set_user_reasoning,
     set_user_response_budget,
@@ -32,6 +33,7 @@ from butler.diagnostics import exception as diagnostic_exception
 from butler.diagnostic_report import format_summary, summarize
 from butler.instance_lock import SingleInstance
 from butler.lan import run_lan_server
+from butler.live import ConversationCoordinator
 from butler.model_manager import ModelManager, ModelManagerError
 from butler.model_catalog import find_models
 from butler.media_buttons import (
@@ -59,6 +61,7 @@ from butler.trusted_task import (
 )
 from butler.user_messages import spoken_agent_error
 from butler.wake import (
+    MicrophoneCaptureGate,
     WakeListener,
     WakeListenerCancelled,
     WakeListenerError,
@@ -437,66 +440,81 @@ def _show_models(
         size_gb = path.stat().st_size / (1024**3)
         spoken_models.append(f"номер {index}, {path.stem}, {size_gb:.1f} гигабайта")
     remainder = len(models) - len(spoken_models)
-    tail = (
-        f" Ещё моделей: {remainder}. В выборе усиленной модели я отдельно назову "
-        "только подходящие Gemma 26B и 27B."
-        if remainder > 0
-        else ""
-    )
+    tail = f" Ещё моделей: {remainder}." if remainder > 0 else ""
     speech.say_and_wait(
         f"Найдено моделей: {len(models)}. " + "; ".join(spoken_models) + "." + tail
     )
     return models
 
 
-def _configure_planner(settings, speech: SpeechAnnouncer) -> int:
-    all_models = find_models(settings)
-    models = [
-        path
-        for path in all_models
-        if any(family in path.name.casefold() for family in ("gemma", "gamma"))
-        and any(size in path.name.casefold() for size in ("26b", "27b"))
-    ]
-    if not models:
-        print("Подходящие Gemma 26B/27B не найдены.")
-        speech.say_and_wait(
-            "Подходящие Gemma 26B или 27B пока не найдены в папке моделей."
-        )
+def _configure_capability_model(settings, speech: SpeechAnnouncer) -> int:
+    capabilities = settings.capability_role_names()
+    profiles = settings.model_roles()
+    if not capabilities or not profiles:
+        print("В конфигурации нет функциональных ролей или модельных профилей.")
         return 1
-    models = _show_models(settings, speech, models=models)
-    if not models:
-        return 1
-    raw = input("Номер усиленной Gemma 4 26B/27B или Enter для отмены: ").strip()
-    if not raw:
+
+    print("\n=== Назначение модельного профиля ===")
+    for index, name in enumerate(capabilities, 1):
+        role = settings.capability_role(name)
+        current = role.primary_model or "не назначен"
+        print(f"{index}. {role.label} — сейчас: {current}")
+    raw_capability = input("Номер функциональной роли или Enter для отмены: ").strip()
+    if not raw_capability:
         return 0
     try:
-        selected = models[int(raw) - 1]
+        capability = capabilities[int(raw_capability) - 1]
     except (ValueError, IndexError):
         print("Такого номера нет. Настройка не изменена.")
         return 1
-    answer = input(f"Подключить планировщик {selected.name}? Введите ДА: ").strip().casefold()
+
+    for index, profile_name in enumerate(profiles, 1):
+        profile = settings.model(profile_name)
+        state = "включён" if profile.enabled else "выключен"
+        print(f"{index}. {profile.label} — {state}")
+    raw_profile = input("Номер настроенного профиля или Enter для отмены: ").strip()
+    if not raw_profile:
+        return 0
+    try:
+        profile_name = profiles[int(raw_profile) - 1]
+        profile = settings.model(profile_name)
+    except (ValueError, IndexError, ConfigError):
+        print("Такого профиля нет. Настройка не изменена.")
+        return 1
+    if not profile.enabled:
+        print("Выключенный или экспериментальный профиль сначала должен пройти приёмку.")
+        return 1
+    answer = input(
+        f"Назначить «{profile.label}» выбранной роли? Введите ДА: "
+    ).strip().casefold()
     if answer != "да":
         print("Настройка отменена.")
         return 0
-    set_user_model(settings.root, "planner", selected, enabled=True)
-    print(f"Планировщик подключён: {selected}")
-    speech.say_and_wait("Усиленный планировщик подключён. Он включится на сложной задаче.")
+    set_user_capability_model(settings.root, capability, profile_name)
+    print(f"Профиль назначен: {profile.label}")
+    speech.say_and_wait("Модельный профиль назначен. Он применится к следующей задаче.")
     return 0
 
 
 def _configure_reasoning(settings, speech: SpeechAnnouncer) -> int:
     print("\n=== Режим рассуждений ===")
-    roles = ("developer", "planner")
-    for index, role in enumerate(roles, 1):
+    profiles = settings.model_roles()
+    for index, role in enumerate(profiles, 1):
         profile = settings.model(role)
         print(f"{index}. {profile.label}: {reasoning_label(profile.reasoning)}")
-    print("3. Изменить для обеих моделей")
-    raw_role = input("Роль: 1, 2, 3 или Enter для отмены: ").strip()
-    selections = {"1": ("developer",), "2": ("planner",), "3": roles}
-    selected_roles = selections.get(raw_role)
+    print(f"{len(profiles) + 1}. Изменить для всех профилей")
+    raw_role = input("Номер профиля или Enter для отмены: ").strip()
     if not raw_role:
         return 0
-    if selected_roles is None:
+    try:
+        selected_index = int(raw_role) - 1
+    except ValueError:
+        selected_index = -1
+    if selected_index == len(profiles):
+        selected_roles = profiles
+    elif 0 <= selected_index < len(profiles):
+        selected_roles = (profiles[selected_index],)
+    else:
         print("Такого номера нет.")
         return 1
 
@@ -509,7 +527,7 @@ def _configure_reasoning(settings, speech: SpeechAnnouncer) -> int:
     print("0. Выключено — самый быстрый и устойчивый режим.")
     print("1. Кратко — до 256 токенов рассуждений.")
     print("2. Обычно — до 768 токенов рассуждений.")
-    print("3. Глубоко — до 1536 токенов; для 26B может заметно замедлить ответ.")
+    print("3. Глубоко — до 1536 токенов; может заметно замедлить ответ.")
     raw_level = input("Уровень: 0, 1, 2, 3 или Enter для отмены: ").strip()
     if not raw_level:
         return 0
@@ -610,9 +628,9 @@ def _voice_agent(settings, speech: SpeechAnnouncer) -> int:
             "started_at": datetime.now().isoformat(timespec="seconds"),
             "mode": "voice-agent",
         }
-        temporary = state_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(state_path)
+        atomic_write_text(
+            state_path, json.dumps(state, ensure_ascii=False, indent=2)
+        )
         diagnostic_event(
             settings,
             "voice_agent",
@@ -636,6 +654,33 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
     task_store = DurableTaskStore(settings.runtime_dir)
     recognizer = SpeechRecognizer(settings)
     wake_listener = WakeListener(settings)
+    live_config = settings.raw.get("live", {})
+    live_enabled = bool(live_config.get("enabled", False))
+    live_minimum_phrase_chars = max(
+        1, int(live_config.get("minimum_phrase_chars", 24))
+    )
+    live_maximum_phrase_chars = max(
+        live_minimum_phrase_chars,
+        int(live_config.get("maximum_phrase_chars", 220)),
+    )
+    live_playback_timeout = max(
+        30.0, float(live_config.get("playback_timeout_seconds", 600))
+    )
+    if live_enabled and not speech.live_available():
+        diagnostic_event(
+            settings,
+            "voice_agent",
+            "live_unavailable",
+            level="warning",
+            reason="ordered_silero_queue_unavailable",
+        )
+        message = (
+            "Потоковый режим отключён: постоянная очередь Silero не готова. "
+            "Продолжаю в обычном голосовом режиме."
+        )
+        print(message)
+        speech.say_and_wait(message)
+        live_enabled = False
     controls = settings.raw.get("headset_controls", {})
     headset_listener = None
     activation_button = str(controls.get("activation_button", "play_pause"))
@@ -678,6 +723,11 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
     device_phrase = "на видеокарте" if recognition_device == "cuda" else "на процессоре"
     speech.say_and_wait(
         f"Голосовой режим готов. Распознавание работает {device_phrase}. "
+        + (
+            "Потоковое озвучивание включено. "
+            if live_enabled
+            else ""
+        )
         + (
             "Нажмите настроенную кнопку наушников или скажите: Ксения слушай."
             if headset_listener is not None
@@ -814,6 +864,14 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             return 0
 
         trusted_task_used = False
+        live_stream_started = threading.Event()
+        voice_output_lock = threading.Lock()
+        microphone_gate = MicrophoneCaptureGate()
+        confirmation_handoff_timeout = float(
+            settings.raw.get("voice", {}).get(
+                "confirmation_microphone_handoff_timeout_seconds", 5.0
+            )
+        )
 
         def report_status(status: str) -> None:
             nonlocal trusted_task_used
@@ -823,12 +881,15 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             task_store.transition(
                 task.id, _runtime_task_state(status), status, confirmation=None
             )
-            if status == TRUSTED_TASK_STARTED:
-                # The task must not race ahead before a blind user hears that
-                # repeat confirmations are disabled for this request.
-                speech.say_and_wait(status)
-            else:
-                speech.say(status)
+            with voice_output_lock:
+                if live_enabled and live_stream_started.is_set():
+                    return
+                if status == TRUSTED_TASK_STARTED:
+                    # The task must not race ahead before a blind user hears that
+                    # repeat confirmations are disabled for this request.
+                    speech.say_and_wait(status)
+                else:
+                    speech.say(status)
 
         def confirm_action(name: str, arguments: dict, _reason: str) -> bool:
             prompt = _confirmation_text(name, arguments)
@@ -839,19 +900,31 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                 confirmation={"tool": name, "message": prompt},
             )
             print(f"[ПОДТВЕРЖДЕНИЕ] {prompt} Скажите «да» или «нет».")
+            approved = False
             try:
-                answer = str(
-                    recognizer.listen_after_prompt(
-                        lambda: speech.say_and_wait(prompt + " Скажите да или нет.")
-                    ).get("text", "")
-                ).strip().casefold()
-            except SpeechRecognitionError:
-                speech.say_and_wait("Подтверждение не распознано. Действие отменено.")
-                return False
-            approved = answer in {"да", "подтверждаю", "разрешаю", "выполняй", "согласен"}
-            task_store.transition(
-                task.id, TaskState.RUNNING, "Продолжаю", confirmation=None
-            )
+                with microphone_gate.exclusive_capture(confirmation_handoff_timeout):
+                    answer = str(
+                        recognizer.listen_after_prompt(
+                            lambda: speech.say_and_wait(
+                                prompt + " Скажите да или нет."
+                            )
+                        ).get("text", "")
+                    ).strip().casefold()
+                approved = answer in {
+                    "да",
+                    "подтверждаю",
+                    "разрешаю",
+                    "выполняй",
+                    "согласен",
+                }
+            except (SpeechRecognitionError, TimeoutError):
+                speech.say_and_wait(
+                    "Подтверждение не распознано. Действие отменено."
+                )
+            finally:
+                task_store.transition(
+                    task.id, TaskState.RUNNING, "Продолжаю", confirmation=None
+                )
             speech.say_and_wait("Подтверждено." if approved else "Действие отменено.")
             return approved
 
@@ -867,10 +940,24 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
         control = TaskControl(task_store, task.id)
         task_store.transition(task.id, TaskState.RUNNING, "Начинаю")
         task_finished = threading.Event()
+        agent_finished = threading.Event()
+        stop_monitor_cancel = microphone_gate.monitor_cancel_event(task_finished)
+        live_output = (
+            ConversationCoordinator(
+                speech,
+                minimum_phrase_chars=live_minimum_phrase_chars,
+                maximum_phrase_chars=live_maximum_phrase_chars,
+            )
+            if live_enabled
+            else None
+        )
+        live_token = live_output.begin_response(user_text) if live_output else None
 
         def monitor_voice_stop() -> None:
             stop_listener = WakeListener(settings)
             while not task_finished.is_set():
+                if not microphone_gate.monitor_checkpoint(task_finished):
+                    return
                 try:
                     stop_event = stop_listener.wait_event(
                         timeout=300,
@@ -879,10 +966,12 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                             if headset_listener is not None
                             else None
                         ),
-                        cancel_event=task_finished,
+                        cancel_event=stop_monitor_cancel,
                     )
                 except WakeListenerCancelled:
-                    return
+                    if not microphone_gate.monitor_checkpoint(task_finished):
+                        return
+                    continue
                 except WakeListenerTimeout:
                     continue
                 except WakeListenerError as exc:
@@ -905,15 +994,24 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                         wake_event=event_name,
                     )
                     continue
-                try:
-                    task_store.cancel(task.id)
-                except (KeyError, OSError, ValueError):
-                    return
-                speech.stop()
+                response_only = live_output is not None and agent_finished.is_set()
+                if not response_only:
+                    try:
+                        task_store.cancel(task.id)
+                    except (KeyError, OSError, ValueError):
+                        return
+                if live_output is not None:
+                    live_output.interrupt(f"voice_{event_name}")
+                else:
+                    speech.stop()
                 diagnostic_event(
                     settings,
                     "voice_agent",
-                    "task_cancelled_by_voice_or_headset",
+                    (
+                        "response_interrupted_by_voice_or_headset"
+                        if response_only
+                        else "task_cancelled_by_voice_or_headset"
+                    ),
                     task_id=task.id,
                     wake_event=event_name,
                 )
@@ -921,15 +1019,82 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
 
         stop_monitor = threading.Thread(target=monitor_voice_stop, daemon=True)
         stop_monitor.start()
+        live_snapshot = None
+
+        def accept_final_delta(delta: str) -> None:
+            if live_output is None or live_token is None:
+                return
+            with voice_output_lock:
+                if not live_stream_started.is_set():
+                    live_stream_started.set()
+                    # The stop command reaches the persistent worker before the
+                    # first final phrase and flushes obsolete progress messages.
+                    speech.stop()
+                live_output.accept_delta(live_token, delta)
+
         try:
             reply = session.ask(
                 user_text,
                 on_status=report_status,
                 on_confirmation=confirm_action,
-                max_steps=int(settings.raw.get("agent", {}).get("max_steps", 8)),
+                max_steps=settings.developer_max_steps,
                 control=control,
+                on_final_delta=accept_final_delta if live_enabled else None,
             )
+            agent_finished.set()
+            if live_output is not None and live_token is not None:
+                live_output.finish_response(live_token)
+                if not live_output.session.wait_until_settled(
+                    live_token.turn_id,
+                    timeout=live_playback_timeout,
+                ):
+                    live_output.interrupt("playback_timeout")
+                    diagnostic_event(
+                        settings,
+                        "voice_agent",
+                        "live_playback_timeout",
+                        level="warning",
+                        task_id=task.id,
+                        timeout_seconds=live_playback_timeout,
+                    )
+                live_snapshot = live_output.snapshot()
+                if not session.commit_spoken_reply(
+                    live_snapshot.generated_text,
+                    live_snapshot.spoken_text,
+                ):
+                    diagnostic_event(
+                        settings,
+                        "voice_agent",
+                        "live_memory_commit_refused",
+                        level="error",
+                        task_id=task.id,
+                        generated_chars=len(live_snapshot.generated_text),
+                        spoken_chars=len(live_snapshot.spoken_text),
+                    )
+                    live_enabled = False
+                    speech.say_and_wait(
+                        "Потоковый режим безопасно выключен: память ответа не совпала. "
+                        "Обычный голосовой режим продолжит работу."
+                    )
         except TaskCancelled:
+            if live_output is not None:
+                live_snapshot = live_output.interrupt("task_cancelled")
+                session.commit_spoken_reply(
+                    live_snapshot.generated_text,
+                    live_snapshot.spoken_text,
+                )
+                try:
+                    task_store.transition(
+                        task.id,
+                        TaskState.CANCELLED,
+                        "Отменено",
+                        generated_answer=live_snapshot.generated_text,
+                        spoken_answer=live_snapshot.spoken_text,
+                        confirmation=None,
+                        resumable=False,
+                    )
+                except (KeyError, OSError, ValueError):
+                    pass
             diagnostic_event(
                 settings,
                 "voice_agent",
@@ -941,6 +1106,12 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             speech.say_and_wait("Задача отменена.")
             continue
         except ChatError as exc:
+            if live_output is not None:
+                live_snapshot = live_output.interrupt("agent_error")
+                session.commit_spoken_reply(
+                    live_snapshot.generated_text,
+                    live_snapshot.spoken_text,
+                )
             diagnostic_exception(
                 settings,
                 "voice_agent",
@@ -950,7 +1121,17 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                 duration_ms=round((time.monotonic() - task_started) * 1000),
             )
             task_store.transition(
-                task.id, TaskState.FAILED, "Ошибка", error=str(exc), resumable=True
+                task.id,
+                TaskState.FAILED,
+                "Ошибка",
+                generated_answer=(
+                    live_snapshot.generated_text if live_snapshot is not None else None
+                ),
+                spoken_answer=(
+                    live_snapshot.spoken_text if live_snapshot is not None else None
+                ),
+                error=str(exc),
+                resumable=True,
             )
             print(f"Ошибка агента: {exc}")
             speech.say_and_wait(_spoken_agent_error(exc))
@@ -963,6 +1144,12 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             TaskState.COMPLETED,
             "Готово",
             answer=reply.text,
+            generated_answer=(
+                live_snapshot.generated_text if live_snapshot is not None else None
+            ),
+            spoken_answer=(
+                live_snapshot.spoken_text if live_snapshot is not None else None
+            ),
             confirmation=None,
             resumable=False,
         )
@@ -975,11 +1162,14 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             answer=reply.text,
         )
         print(f"Ксения: {reply.text}\n")
-        # The final answer is more important than queued progress messages.
-        speech.stop()
-        if trusted_task_used:
-            speech.say(TRUSTED_TASK_FINISHED)
-        speech.say(reply.text)
+        if live_output is not None and trusted_task_used:
+            speech.say_and_wait(TRUSTED_TASK_FINISHED)
+        elif live_output is None:
+            # The final answer is more important than queued progress messages.
+            speech.stop()
+            if trusted_task_used:
+                speech.say(TRUSTED_TASK_FINISHED)
+            speech.say(reply.text)
 
 
 def _agent_chat(settings, speech: SpeechAnnouncer) -> int:
@@ -1033,7 +1223,7 @@ def _agent_chat(settings, speech: SpeechAnnouncer) -> int:
                 user_text,
                 on_status=report_status,
                 on_confirmation=confirm_action,
-                max_steps=int(settings.raw.get("agent", {}).get("max_steps", 8)),
+                max_steps=settings.developer_max_steps,
                 control=control,
             )
             task_store.transition(
@@ -1070,8 +1260,8 @@ def _menu(settings, speech: SpeechAnnouncer) -> int:
         print(
             "\n=== Локальный дворецкий ===\n"
             "1. Состояние системы\n"
-            "2. Запустить основного разработчика\n"
-            "3. Переключиться на планировщика\n"
+            "2. Запустить основную модель\n"
+            "3. Переключиться на модель сложного планирования\n"
             "4. Остановить модель\n"
             "5. Проверить голос\n"
             "6. Агентный диалог\n"
@@ -1082,7 +1272,7 @@ def _menu(settings, speech: SpeechAnnouncer) -> int:
             "11. Голосовой режим с фразой активации\n"
             "12. Показать все микрофоны\n"
             "13. Показать найденные модели\n"
-            "14. Выбрать усиленную модель 26B/27B\n"
+            "14. Назначить модельный профиль функциональной роли\n"
             "15. Настроить глубину рассуждений\n"
             "16. Настроить длину ответа\n"
             "17. Проверить управление с наушников\n"
@@ -1094,13 +1284,17 @@ def _menu(settings, speech: SpeechAnnouncer) -> int:
             if choice in {"1", "статус", "состояние"}:
                 _status(settings, speech)
             elif choice in {"2", "разработчик"}:
-                state = _model_control(settings, lambda: manager.start("developer"))
-                message = f"Основной разработчик запущен. PID {state.pid}."
+                profile = settings.capability_model("assistant")
+                state = _model_control(settings, lambda: manager.start(profile))
+                message = f"Основная модель запущена. PID {state.pid}."
                 print(message)
                 speech.say(message)
             elif choice in {"3", "планировщик"}:
-                state = _model_control(settings, lambda: manager.switch("planner"))
-                message = f"Планировщик запущен. PID {state.pid}."
+                profile = settings.capability_model(
+                    "heavy_brain", fallback="researcher"
+                )
+                state = _model_control(settings, lambda: manager.switch(profile))
+                message = f"Модель сложного планирования запущена. PID {state.pid}."
                 print(message)
                 speech.say(message)
             elif choice in {"4", "стоп", "остановить"}:
@@ -1136,7 +1330,7 @@ def _menu(settings, speech: SpeechAnnouncer) -> int:
             elif choice in {"13", "модели", "список моделей"}:
                 _show_models(settings, speech)
             elif choice in {"14", "выбрать модель", "настроить планировщик"}:
-                _configure_planner(settings, speech)
+                _configure_capability_model(settings, speech)
                 settings = load_settings(settings.root)
                 manager = ModelManager(settings)
             elif choice in {"15", "рассуждения", "мышление"}:

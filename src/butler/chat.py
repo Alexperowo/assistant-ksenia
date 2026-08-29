@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import queue
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -84,7 +86,7 @@ class SentenceChunker:
         chunks: list[str] = []
         while True:
             match = self._boundary.match(self.buffer)
-            if match and len(match.group(1).strip()) >= self.minimum_length:
+            if match and match.group(1).strip():
                 chunk = match.group(1).strip()
                 self.buffer = self.buffer[match.end() :]
                 chunks.append(chunk)
@@ -105,7 +107,79 @@ class SentenceChunker:
         return remaining
 
 
-def count_chat_tokens(settings: Settings, messages: Iterable[dict[str, Any]]) -> int:
+def _cancellable_response_lines(
+    response,
+    checkpoint: Callable[[], None],
+    *,
+    poll_seconds: float = 0.1,
+) -> Iterator[bytes]:
+    """Read a possibly stalled HTTP stream without delaying cancellation."""
+
+    messages: queue.Queue[tuple[str, object]] = queue.Queue()
+
+    def read_response() -> None:
+        try:
+            for raw_line in response:
+                messages.put(("line", raw_line))
+        except BaseException as exc:
+            messages.put(("error", exc))
+        finally:
+            messages.put(("done", None))
+
+    threading.Thread(target=read_response, daemon=True).start()
+    while True:
+        checkpoint()
+        try:
+            kind, value = messages.get(timeout=poll_seconds)
+        except queue.Empty:
+            continue
+        if kind == "done":
+            return
+        if kind == "error":
+            if isinstance(value, BaseException):
+                raise value
+            raise OSError("Чтение ответа модели завершилось неизвестной ошибкой.")
+        if not isinstance(value, bytes):
+            raise OSError("Сервер модели вернул строку потока неизвестного типа.")
+        yield value
+
+
+def _cancellable_response_read(
+    response,
+    checkpoint: Callable[[], None],
+    *,
+    poll_seconds: float = 0.1,
+) -> bytes:
+    messages: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+
+    def read_response() -> None:
+        try:
+            messages.put(("value", response.read()))
+        except BaseException as exc:
+            messages.put(("error", exc))
+
+    threading.Thread(target=read_response, daemon=True).start()
+    while True:
+        checkpoint()
+        try:
+            kind, value = messages.get(timeout=poll_seconds)
+        except queue.Empty:
+            continue
+        if kind == "error":
+            if isinstance(value, BaseException):
+                raise value
+            raise OSError("Чтение ответа модели завершилось неизвестной ошибкой.")
+        if not isinstance(value, bytes):
+            raise OSError("Сервер модели вернул ответ неизвестного типа.")
+        return value
+
+
+def count_chat_tokens(
+    settings: Settings,
+    messages: Iterable[dict[str, Any]],
+    *,
+    checkpoint: Callable[[], None] | None = None,
+) -> int:
     """Count tokens with the active llama.cpp tokenizer, with a safe fallback."""
     message_list = normalize_system_messages(messages)
     content = json.dumps(message_list, ensure_ascii=False, separators=(",", ":"))
@@ -119,8 +193,15 @@ def count_chat_tokens(settings: Settings, messages: Iterable[dict[str, Any]]) ->
         method="POST",
     )
     try:
+        if checkpoint is not None:
+            checkpoint()
         with urllib.request.urlopen(request, timeout=30) as response:
-            value = json.loads(response.read().decode("utf-8", errors="replace"))
+            raw = (
+                _cancellable_response_read(response, checkpoint)
+                if checkpoint is not None
+                else response.read()
+            )
+            value = json.loads(raw.decode("utf-8", errors="replace"))
         tokens = value.get("tokens", []) if isinstance(value, dict) else []
         if isinstance(tokens, list):
             diagnostic_event(
@@ -152,6 +233,7 @@ def stream_chat(
     *,
     temperature: float = 0.3,
     max_tokens: int | None = None,
+    checkpoint: Callable[[], None] | None = None,
 ) -> Iterator[str]:
     message_list = normalize_system_messages(messages)
     selected_max_tokens = default_max_tokens(settings) if max_tokens is None else max_tokens
@@ -184,8 +266,15 @@ def stream_chat(
         **_message_metrics(message_list),
     )
     try:
+        if checkpoint is not None:
+            checkpoint()
         with urllib.request.urlopen(request, timeout=600) as response:
-            for raw_line in response:
+            lines = (
+                _cancellable_response_lines(response, checkpoint)
+                if checkpoint is not None
+                else iter(response)
+            )
+            for raw_line in lines:
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line.startswith("data:"):
                     continue
@@ -203,6 +292,8 @@ def stream_chat(
                         first_token_ms = round((time.monotonic() - started) * 1000)
                     output_chars += len(str(content))
                     yield str(content)
+        if checkpoint is not None:
+            checkpoint()
         completed = True
     except urllib.error.HTTPError as exc:
         diagnostic_event(
@@ -245,14 +336,16 @@ def complete_chat(
     temperature: float = 0.2,
     max_tokens: int | None = None,
     checkpoint: Callable[[], None] | None = None,
+    on_content_delta: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Request one complete response, optionally exposing safe tools to the model."""
     url = f"http://{settings.host}:{settings.port}/v1/chat/completions"
     message_list = normalize_system_messages(messages)
     selected_max_tokens = default_max_tokens(settings) if max_tokens is None else max_tokens
+    streaming = checkpoint is not None or on_content_delta is not None
     payload: dict[str, Any] = {
         "messages": message_list,
-        "stream": checkpoint is not None,
+        "stream": streaming,
         "temperature": temperature,
         "max_tokens": selected_max_tokens,
     }
@@ -272,16 +365,20 @@ def complete_chat(
         "completion_started",
         max_tokens=selected_max_tokens,
         temperature=temperature,
-        streaming=checkpoint is not None,
+        streaming=streaming,
         tool_count=len(tools or []),
         **_message_metrics(message_list),
     )
     try:
         with urllib.request.urlopen(request, timeout=600) as response:
-            if checkpoint is None:
+            if not streaming:
                 value = json.loads(response.read().decode("utf-8", errors="replace"))
             else:
-                value = _read_complete_stream(response, checkpoint)
+                value = _read_complete_stream(
+                    response,
+                    checkpoint or (lambda: None),
+                    on_content_delta=on_content_delta,
+                )
         if not isinstance(value, dict) or not value.get("choices"):
             raise ChatError("Модель вернула пустой ответ.")
         first_choice = value.get("choices", [{}])[0]
@@ -339,15 +436,19 @@ def complete_chat(
         raise ChatError(f"Не удалось связаться с локальной моделью: {exc}") from exc
 
 
-def _read_complete_stream(response, checkpoint: Callable[[], None]) -> dict[str, Any]:
+def _read_complete_stream(
+    response,
+    checkpoint: Callable[[], None],
+    *,
+    on_content_delta: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
     """Aggregate an OpenAI-compatible stream while remaining cancellable."""
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     calls: dict[int, dict[str, Any]] = {}
     finish_reason: str | None = None
     usage: dict[str, Any] | None = None
-    for raw_line in response:
-        checkpoint()
+    for raw_line in _cancellable_response_lines(response, checkpoint):
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line.startswith("data:"):
             continue
@@ -369,7 +470,10 @@ def _read_complete_stream(response, checkpoint: Callable[[], None]) -> dict[str,
         if not isinstance(delta, dict):
             continue
         if delta.get("content") is not None:
-            content_parts.append(str(delta["content"]))
+            content_delta = str(delta["content"])
+            content_parts.append(content_delta)
+            if on_content_delta is not None:
+                on_content_delta(content_delta)
         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
         if reasoning is not None:
             reasoning_parts.append(str(reasoning))

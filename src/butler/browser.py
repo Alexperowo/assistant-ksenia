@@ -5,6 +5,7 @@ import ipaddress
 import json
 import os
 import queue
+import socket
 import subprocess
 import re
 import threading
@@ -49,10 +50,14 @@ def contains_financial_action(*values: object) -> bool:
 
 
 def public_http_url(value: object) -> bool:
-    """Allow public HTTP(S) destinations, never local files or private IPs."""
+    """Allow only HTTP(S) destinations whose current addresses are all public."""
+    raw = str(value or "")
+    if not raw or "\\" in raw or any(ord(character) < 32 or ord(character) == 127 for character in raw):
+        return False
     try:
-        parsed = urlparse(str(value or ""))
+        parsed = urlparse(raw)
         hostname = (parsed.hostname or "").casefold().rstrip(".")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
     except ValueError:
         return False
     if parsed.scheme not in {"http", "https"} or not hostname:
@@ -61,11 +66,49 @@ def public_http_url(value: object) -> bool:
         return False
     if hostname == "localhost" or hostname.endswith((".localhost", ".local")):
         return False
+
+    # inet_aton also understands legacy IPv4 spellings such as 127.1,
+    # 2130706433 and hexadecimal/octal forms that urlparse treats as names.
+    try:
+        legacy_ipv4 = ipaddress.ip_address(socket.inet_ntoa(socket.inet_aton(hostname)))
+    except OSError:
+        legacy_ipv4 = None
+    if legacy_ipv4 is not None:
+        return legacy_ipv4.is_global
+
     try:
         address = ipaddress.ip_address(hostname)
     except ValueError:
-        return True
-    return address.is_global
+        address = None
+    if address is not None:
+        return address.is_global
+
+    try:
+        ascii_hostname = hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    labels = ascii_hostname.split(".")
+    if (
+        len(ascii_hostname) > 253
+        or any(not label or len(label) > 63 for label in labels)
+        or any(label.startswith("-") or label.endswith("-") for label in labels)
+    ):
+        return False
+    try:
+        resolved = socket.getaddrinfo(
+            ascii_hostname,
+            port,
+            type=socket.SOCK_STREAM,
+        )
+    except (OSError, UnicodeError):
+        return False
+    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for item in resolved:
+        try:
+            addresses.append(ipaddress.ip_address(str(item[4][0]).split("%", 1)[0]))
+        except (IndexError, TypeError, ValueError):
+            return False
+    return bool(addresses) and all(address.is_global for address in addresses)
 
 
 class BrowserReader:
@@ -331,11 +374,9 @@ class BrowserReader:
             persistent=bool(getattr(self, "persistent", False)),
         )
         try:
-            payload = (
-                self._read_persistent(mode, value)
-                if bool(getattr(self, "persistent", False))
-                else None
-            )
+            payload = None
+            if mode == "interact" and bool(getattr(self, "persistent", False)):
+                payload = self._read_persistent(mode, value)
             if payload is None:
                 diagnostic_event(
                     self.settings,

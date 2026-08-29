@@ -2,7 +2,7 @@
   "assistant": {
     "name": "Ксения",
     "language": "ru",
-    "default_role": "developer",
+    "default_role": "assistant",
     "announce_status": true
   },
   "paths": {
@@ -28,11 +28,15 @@
     "engine": "silero",
     "python": "",
     "model": "v5_ru",
-    "speaker": "aidar",
+    "tts_model_path": "",
+    "tts_model_expected_size_bytes": 145382211,
+    "tts_model_sha256": "7BA04D42340FE0398042EED2E0D12D62E23096D626B1B9FEFF4DCB1309197AB4",
+    "speaker": "xenia",
     "sample_rate": 48000,
     "threads": 4,
     "tts_device": "cpu",
     "tts_min_free_vram_mb": 2048,
+    "tts_startup_timeout_seconds": 120,
     "wake_word": "Ксения слушай",
     "wake_model": "runtime/voice/vosk-model-small-ru-0.22",
     "wake_sample_rate": 16000,
@@ -48,7 +52,18 @@
     "microphone_retry_max_seconds": 60,
     "microphone_error_reminder_seconds": 300,
     "leading_silence_ms": 120,
-    "cold_leading_silence_ms": 1000
+    "cold_leading_silence_ms": 1000,
+    "confirmation_microphone_handoff_timeout_seconds": 5.0
+  },
+  "live": {
+    "enabled": false,
+    "semantic_endpointing": true,
+    "turn_complete_silence_seconds": 0.45,
+    "turn_ordinary_silence_seconds": 0.85,
+    "turn_incomplete_silence_seconds": 2.2,
+    "minimum_phrase_chars": 24,
+    "maximum_phrase_chars": 220,
+    "playback_timeout_seconds": 600
   },
   "browser": {
     "enabled": true,
@@ -57,6 +72,7 @@
     "profile_dir": "",
     "headless": true,
     "persistent": true,
+    "active_control_enabled": false,
     "max_parallel": 4,
     "timeout_seconds": 45,
     "max_text_chars": 6000
@@ -68,6 +84,7 @@
     "debounce_ms": 700
   },
   "windows": {
+    "active_control_enabled": false,
     "automation_timeout_seconds": 20,
     "max_inspected_elements": 150
   },
@@ -78,7 +95,9 @@
   },
   "agent": {
     "max_steps": 8,
-    "max_tool_calls_total": 16,
+    "developer_max_steps": 24,
+    "max_tool_calls_total": 48,
+    "max_directory_list_calls": 6,
     "max_confirmation_requests": 4,
     "status_heartbeat_seconds": 20,
     "tool_result_max_chars": 12000,
@@ -126,30 +145,30 @@
     "assistant": {
       "label": "Дворецкий или ассистент",
       "purpose": "Диалог, повседневные поручения, координация и понятная связь с Александром.",
-      "primary_model": "developer",
+      "primary_model": "generalist",
       "candidate_model": null,
       "enabled": true
     },
     "researcher": {
       "label": "Исследователь",
       "purpose": "Поиск в интернете, проверка источников, сравнение товаров, цен и фактов.",
-      "primary_model": "planner",
+      "primary_model": "generalist",
       "candidate_model": null,
       "enabled": true
     },
     "developer": {
       "label": "Разработчик",
       "purpose": "Работа с файлами, кодом, тестами, терминалом и инструментами агента.",
-      "primary_model": "developer",
-      "candidate_model": "developer_qwopus",
+      "primary_model": "generalist",
+      "candidate_model": "candidate",
       "enabled": true
     },
     "heavy_brain": {
       "label": "Тяжёлый мозг",
       "purpose": "Сложная декомпозиция, длинное планирование и независимая проверка важных решений.",
-      "primary_model": null,
-      "candidate_model": null,
-      "enabled": false
+      "primary_model": "reasoning",
+      "candidate_model": "candidate",
+      "enabled": true
     }
   },
   "developer": {
@@ -157,17 +176,43 @@
     "allowed_programs": ["python", "python.exe", "py", "pytest", "git", "node", "npm", "npm.cmd"],
     "command_timeout_seconds": 180,
     "max_output_chars": 30000,
+    "execution": {
+      "backend": "disabled",
+      "unsafe_host_acknowledgement": ""
+    },
     "test_command": ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
   },
   "models": {
-    "developer": {
-      "label": "Основной разработчик Gemma 4 12B",
-      "filename": "gemma4-12b-agentic-q6_k.gguf",
-      "context_size": 16384,
-      "gpu_layers": 99,
+    "generalist": {
+      "label": "Laguna XS 2.1 APEX I-Quality + DFlash",
+      "artifacts": {
+        "model": {
+          "filename": "Laguna-XS-2.1-APEX-I-Quality.gguf",
+          "source_repo": "mudler/Laguna-XS-2.1-APEX-GGUF",
+          "source_revision": "db4706b9d0c3d336c5ab19f9f7c7f46a1a553829",
+          "source_filename": "Laguna-XS-2.1-APEX-I-Quality.gguf",
+          "expected_size_bytes": 21819407136,
+          "sha256": "e15e4b9c7c5833c9a58bc70c9745f0cd21e00d4f9edd0c114cd39862ebe545c3"
+        },
+        "draft": {
+          "filename": "Laguna-XS-2.1-DFlash-Q8_0.gguf",
+          "source_repo": "dev7a/Laguna-XS-2.1-DFlash-GGUF",
+          "source_revision": "335be330b72a556fb107f99881261e275b21050d",
+          "source_filename": "Laguna-XS-2.1-DFlash-Q8_0.gguf",
+          "expected_size_bytes": 494735712,
+          "sha256": "8b01363d09eac264d93e54df8020b0c73d229f6092bbbdb99ec6774c7a2aa4db"
+        }
+      },
+      "context_size": 98304,
+      "gpu_layers": 999,
       "enabled": true,
       "experimental": false,
       "reasoning": "off",
+      "acceleration": {
+        "type": "draft-dflash",
+        "max_tokens": 2,
+        "draft_gpu_layers": 999
+      },
       "extra_args": [
         "--jinja",
         "--flash-attn",
@@ -177,18 +222,98 @@
         "--cache-type-k",
         "q8_0",
         "--cache-type-v",
-        "q5_0"
+        "q4_0",
+        "--batch-size",
+        "2048",
+        "--ubatch-size",
+        "1024",
+        "--cache-ram",
+        "8192",
+        "--no-context-shift",
+        "--cont-batching",
+        "--override-tensor",
+        "blk\\.(2[0-9]|3[0-9])\\.ffn_.*_exps\\.weight=CPU",
+        "--reasoning-format",
+        "deepseek"
       ]
     },
-    "planner": {
-      "label": "Временный планировщик Gemma 4 26B-A4B Heretic JA QAT Q4_0",
-      "filename": "gemma-4-26B-A4B-it-qat-q4_0-heretic-ja-Q4_0.gguf",
-      "source_repo": "OS-Software/gemma-4-26B-A4B-it-qat-q4_0-heretic-ja-GGUF",
-      "context_size": 65536,
+    "reasoning": {
+      "label": "Qwen 3.8 27B Opus Distill v2 + MTP + Vision",
+      "artifacts": {
+        "model": {
+          "filename": "Qwen3.8-27B-Opus-Distill-v2-Q4_K_M.gguf",
+          "source_repo": "barozp/Qwen3.8-27B-Opus-Distill-v2-GGUF",
+          "source_revision": "a96bd883e68b1e4483ac2c54b1be9797cfff6b1f",
+          "source_filename": "Qwen3.8-27B-Opus-Distill-v2-Q4_K_M.gguf",
+          "expected_size_bytes": 16810714688,
+          "sha256": "424b98a8f5add2fb66b92902d98ee9288badc82f4b986e70ade5f8d5ca615991"
+        },
+        "projector": {
+          "filename": "Qwen3.8-27B-Opus-Distill-v2-mmproj-f16.gguf",
+          "source_repo": "barozp/Qwen3.8-27B-Opus-Distill-v2-GGUF",
+          "source_revision": "a96bd883e68b1e4483ac2c54b1be9797cfff6b1f",
+          "source_filename": "Qwen3.8-27B-Opus-Distill-v2-mmproj-f16.gguf",
+          "expected_size_bytes": 927607296,
+          "sha256": "de0d58cea206add6ff82392027785ff294ad9cca22b74fc949f4eb15add35512"
+        }
+      },
+      "context_size": 98304,
+      "gpu_layers": "auto",
+      "enabled": true,
+      "experimental": false,
+      "reasoning": "normal",
+      "acceleration": {
+        "type": "draft-mtp",
+        "max_tokens": 2
+      },
+      "extra_args": [
+        "--jinja",
+        "--flash-attn",
+        "on",
+        "--parallel",
+        "1",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q4_0",
+        "--fit",
+        "on",
+        "--fit-target",
+        "1024",
+        "--load-mode",
+        "none",
+        "--batch-size",
+        "2048",
+        "--ubatch-size",
+        "1024",
+        "--cache-ram",
+        "8192",
+        "--no-context-shift",
+        "--cont-batching",
+        "--reasoning-preserve"
+      ]
+    },
+    "candidate": {
+      "label": "Кандидат Ornith 1.5 35B-A3B APEX MTP Fixed",
+      "artifacts": {
+        "model": {
+          "filename": "ornith15-trained-head.gguf",
+          "source_repo": "conFIGur8tor/ornith15-35b-a3b-apex-mtp-fixed",
+          "source_revision": "63518f71da021c5d2f1dc5fa1dfa7fa74437d6aa",
+          "source_filename": "ornith15-trained-head.gguf",
+          "expected_size_bytes": 17437861152,
+          "sha256": "344925ae3f65a57a55c1db1acaf52e7ca49aaf5e0b845b797964e73106f6e340"
+        }
+      },
+      "context_size": 16384,
       "gpu_layers": "auto",
       "enabled": false,
       "experimental": true,
       "reasoning": "off",
+      "acceleration": {
+        "type": "draft-mtp",
+        "max_tokens": 2
+      },
       "extra_args": [
         "--jinja",
         "--flash-attn",
@@ -199,55 +324,10 @@
         "q8_0",
         "--cache-type-v",
         "q5_0",
-        "--fit",
-        "on",
-        "--fit-target",
-        "1024"
-      ]
-    },
-    "developer_qwopus": {
-      "label": "Разработчик и исследователь Qwopus 3.5 9B Coder MTP Q6_K",
-      "filename": "Qwopus3.5-9B-Coder-MTP-Q6_K.gguf",
-      "source_repo": "Jackrong/Qwopus3.5-9B-Coder-MTP-GGUF",
-      "expected_size_bytes": 7558903712,
-      "sha256": "6993e21c637d79a6f359f4b7b45db67b103d73d17cbf6f3a883b2e5cb9e4e87a",
-      "context_size": 65536,
-      "gpu_layers": 99,
-      "enabled": true,
-      "experimental": false,
-      "reasoning": "off",
-      "extra_args": [
-        "--jinja",
-        "--flash-attn",
-        "on",
-        "--parallel",
-        "1",
-        "--cache-type-k",
-        "q8_0",
-        "--cache-type-v",
-        "q5_0",
-        "--spec-type",
-        "draft-mtp",
-        "--spec-draft-n-max",
-        "2",
         "--fit",
         "on",
         "--fit-target",
         "2048"
-      ]
-    },
-    "experimental_qwen": {
-      "label": "Экспериментальный планировщик Qwen 3.6 35B A3B",
-      "filename": "qwen3.6-35b-a3b-agent-q3_16g.gguf",
-      "context_size": 16384,
-      "gpu_layers": "auto",
-      "enabled": false,
-      "experimental": true,
-      "reasoning": "off",
-      "extra_args": [
-        "--jinja", "--flash-attn", "on", "--parallel", "1",
-        "--cache-type-k", "q8_0", "--cache-type-v", "q5_0",
-        "--n-cpu-moe", "20", "--fit", "on", "--fit-target", "3072"
       ]
     }
   },

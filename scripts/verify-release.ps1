@@ -1,10 +1,13 @@
 ﻿param(
     [Parameter(Mandatory = $true)]
     [string]$ArchivePath,
-    [string]$PythonPath = ''
+    [string]$PythonPath = '',
+    [string]$ExpectedSha256 = ''
 )
 
 $ErrorActionPreference = 'Stop'
+$projectRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+. (Join-Path $PSScriptRoot 'runtime-paths.ps1')
 $ArchivePath = [IO.Path]::GetFullPath($ArchivePath)
 if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) {
     throw "Архив не найден: $ArchivePath"
@@ -15,29 +18,27 @@ if (-not $temporaryRoot.StartsWith($tempParent + '\', [StringComparison]::Ordina
     throw 'Небезопасный временный путь.'
 }
 
-function Find-Python {
-    if ($PythonPath -and (Test-Path -LiteralPath $PythonPath -PathType Leaf)) { return $PythonPath }
-    foreach ($candidate in @(
-        'D:\AI\Butler\venv\Scripts\python.exe',
-        'C:\butler-venv\Scripts\python.exe',
-        (Join-Path $env:LocalAppData 'Ksenia\Butler\venv\Scripts\python.exe')
-    )) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
-    }
-    throw 'Python 3.12 не найден. Сначала установите среду или передайте -PythonPath.'
-}
-
 try {
-    New-Item -ItemType Directory -Force -Path $temporaryRoot | Out-Null
-    Expand-Archive -LiteralPath $ArchivePath -DestinationPath $temporaryRoot
-    $packageManifests = @(Get-ChildItem -LiteralPath $temporaryRoot -Filter 'PACKAGE-MANIFEST.json' -File -Recurse)
-    if ($packageManifests.Count -ne 1) {
-        throw "Ожидался один PACKAGE-MANIFEST.json, найдено: $($packageManifests.Count)"
+    $python = Resolve-KseniaPython -ProjectRoot $projectRoot -ExplicitPath $PythonPath
+    if (-not $python) {
+        throw 'Python 3.12 не найден. Сначала установите среду или передайте -PythonPath.'
     }
-    $packageRoot = Split-Path -Parent $packageManifests[0].FullName
-    $python = Find-Python
-    & $python (Join-Path $packageRoot 'scripts\validate_release.py') `
-        --package-root $packageRoot --require-package
+    $trustedValidator = Join-Path $PSScriptRoot 'validate_release.py'
+    if (-not (Test-Path -LiteralPath $trustedValidator -PathType Leaf)) {
+        throw 'Доверенный локальный валидатор релиза не найден.'
+    }
+    $validatorArguments = @(
+        $trustedValidator,
+        '--archive', $ArchivePath,
+        '--extract-to', $temporaryRoot
+    )
+    if ($ExpectedSha256) {
+        $validatorArguments += @('--expected-sha256', $ExpectedSha256)
+    }
+    else {
+        Write-Warning 'Происхождение архива не подтверждено: передайте опубликованный SHA-256 через -ExpectedSha256.'
+    }
+    & $python @validatorArguments
     if ($LASTEXITCODE -ne 0) { throw 'Архив не прошёл проверку.' }
     Write-Host "Архив корректен: $ArchivePath"
     Write-Host "SHA-256 ZIP: $((Get-FileHash -Algorithm SHA256 -LiteralPath $ArchivePath).Hash)"

@@ -20,9 +20,22 @@ SENSITIVE_SUFFIXES = {
     ".pfx",
 }
 
+SENSITIVE_DIRECTORIES = {
+    ".aws",
+    ".azure",
+    ".docker",
+    ".git",
+    ".gnupg",
+    ".kube",
+    ".ssh",
+    "gcloud",
+}
+
 
 def is_sensitive_path(path: Path) -> bool:
     """Identify files whose contents must never enter an LLM prompt."""
+    if any(part.casefold() in SENSITIVE_DIRECTORIES for part in path.parts):
+        return True
     name = path.name.casefold()
     if name in SENSITIVE_FILENAMES or name.startswith(".env."):
         return True

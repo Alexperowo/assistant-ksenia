@@ -100,6 +100,9 @@
     let lastStatus = '';
     let lastEvents = '';
     let confirmationWasVisible = false;
+    let confirmationId = '';
+    let confirmationRevision = -1;
+    let confirmationDigest = '';
 
     async function authenticate(candidate) {
       const response = await fetch('/api/auth', {
@@ -162,7 +165,15 @@
       confirmation.hidden = !task.confirmation;
       if (task.confirmation) {
         confirmationText.textContent = task.confirmation.message;
+        confirmationId = task.confirmation.confirmation_id;
+        confirmationRevision = task.confirmation.revision;
+        confirmationDigest = task.confirmation.digest;
         if (!confirmationWasVisible) approve.focus();
+      }
+      else {
+        confirmationId = '';
+        confirmationRevision = -1;
+        confirmationDigest = '';
       }
       confirmationWasVisible = Boolean(task.confirmation);
     }
@@ -174,7 +185,12 @@
         const response = await fetch(`/api/tasks/${currentTaskId}/confirmation`, {
           method: 'POST',
           headers: {'Content-Type': 'application/json', 'X-Butler-Pin': pin},
-          body: JSON.stringify({approved})
+          body: JSON.stringify({
+            approved,
+            confirmation_id: confirmationId,
+            revision: confirmationRevision,
+            digest: confirmationDigest
+          })
         });
         if (!response.ok) throw new Error('Не удалось передать решение');
         confirmation.hidden = true;

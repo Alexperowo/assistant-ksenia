@@ -55,6 +55,41 @@ class DurableTaskStoreTests(unittest.TestCase):
         with self.assertRaises(TaskCancelled):
             self.store.checkpoint(task.id)
 
+    def test_terminal_state_is_absorbing(self):
+        task = self.store.create("Тест", channel="lan")
+        cancelled = self.store.cancel(task.id)
+
+        with self.assertRaises(ValueError):
+            self.store.transition(task.id, TaskState.RUNNING, "Начинаю снова")
+
+        current = self.store.get(task.id)
+        self.assertEqual(current["state"], TaskState.CANCELLED)
+        self.assertEqual(current["status"], "Отменено")
+        self.assertEqual(current.get("revision"), cancelled.get("revision"))
+
+    def test_transition_rejects_stale_revision_without_mutating_task(self):
+        task = self.store.create("Тест", channel="lan")
+        initial_revision = task.snapshot().get("revision", 0)
+        running = self.store.transition(
+            task.id,
+            TaskState.RUNNING,
+            "Выполняю",
+            expected_revision=initial_revision,
+        )
+
+        with self.assertRaises(ValueError):
+            self.store.transition(
+                task.id,
+                TaskState.VERIFYING,
+                "Проверяю",
+                expected_revision=initial_revision,
+            )
+
+        current = self.store.get(task.id)
+        self.assertEqual(current["state"], TaskState.RUNNING)
+        self.assertEqual(current["status"], "Выполняю")
+        self.assertEqual(current.get("revision"), running.get("revision"))
+
     def test_confirmation_payload_can_be_cleared(self):
         task = self.store.create("Отправь", channel="lan")
         self.store.transition(
@@ -67,6 +102,25 @@ class DurableTaskStoreTests(unittest.TestCase):
             task.id, TaskState.RUNNING, "Продолжаю", confirmation=None
         )
         self.assertIsNone(current["confirmation"])
+
+    def test_live_generated_and_spoken_answers_are_stored_separately(self):
+        task = self.store.create("Расскажи", channel="voice")
+
+        current = self.store.transition(
+            task.id,
+            TaskState.COMPLETED,
+            "Готово",
+            answer="Первая. Вторая.",
+            generated_answer="Первая. Вторая.",
+            spoken_answer="Первая.",
+            resumable=False,
+        )
+        restored = DurableTaskStore(Path(self.temporary.name)).get(task.id)
+
+        self.assertEqual(current["generated_answer"], "Первая. Вторая.")
+        self.assertEqual(current["spoken_answer"], "Первая.")
+        self.assertEqual(restored["generated_answer"], "Первая. Вторая.")
+        self.assertEqual(restored["spoken_answer"], "Первая.")
 
 
 if __name__ == "__main__":

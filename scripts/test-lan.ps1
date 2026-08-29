@@ -1,7 +1,7 @@
 ﻿param(
     [int]$Port = 18765,
     [string]$Pin = '123456',
-    [string]$PythonPath = 'C:\butler-venv\Scripts\python.exe'
+    [string]$PythonPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -9,9 +9,9 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $env:PYTHONPATH = Join-Path $projectRoot 'src'
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
-if (-not (Test-Path -LiteralPath $PythonPath)) {
-    throw "Python для LAN-теста не найден: $PythonPath"
-}
+. (Join-Path $PSScriptRoot 'runtime-paths.ps1')
+$PythonPath = Resolve-KseniaPython -ProjectRoot $projectRoot -ExplicitPath $PythonPath
+if (-not $PythonPath) { throw 'Python 3.12 для LAN-теста не найден.' }
 
 function Test-LocalPort {
     param([int]$TargetPort)

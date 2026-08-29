@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import socket
 import subprocess
 import time
@@ -11,6 +13,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from butler.atomic_io import atomic_write_text, exclusive_file_lock
 from butler.config import ModelProfile, Settings, reasoning_arguments
 from butler.diagnostics import event as diagnostic_event
 from butler.local_auth import api_key_file, local_api_key
@@ -19,6 +22,39 @@ from butler.processes import process_image_path, terminate_verified_process
 
 class ModelManagerError(RuntimeError):
     pass
+
+
+MANAGED_SERVER_OPTIONS = frozenset(
+    {
+        "--",
+        "-m",
+        "-c",
+        "-ngl",
+        "--model",
+        "--model-url",
+        "--model-draft",
+        "--model-vocoder",
+        "--hf-repo",
+        "--hf-file",
+        "--hf-token",
+        "--mmproj",
+        "--host",
+        "--port",
+        "--api-key",
+        "--api-key-file",
+        "--api-prefix",
+        "--cors-origins",
+        "--no-cors-credentials",
+        "--ctx-size",
+        "--n-gpu-layers",
+        "--gpu-layers",
+        "--spec-type",
+        "--spec-draft-n-max",
+        "--gpu-layers-draft",
+        "--reasoning",
+        "--reasoning-budget",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -38,13 +74,94 @@ class ModelManager:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
+    @property
+    def _integrity_cache_path(self) -> Path:
+        return self.settings.runtime_dir / "models" / "integrity.json"
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    def _verify_artifact_integrity(
+        self,
+        *,
+        role: str,
+        artifact: str,
+        path: Path,
+        expected_size: int,
+        expected_sha256: str,
+    ) -> None:
+        if not expected_size or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+            raise ModelManagerError(
+                f"Артефакт {artifact} профиля {role} не имеет полного size/SHA-256 lock."
+            )
+        stat = path.stat()
+        signature = {
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "ctime_ns": stat.st_ctime_ns,
+            "device": stat.st_dev,
+            "inode": stat.st_ino,
+            "expected_sha256": expected_sha256,
+        }
+        cache_path = self._integrity_cache_path
+        cache_key = os.path.normcase(str(path.resolve()))
+        with exclusive_file_lock(cache_path, timeout=30.0):
+            try:
+                cache = json.loads(cache_path.read_text(encoding="utf-8"))
+                if not isinstance(cache, dict):
+                    cache = {}
+            except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
+                cache = {}
+            if cache.get(cache_key) == signature:
+                return
+            actual_sha256 = self._sha256_file(path)
+            if actual_sha256 != expected_sha256:
+                diagnostic_event(
+                    self.settings,
+                    "model_manager",
+                    "model_hash_mismatch",
+                    level="error",
+                    role=role,
+                    artifact=artifact,
+                    model_file=path.name,
+                )
+                raise ModelManagerError(
+                    f"SHA-256 артефакта {artifact} не совпал с lock-конфигурацией: "
+                    f"{path}. Профиль не запущен."
+                )
+            cache[cache_key] = signature
+            atomic_write_text(
+                cache_path,
+                json.dumps(cache, ensure_ascii=False, indent=2, sort_keys=True),
+            )
+
     def build_command(self, profile: ModelProfile) -> list[str]:
+        for argument in profile.extra_args:
+            option = argument.split("=", 1)[0].casefold()
+            if option in MANAGED_SERVER_OPTIONS:
+                raise ModelManagerError(
+                    f"extra_args профиля {profile.role} пытается переопределить "
+                    f"управляемый параметр llama.cpp: {option}"
+                )
         # Create the key before llama.cpp opens its key file during startup.
         local_api_key(self.settings)
-        return [
+        command = [
             str(self.settings.llama_server),
             "--model",
             str(profile.model_path),
+        ]
+        uses_draft = profile.acceleration_type in {"draft-dflash", "draft-dspark"}
+        if uses_draft and profile.draft_model_path is not None:
+            command.extend(["--model-draft", str(profile.draft_model_path)])
+        if profile.projector_path is not None:
+            command.extend(["--mmproj", str(profile.projector_path)])
+        command.extend(
+            [
             "--host",
             self.settings.host,
             "--port",
@@ -58,9 +175,21 @@ class ModelManager:
             "--cors-origins",
             "localhost",
             "--no-cors-credentials",
-            *profile.extra_args,
-            *reasoning_arguments(profile.reasoning),
-        ]
+            ]
+        )
+        if profile.acceleration_type != "none":
+            command.extend(["--spec-type", profile.acceleration_type])
+        if profile.acceleration_max_tokens:
+            command.extend(
+                ["--spec-draft-n-max", str(profile.acceleration_max_tokens)]
+            )
+        if uses_draft and profile.draft_model_path is not None and profile.draft_gpu_layers:
+            command.extend(
+                ["--gpu-layers-draft", str(profile.draft_gpu_layers)]
+            )
+        command.extend(profile.extra_args)
+        command.extend(reasoning_arguments(profile.reasoning))
+        return command
 
     def launch_signature(self, profile: ModelProfile) -> str:
         payload = json.dumps(self.build_command(profile), ensure_ascii=False)
@@ -74,12 +203,23 @@ class ModelManager:
             return None
 
     def _write_state(self, state: RuntimeState) -> None:
-        self.settings.runtime_dir.mkdir(parents=True, exist_ok=True)
-        temporary = self.settings.state_file.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(asdict(state), ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        temporary.replace(self.settings.state_file)
+        with exclusive_file_lock(self.settings.state_file):
+            atomic_write_text(
+                self.settings.state_file,
+                json.dumps(asdict(state), ensure_ascii=False, indent=2),
+            )
+
+    def _remove_state_if_unchanged(self, stale: RuntimeState) -> bool:
+        with exclusive_file_lock(self.settings.state_file):
+            if self._read_state() != stale:
+                return False
+            try:
+                self.settings.state_file.unlink()
+                return True
+            except FileNotFoundError:
+                return True
+            except OSError:
+                return False
 
     def _prune_logs(self, logs: Path, role: str) -> None:
         config = self.settings.raw.get("diagnostics", {})
@@ -113,6 +253,7 @@ class ModelManager:
         actual = process_image_path(state.pid)
         expected = Path(state.executable).resolve()
         if actual != expected:
+            state_removed = self._remove_state_if_unchanged(state)
             diagnostic_event(
                 self.settings,
                 "model_manager",
@@ -122,6 +263,7 @@ class ModelManager:
                 state_pid=state.pid,
                 expected_executable=expected,
                 actual_executable=actual,
+                state_removed=state_removed,
             )
             return None
         return state
@@ -192,6 +334,8 @@ class ModelManager:
             model_file=profile.model_path.name,
             requested_context=profile.context_size,
             gpu_layers=profile.gpu_layers,
+            acceleration=profile.acceleration_type,
+            has_projector=profile.projector_path is not None,
             reasoning=profile.reasoning,
             wait=wait,
         )
@@ -202,27 +346,59 @@ class ModelManager:
             raise ModelManagerError(f"Профиль «{role}» отключён в конфигурации.")
         if not self.settings.llama_server.is_file():
             raise ModelManagerError(f"Не найден llama-server: {self.settings.llama_server}")
-        if not profile.model_path.is_file():
-            raise ModelManagerError(f"Не найден файл модели: {profile.model_path}")
-        if (
-            profile.expected_size_bytes
-            and profile.model_path.stat().st_size != profile.expected_size_bytes
-        ):
-            actual_size = profile.model_path.stat().st_size
-            diagnostic_event(
-                self.settings,
-                "model_manager",
-                "model_size_mismatch",
-                level="error",
+        artifacts = (
+            (
+                "model",
+                profile.model_path,
+                profile.expected_size_bytes,
+                profile.sha256,
+            ),
+            (
+                "draft",
+                (
+                    profile.draft_model_path
+                    if profile.acceleration_type in {"draft-dflash", "draft-dspark"}
+                    else None
+                ),
+                profile.draft_expected_size_bytes,
+                profile.draft_sha256,
+            ),
+            (
+                "projector",
+                profile.projector_path,
+                profile.projector_expected_size_bytes,
+                profile.projector_sha256,
+            ),
+        )
+        for artifact, path, expected_size, expected_sha256 in artifacts:
+            if path is None:
+                continue
+            if not path.is_file():
+                raise ModelManagerError(f"Не найден артефакт модели {artifact}: {path}")
+            actual_size = path.stat().st_size
+            if expected_size and actual_size != expected_size:
+                diagnostic_event(
+                    self.settings,
+                    "model_manager",
+                    "model_size_mismatch",
+                    level="error",
+                    role=role,
+                    artifact=artifact,
+                    model_file=path.name,
+                    expected_size_bytes=expected_size,
+                    actual_size_bytes=actual_size,
+                )
+                raise ModelManagerError(
+                    f"Артефакт {artifact} имеет неверный размер: {path}. "
+                    f"Ожидалось {expected_size} байт, получено {actual_size}. "
+                    "Профиль не запущен."
+                )
+            self._verify_artifact_integrity(
                 role=role,
-                model_file=profile.model_path.name,
-                expected_size_bytes=profile.expected_size_bytes,
-                actual_size_bytes=actual_size,
-            )
-            raise ModelManagerError(
-                f"Файл модели имеет неверный размер: {profile.model_path}. "
-                f"Ожидалось {profile.expected_size_bytes} байт, получено {actual_size}. "
-                "Модель не запущена."
+                artifact=artifact,
+                path=path,
+                expected_size=expected_size,
+                expected_sha256=expected_sha256,
             )
 
         current = self.running_state()

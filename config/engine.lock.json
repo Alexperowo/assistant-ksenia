@@ -2,9 +2,9 @@
   "engine": "llama.cpp",
   "release": "b10241",
   "commit": "9bd4c09ea",
-  "cuda": "13.3",
+  "cuda": "12.4",
   "assets": {
-    "llama-b10241-bin-win-cuda-13.3-x64.zip": "66B085930AF429B98A6CFE537B94FA79591280D8B1D6AD8C3E99644C38154D0B",
-    "cudart-llama-bin-win-cuda-13.3-x64.zip": "1462A050EB4C684921BA51DCC4CC488A036674C3E73E9945EE705B854808D03E"
+    "llama-b10241-bin-win-cuda-12.4-x64.zip": "47F57855A390C95F8F28B3B5DC28CA0E0FE227B2A380D65F239CA89625BA3AB9",
+    "cudart-llama-bin-win-cuda-12.4-x64.zip": "8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6"
   }
 }

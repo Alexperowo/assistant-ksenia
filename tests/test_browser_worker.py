@@ -1,8 +1,10 @@
 import sys
+import socket
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request
+from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -11,11 +13,31 @@ from browser_worker import (  # noqa: E402
     extract_offers,
     normalize_search_result_url,
     parse_duckduckgo_results,
+    public_http_url as worker_public_http_url,
     search_provider_url,
 )
 
 
 class BrowserOfferExtractionTests(unittest.TestCase):
+    def test_worker_rejects_ambiguous_numeric_and_private_dns_hosts(self):
+        self.assertFalse(worker_public_http_url("http://2130706433/"))
+        self.assertFalse(worker_public_http_url("http://127.1/"))
+        with patch(
+            "browser_worker.socket.getaddrinfo",
+            return_value=[
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.7", 443))
+            ],
+        ):
+            self.assertFalse(worker_public_http_url("https://example.test/"))
+
+    def test_read_worker_disables_script_state_and_active_channels(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "scripts" / "browser_worker.py"
+        ).read_text(encoding="utf-8-sig")
+        self.assertIn("java_script_enabled=False", source)
+        self.assertIn('service_workers="block"', source)
+        self.assertIn("route_web_socket", source)
+
     def test_search_fetch_accepts_only_fixed_https_providers(self):
         self.assertTrue(search_provider_url("https://html.duckduckgo.com/html/?q=test"))
         self.assertTrue(search_provider_url("https://www.bing.com/search?q=test"))
@@ -51,12 +73,18 @@ class BrowserOfferExtractionTests(unittest.TestCase):
             ),
             "",
         )
-        self.assertEqual(
-            normalize_search_result_url(
-                "https://evilduckduckgo.com/l/?uddg=https%3A%2F%2Fpython.org%2F"
-            ),
-            "https://evilduckduckgo.com/l/?uddg=https%3A%2F%2Fpython.org%2F",
-        )
+        with patch(
+            "browser_worker.socket.getaddrinfo",
+            return_value=[
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+            ],
+        ):
+            self.assertEqual(
+                normalize_search_result_url(
+                    "https://evilduckduckgo.com/l/?uddg=https%3A%2F%2Fpython.org%2F"
+                ),
+                "https://evilduckduckgo.com/l/?uddg=https%3A%2F%2Fpython.org%2F",
+            )
 
     def test_duckduckgo_html_result_is_parsed(self):
         results = parse_duckduckgo_results(

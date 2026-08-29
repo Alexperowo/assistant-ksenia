@@ -4,8 +4,9 @@ import argparse
 import asyncio
 import json
 import sys
+from urllib.parse import urlparse
 
-from browser_worker import process_request
+from browser_worker import process_request, public_http_url
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -43,11 +44,30 @@ async def run() -> int:
             headless=args.headless == "true",
             args=["--disable-gpu", "--no-first-run", "--no-default-browser-check"],
             viewport={"width": 1440, "height": 900},
+            service_workers="block",
         )
+
+        async def guard_local_network(route) -> None:
+            request_url = str(route.request.url or "")
+            scheme = urlparse(request_url).scheme.casefold()
+            if scheme in {"about", "blob", "data"} or public_http_url(request_url):
+                await route.continue_()
+            else:
+                await route.abort("blockedbyclient")
+
+        await context.route("**/*", guard_local_network)
+        if hasattr(context, "route_web_socket"):
+            await context.route_web_socket(
+                "**/*", lambda web_socket: web_socket.close()
+            )
 
         async def handle(command: dict[str, object]) -> None:
             request_id = str(command.get("id", ""))
             try:
+                if str(command.get("mode", "")) != "interact":
+                    raise ValueError(
+                        "Постоянный авторизованный браузер разрешён только для взаимодействия."
+                    )
                 async with semaphore:
                     value = await process_request(
                         context,

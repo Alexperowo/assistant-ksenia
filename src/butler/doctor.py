@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import shutil
 import subprocess
+import tempfile
 import ctypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -285,9 +287,19 @@ def run_checks(settings: Settings, *, installation_mode: bool = False) -> list[C
     line_count = 0
     try:
         diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
-        probe = diagnostics_path.parent / ".diagnostics-write-test.tmp"
-        probe.write_text("ok", encoding="ascii")
-        probe.unlink()
+        descriptor, raw_probe = tempfile.mkstemp(
+            prefix=".diagnostics-write-test.",
+            suffix=".tmp",
+            dir=diagnostics_path.parent,
+        )
+        probe = Path(raw_probe)
+        try:
+            with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+                stream.write("ok")
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            probe.unlink(missing_ok=True)
         diagnostics_ready = True
         if diagnostics_path.is_file():
             lines = diagnostics_path.read_text(encoding="utf-8").splitlines()
@@ -325,8 +337,8 @@ def run_checks(settings: Settings, *, installation_mode: bool = False) -> list[C
             "Оперативная память",
             memory_gb is not None and memory_gb >= 15,
             (
-                f"{memory_gb} ГБ установлено; 12B и 26B/64K проверены, "
-                "для 26B запас ОЗУ небольшой"
+                f"{memory_gb} ГБ установлено; пригодность проверяется "
+                "по фактическим активным профилям"
                 if memory_gb is not None
                 else "не удалось определить"
             ),
@@ -354,22 +366,48 @@ def run_checks(settings: Settings, *, installation_mode: bool = False) -> list[C
     )
     for role in settings.model_roles():
         profile = settings.model(role)
-        model_exists = profile.model_path.is_file()
-        model_size_ok = model_exists and (
-            not profile.expected_size_bytes
-            or profile.model_path.stat().st_size == profile.expected_size_bytes
-        )
-        size_detail = ""
-        if model_exists and not model_size_ok:
-            size_detail = (
-                f"; размер {profile.model_path.stat().st_size}, "
-                f"ожидалось {profile.expected_size_bytes}"
+        artifacts = [
+            ("model", profile.model_path, profile.expected_size_bytes),
+        ]
+        if profile.acceleration_type in {"draft-dflash", "draft-dspark"}:
+            artifacts.append(
+                ("draft", profile.draft_model_path, profile.draft_expected_size_bytes)
             )
+        if profile.projector_path is not None:
+            artifacts.append(
+                (
+                    "projector",
+                    profile.projector_path,
+                    profile.projector_expected_size_bytes,
+                )
+            )
+        details = []
+        model_size_ok = True
+        for name, path, expected_size in artifacts:
+            exists = path is not None and path.is_file()
+            size_ok = bool(
+                exists
+                and (
+                    not expected_size
+                    or path.stat().st_size == expected_size
+                )
+            )
+            model_size_ok = model_size_ok and size_ok
+            if path is None:
+                details.append(f"{name}: не настроен")
+            elif not exists:
+                details.append(f"{name}: не найден {path}")
+            elif not size_ok:
+                details.append(
+                    f"{name}: размер {path.stat().st_size}, ожидалось {expected_size}"
+                )
+            else:
+                details.append(f"{name}: {path.name}")
         checks.append(
             Check(
                 f"Модель {role}",
                 model_size_ok,
-                f"{profile.label}: {profile.model_path}{size_detail}",
+                f"{profile.label}: " + "; ".join(details),
                 required=model_check_required(
                     profile.enabled, installation_mode=installation_mode
                 ),

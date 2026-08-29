@@ -26,6 +26,16 @@ ALWAYS_CONFIRM_TOOLS = {
     "financial_action",
     "forget_information",
     "browser_send_message",
+    "browser_interact",
+    "windows_activate_window",
+    "windows_type_text",
+    "windows_press_keys",
+    "windows_invoke_control",
+    "windows_set_control_value",
+    "windows_click_control",
+    "windows_move_pointer",
+    "windows_click_pointer",
+    "windows_scroll_pointer",
 }
 
 

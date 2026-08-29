@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from butler.atomic_io import atomic_write_text
 from butler.config import Settings
 from butler.diagnostics import event as diagnostic_event
 from butler.local_auth import api_key_file, local_api_key
@@ -94,7 +95,7 @@ class LlamaCppEmbeddingService:
             size = self.model_path.stat().st_size
         except OSError:
             size = 0
-        return f"qwen3-embedding:{self.model_path.name}:{size}"
+        return f"embedding:{self.model_path.name}:{size}"
 
     @property
     def _base_url(self) -> str:
@@ -142,12 +143,10 @@ class LlamaCppEmbeddingService:
             return None
 
     def _write_state(self, state: EmbeddingRuntimeState) -> None:
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.state_path.with_suffix(".tmp")
-        temporary.write_text(
-            json.dumps(asdict(state), ensure_ascii=False, indent=2), encoding="utf-8"
+        atomic_write_text(
+            self.state_path,
+            json.dumps(asdict(state), ensure_ascii=False, indent=2),
         )
-        temporary.replace(self.state_path)
 
     def running_state(self) -> EmbeddingRuntimeState | None:
         state = self._read_state()

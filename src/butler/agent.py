@@ -42,10 +42,20 @@ SYSTEM_PROMPT = (
 )
 
 
+_RAW_TOOL_MARKERS = (
+    "<|tool_call>",
+    "<tool_call>",
+    "</tool_call>",
+    "<arg_key>",
+    "</arg_key>",
+    "<arg_value>",
+    "</arg_value>",
+)
+
 def is_raw_tool_markup(text: str) -> bool:
     """Never pass malformed model tool syntax to speech or the user."""
-    normalized = text.lstrip()
-    return normalized.startswith("<|tool_call>") or normalized.startswith("<tool_call>")
+    normalized = text.casefold()
+    return any(marker in normalized for marker in _RAW_TOOL_MARKERS)
 
 
 @dataclass(frozen=True)
@@ -63,6 +73,76 @@ class AgentReply:
 
 StatusCallback = Callable[[str], None]
 ConfirmationCallback = Callable[[str, dict[str, Any], str], bool]
+FinalDeltaCallback = Callable[[str], None]
+
+
+class _SafeFinalTextStream:
+    """Never forward tool markup, including markers split across stream chunks."""
+
+    _blocked_markers = _RAW_TOOL_MARKERS
+
+    def __init__(self, callback: FinalDeltaCallback | None) -> None:
+        self.callback = callback
+        self.buffer = ""
+        self.received = False
+        self.blocked = False
+        self.emitted = False
+
+    def _emit(self, text: str) -> None:
+        if self.callback is None or not text.strip():
+            return
+        self.emitted = True
+        self.callback(text)
+
+    def feed(self, delta: str) -> None:
+        if self.callback is None or self.blocked or not delta:
+            return
+        self.received = True
+        self.buffer += delta
+        normalized = self.buffer.casefold()
+        positions = [
+            position
+            for marker in self._blocked_markers
+            if (position := normalized.find(marker)) >= 0
+        ]
+        if positions:
+            first_marker = min(positions)
+            safe_prefix = self.buffer[:first_marker]
+            self.blocked = True
+            self.buffer = ""
+            self._emit(safe_prefix)
+            return
+        pending = 0
+        upper_bound = min(
+            len(normalized),
+            max(len(marker) for marker in self._blocked_markers) - 1,
+        )
+        for size in range(1, upper_bound + 1):
+            suffix = normalized[-size:]
+            if any(marker.startswith(suffix) for marker in self._blocked_markers):
+                pending = size
+        safe_end = len(self.buffer) - pending
+        if safe_end <= 0:
+            return
+        safe_text = self.buffer[:safe_end]
+        self.buffer = self.buffer[safe_end:]
+        self._emit(safe_text)
+
+    def finish(self, complete_text: str) -> None:
+        if self.callback is None or self.blocked:
+            return
+        if not self.received:
+            self.feed(complete_text)
+            if self.blocked:
+                return
+        if self.buffer:
+            buffered = self.buffer
+            self.buffer = ""
+            self._emit(buffered)
+
+    def discard(self) -> None:
+        self.blocked = True
+        self.buffer = ""
 
 
 def status_for_tool(name: str) -> str:
@@ -131,6 +211,50 @@ class AgentSession:
             )
         )
         self._save_memory()
+
+    def commit_spoken_reply(self, generated_text: str, spoken_text: str) -> bool:
+        """Replace the current generated answer with its confirmed spoken prefix.
+
+        Live playback completes after model generation. This method is therefore
+        called only after the agent turn has returned or was cancelled, never from
+        an audio callback. It refuses to rewrite an unrelated earlier exchange.
+        """
+        generated = generated_text.strip()
+        spoken = spoken_text.strip()
+        last_user = next(
+            (
+                index
+                for index in range(len(self.messages) - 1, 0, -1)
+                if self.messages[index].get("role") == "user"
+            ),
+            None,
+        )
+        if last_user is None:
+            return False
+        plain_assistant = next(
+            (
+                index
+                for index in range(len(self.messages) - 1, last_user, -1)
+                if self.messages[index].get("role") == "assistant"
+                and not self.messages[index].get("tool_calls")
+            ),
+            None,
+        )
+        if plain_assistant is not None:
+            current = str(self.messages[plain_assistant].get("content", "")).strip()
+            if not generated or current != generated:
+                return False
+            if spoken:
+                self.messages[plain_assistant] = {
+                    "role": "assistant",
+                    "content": spoken,
+                }
+            else:
+                self.messages.pop(plain_assistant)
+        elif spoken:
+            self.messages.append({"role": "assistant", "content": spoken})
+        self._save_memory()
+        return True
 
     def context_snapshot(self, *, max_messages: int = 12, max_chars: int = 12_000) -> str:
         """Return bounded human dialogue for another role, without tool transcripts."""
@@ -226,7 +350,11 @@ class AgentSession:
             actual_context = 0
         if actual_context:
             trigger_tokens = min(trigger_tokens, max(8000, int(actual_context * 0.75)))
-        token_count = count_chat_tokens(self.settings, self.messages)
+        token_count = count_chat_tokens(
+            self.settings,
+            self.messages,
+            checkpoint=control.checkpoint if control is not None else None,
+        )
         diagnostic_event(
             self.settings,
             "agent",
@@ -311,9 +439,12 @@ class AgentSession:
         on_confirmation: ConfirmationCallback | None = None,
         control: TaskControl | None = None,
         conversation_only: bool = False,
+        on_final_delta: FinalDeltaCallback | None = None,
+        reset_tool_state: bool = True,
     ) -> AgentReply:
         task_started = time.monotonic()
-        self.tools.begin_task()
+        if reset_tool_state:
+            self.tools.begin_task()
         outcome = "failed"
         diagnostic_event(
             self.settings,
@@ -383,7 +514,6 @@ class AgentSession:
         )
         confirmation_requests = 0
         confirmation_limit_reached = False
-
         try:
             if control is not None:
                 control.checkpoint()
@@ -425,16 +555,20 @@ class AgentSession:
                     tool_event_count=len(events),
                     message_count=len(request_messages),
                 )
+                final_text_stream = _SafeFinalTextStream(
+                    on_final_delta if final_turn else None
+                )
                 response = complete_chat(
                     self.settings,
                     request_messages,
                     tools=None if final_turn else tool_schemas(self.settings),
-                    # This Gemma community template exposes tool calls correctly
-                    # only in non-streaming llama.cpp responses. Final text and
-                    # context compression remain stream-cancellable.
-                    checkpoint=(
-                        control.checkpoint
-                        if control is not None and final_turn
+                    # The transport reassembles streamed tool-call fragments,
+                    # so every model turn remains cancellable while preserving
+                    # one complete structure for the executor.
+                    checkpoint=(control.checkpoint if control is not None else None),
+                    on_content_delta=(
+                        final_text_stream.feed
+                        if final_turn and on_final_delta is not None
                         else None
                     ),
                     max_tokens=(
@@ -467,26 +601,52 @@ class AgentSession:
                     emit("Формулирую ответ")
                     answer = str(message.get("content") or "").strip()
                     if is_raw_tool_markup(answer):
-                        if final_answer_retries < 1:
+                        final_text_stream.discard()
+                        if final_answer_retries < 1 and not final_text_stream.emitted:
                             final_answer_retries += 1
                             emit("Уточняю ответ")
+                            retry_instruction = (
+                                "Инструментальный бюджет исчерпан. Задача пока не завершена: "
+                                "не пытайся продолжать действия, не вызывай инструменты и не "
+                                "выводи техническую разметку. Начни ответ словами «Задача не "
+                                "завершена» и кратко перечисли только фактически выполненное, "
+                                "непроверенное и следующий необходимый шаг."
+                                if final_turn
+                                else "Предыдущий ответ был технической разметкой вызова инструмента. "
+                                "Сейчас дай только обычный итоговый ответ Александру на русском, "
+                                "без тегов, JSON, команд и новых действий."
+                            )
                             self.messages.append(
                                 {
                                     "role": "system",
-                                    "content": (
-                                        "Предыдущий ответ был технической разметкой вызова инструмента. "
-                                        "Сейчас дай только обычный итоговый ответ Александру на русском, "
-                                        "без тегов, JSON, команд и новых действий."
-                                    ),
+                                    "content": retry_instruction,
                                 }
                             )
                             continue
+                        successful_file_changes = sum(
+                            1
+                            for event in events
+                            if event.result.ok
+                            and event.name
+                            in {
+                                "write_workspace_file",
+                                "replace_in_workspace_file",
+                                "delete_workspace_file",
+                                "undo_last_change",
+                            }
+                        )
                         raise ChatError(
-                            "Модель дважды вернула техническую разметку вместо ответа. "
-                            "Задача не выполнена; попробуйте повторить её позже."
+                            "Модель дважды попыталась вызвать инструмент после завершения "
+                            "инструментального этапа. Техническая разметка скрыта. "
+                            f"Успешных изменений файлов: {successful_file_changes}. "
+                            "Задача не завершена; продолжите её из сохранённого состояния."
                         )
                     if not answer:
                         raise ChatError("Модель не сформировала итоговый ответ.")
+                    if not final_turn and on_final_delta is not None:
+                        on_final_delta(answer)
+                    else:
+                        final_text_stream.finish(answer)
                     self.messages.append({"role": "assistant", "content": answer})
                     self._save_memory()
                     emit("Готово")

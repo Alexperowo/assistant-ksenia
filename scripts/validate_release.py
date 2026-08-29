@@ -4,15 +4,53 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
+import stat
 import sys
+import tempfile
 import tomllib
+import unicodedata
+import zipfile
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 LOCK_LINE_RE = re.compile(r"^[A-Za-z0-9_.-]+==[^\s]+$")
 WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+ARCHIVE_SHA_RE = re.compile(r"^[A-Fa-f0-9]{64}$")
+MAX_ARCHIVE_BYTES = 1_073_741_824
+MAX_ARCHIVE_FILES = 10_000
+MAX_ARCHIVE_MEMBER_BYTES = 268_435_456
+MAX_ARCHIVE_EXPANDED_BYTES = 1_073_741_824
+MAX_ARCHIVE_PATH_CHARS = 240
+MAX_COMPRESSION_RATIO = 250
+WINDOWS_RESERVED_NAMES = {
+    "aux",
+    "clock$",
+    "com1",
+    "com2",
+    "com3",
+    "com4",
+    "com5",
+    "com6",
+    "com7",
+    "com8",
+    "com9",
+    "con",
+    "lpt1",
+    "lpt2",
+    "lpt3",
+    "lpt4",
+    "lpt5",
+    "lpt6",
+    "lpt7",
+    "lpt8",
+    "lpt9",
+    "nul",
+    "prn",
+}
 
 
 class ValidationError(RuntimeError):
@@ -41,6 +79,119 @@ def _sha256(path: Path) -> str:
 
 def _relative(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
+
+
+def _safe_archive_parts(info: zipfile.ZipInfo) -> tuple[str, ...]:
+    raw = info.filename
+    if not raw or "\x00" in raw or "\\" in raw:
+        raise ValidationError(f"Неоднозначный путь ZIP: {raw!r}")
+    trimmed = raw[:-1] if raw.endswith("/") else raw
+    if not trimmed or trimmed.startswith("/") or len(trimmed) > MAX_ARCHIVE_PATH_CHARS:
+        raise ValidationError(f"Небезопасный путь ZIP: {raw!r}")
+    parts = tuple(trimmed.split("/"))
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValidationError(f"Traversal или пустой сегмент ZIP: {raw!r}")
+    if PurePosixPath(trimmed).is_absolute() or WINDOWS_ABSOLUTE_RE.match(trimmed):
+        raise ValidationError(f"Абсолютный путь ZIP запрещён: {raw!r}")
+    for part in parts:
+        if part.endswith((" ", ".")) or ":" in part:
+            raise ValidationError(f"Небезопасный Windows-путь ZIP: {raw!r}")
+        device = part.split(".", 1)[0].casefold()
+        if device in WINDOWS_RESERVED_NAMES:
+            raise ValidationError(f"Зарезервированное имя Windows в ZIP: {raw!r}")
+    return parts
+
+
+def _inspect_archive(
+    archive: zipfile.ZipFile,
+) -> tuple[list[tuple[zipfile.ZipInfo, tuple[str, ...]]], tuple[str, ...]]:
+    inspected: list[tuple[zipfile.ZipInfo, tuple[str, ...]]] = []
+    seen: set[str] = set()
+    manifests: list[tuple[str, ...]] = []
+    expanded_bytes = 0
+    file_count = 0
+    for info in archive.infolist():
+        parts = _safe_archive_parts(info)
+        normalized = unicodedata.normalize("NFC", "/".join(parts)).casefold()
+        if normalized in seen:
+            raise ValidationError(f"Повторный Windows-путь в ZIP: {info.filename}")
+        seen.add(normalized)
+        if info.flag_bits & 0x1:
+            raise ValidationError(f"Зашифрованный элемент ZIP запрещён: {info.filename}")
+        if info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
+            raise ValidationError(f"Неподдерживаемое сжатие ZIP: {info.filename}")
+        unix_mode = info.external_attr >> 16
+        if info.create_system == 3 and unix_mode:
+            if stat.S_ISLNK(unix_mode):
+                raise ValidationError(f"Символическая ссылка в ZIP запрещена: {info.filename}")
+            file_type = stat.S_IFMT(unix_mode)
+            if file_type and not (stat.S_ISREG(unix_mode) or stat.S_ISDIR(unix_mode)):
+                raise ValidationError(f"Специальный файл в ZIP запрещён: {info.filename}")
+        if info.is_dir():
+            inspected.append((info, parts))
+            continue
+        file_count += 1
+        if file_count > MAX_ARCHIVE_FILES:
+            raise ValidationError("ZIP содержит слишком много файлов.")
+        if info.file_size < 0 or info.file_size > MAX_ARCHIVE_MEMBER_BYTES:
+            raise ValidationError(f"Слишком большой элемент ZIP: {info.filename}")
+        expanded_bytes += info.file_size
+        if expanded_bytes > MAX_ARCHIVE_EXPANDED_BYTES:
+            raise ValidationError("Суммарный распакованный размер ZIP превышает предел.")
+        if info.file_size and info.file_size > max(1, info.compress_size) * MAX_COMPRESSION_RATIO:
+            raise ValidationError(f"Подозрительная степень сжатия ZIP: {info.filename}")
+        if parts[-1] == "PACKAGE-MANIFEST.json":
+            manifests.append(parts)
+        inspected.append((info, parts))
+    if file_count == 0:
+        raise ValidationError("ZIP не содержит файлов.")
+    if len(manifests) != 1:
+        raise ValidationError(
+            f"Ожидался один PACKAGE-MANIFEST.json, найдено: {len(manifests)}"
+        )
+    package_prefix = manifests[0][:-1]
+    for info, parts in inspected:
+        if info.is_dir():
+            continue
+        if parts[: len(package_prefix)] != package_prefix:
+            raise ValidationError(
+                f"Файл находится вне корня пакета: {info.filename}"
+            )
+    return inspected, package_prefix
+
+
+def _extract_inspected_archive(
+    archive: zipfile.ZipFile,
+    inspected: list[tuple[zipfile.ZipInfo, tuple[str, ...]]],
+    destination: Path,
+) -> None:
+    if destination.exists():
+        raise ValidationError(f"Каталог распаковки уже существует: {destination}")
+    destination.mkdir(parents=True, exist_ok=False)
+    try:
+        for info, parts in inspected:
+            target = destination.joinpath(*parts)
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            written = 0
+            with archive.open(info, "r") as source, target.open("xb") as output:
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > info.file_size or written > MAX_ARCHIVE_MEMBER_BYTES:
+                        raise ValidationError(
+                            f"Распакованный размер не совпал: {info.filename}"
+                        )
+                    output.write(chunk)
+            if written != info.file_size:
+                raise ValidationError(f"Распакованный размер не совпал: {info.filename}")
+    except Exception:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
 
 
 def _validate_required_files(root: Path, manifest: dict[str, Any]) -> None:
@@ -285,14 +436,84 @@ def validate(root: Path, *, package_mode: bool | None = None) -> dict[str, Any]:
     }
 
 
+def validate_archive(
+    archive_path: Path,
+    extraction_root: Path,
+    *,
+    expected_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Validate and extract a ZIP strictly as data using this trusted module."""
+
+    archive_path = archive_path.resolve()
+    extraction_root = extraction_root.resolve()
+    if not archive_path.is_file():
+        raise ValidationError(f"Архив не найден: {archive_path}")
+    if archive_path.stat().st_size > MAX_ARCHIVE_BYTES:
+        raise ValidationError("ZIP превышает допустимый размер.")
+    archive_sha256 = _sha256(archive_path)
+    expected = str(expected_sha256 or "").strip().upper()
+    if expected:
+        if not ARCHIVE_SHA_RE.fullmatch(expected):
+            raise ValidationError("Ожидаемый SHA-256 должен содержать 64 hex-символа.")
+        if archive_sha256 != expected:
+            raise ValidationError("SHA-256 ZIP не совпадает с доверенным значением.")
+
+    try:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            inspected, package_prefix = _inspect_archive(archive)
+            _extract_inspected_archive(archive, inspected, extraction_root)
+    except zipfile.BadZipFile as exc:
+        if extraction_root.exists():
+            shutil.rmtree(extraction_root, ignore_errors=True)
+        raise ValidationError(f"Повреждённый ZIP: {exc}") from exc
+
+    try:
+        package_root = extraction_root.joinpath(*package_prefix)
+        report = validate(package_root, package_mode=True)
+    except Exception:
+        shutil.rmtree(extraction_root, ignore_errors=True)
+        raise
+    return {
+        **report,
+        "archive": str(archive_path),
+        "archive_sha256": archive_sha256,
+        "archive_authenticated": bool(expected),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Проверка исходного дерева или пакета Ксении.")
     parser.add_argument("--package-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--require-package", action="store_true")
+    parser.add_argument("--archive", type=Path)
+    parser.add_argument("--extract-to", type=Path)
+    parser.add_argument("--expected-sha256")
     args = parser.parse_args(argv)
     try:
-        report = validate(args.package_root, package_mode=True if args.require_package else None)
-    except (OSError, ValueError, ValidationError) as exc:
+        if args.archive is not None:
+            if args.extract_to is not None:
+                report = validate_archive(
+                    args.archive,
+                    args.extract_to,
+                    expected_sha256=args.expected_sha256,
+                )
+            else:
+                with tempfile.TemporaryDirectory(prefix="ksenia-verify-") as directory:
+                    report = validate_archive(
+                        args.archive,
+                        Path(directory) / "package",
+                        expected_sha256=args.expected_sha256,
+                    )
+        else:
+            if args.extract_to is not None or args.expected_sha256:
+                raise ValidationError(
+                    "--extract-to и --expected-sha256 допустимы только вместе с --archive."
+                )
+            report = validate(
+                args.package_root,
+                package_mode=True if args.require_package else None,
+            )
+    except (OSError, ValueError, ValidationError, zipfile.BadZipFile) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 1
     print(json.dumps(report, ensure_ascii=False))

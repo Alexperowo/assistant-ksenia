@@ -21,7 +21,15 @@ ROUNDTRIP_LANDMARKS = (
 
 
 def _word_set(text: str) -> set[str]:
-    return set(re.findall(r"[a-zа-яё0-9]+", str(text).casefold().replace("ё", "е")))
+    words = set(re.findall(r"[a-zа-яё0-9]+", str(text).casefold().replace("ё", "е")))
+    normalized = set(words)
+    for word in words:
+        if word.endswith(("ый", "ой", "ий", "ая", "ое", "ые")):
+            stem = word[:-2]
+            normalized.add(stem + "ой")
+            normalized.add(stem + "ый")
+            normalized.add(stem + "ий")
+    return normalized
 
 
 def evaluate_roundtrip(

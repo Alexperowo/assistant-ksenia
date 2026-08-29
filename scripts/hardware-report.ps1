@@ -110,9 +110,16 @@ $report = [ordered]@{
 if (-not $OutputPath) { $OutputPath = Join-Path $ProjectRoot 'runtime\hardware\latest.json' }
 $OutputPath = [IO.Path]::GetFullPath($OutputPath)
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutputPath) | Out-Null
-$temporary = "$OutputPath.tmp"
-[IO.File]::WriteAllText($temporary, (($report | ConvertTo-Json -Depth 10) + "`n"), $utf8)
-Move-Item -Force -LiteralPath $temporary -Destination $OutputPath
+$temporary = Join-Path (Split-Path -Parent $OutputPath) ('.' + (Split-Path -Leaf $OutputPath) + '.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+try {
+    [IO.File]::WriteAllText($temporary, (($report | ConvertTo-Json -Depth 10) + "`n"), $utf8)
+    Move-Item -Force -LiteralPath $temporary -Destination $OutputPath
+}
+finally {
+    if (Test-Path -LiteralPath $temporary) {
+        Remove-Item -Force -LiteralPath $temporary -ErrorAction SilentlyContinue
+    }
+}
 
 Write-Host "Оборудование: $gpuName; VRAM $vramMb МБ; ОЗУ $ramGb ГБ."
 Write-Host "Безопасный стартовый профиль: $($selected.label_ru)."

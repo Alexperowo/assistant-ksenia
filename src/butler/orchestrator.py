@@ -7,7 +7,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from butler.agent import AgentReply, AgentSession, ConfirmationCallback, StatusCallback
+from butler.agent import (
+    AgentReply,
+    AgentSession,
+    ConfirmationCallback,
+    FinalDeltaCallback,
+    StatusCallback,
+)
 from butler.chat import ChatError, complete_chat
 from butler.config import ConfigError, Settings
 from butler.diagnostics import event as diagnostic_event
@@ -172,25 +178,27 @@ class RoutedAgentSession:
     def clear_memory(self) -> None:
         self.session.clear_memory()
 
-    def _capability_model(self, capability: str, fallback: str) -> str:
+    def commit_spoken_reply(self, generated_text: str, spoken_text: str) -> bool:
+        return self.session.commit_spoken_reply(generated_text, spoken_text)
+
+    def _capability_model(
+        self, capability: str, fallback_capability: str = "assistant"
+    ) -> str:
         try:
-            role = self.settings.capability_role(capability)
-            if role.enabled and role.primary_model:
-                profile = self.settings.model(role.primary_model)
-                if profile.enabled:
-                    return role.primary_model
+            return self.settings.capability_model(
+                capability, fallback=fallback_capability
+            )
         except ConfigError:
-            pass
-        return fallback
+            return self.settings.capability_model("assistant")
 
     def _assistant_model(self) -> str:
-        return self._capability_model("assistant", "developer")
+        return self._capability_model("assistant")
 
     def _research_model(self) -> str:
-        return self._capability_model("researcher", "developer")
+        return self._capability_model("researcher")
 
     def _execution_model(self) -> str:
-        return self._capability_model("developer", "developer")
+        return self._capability_model("developer")
 
     def _planning_model(self) -> str:
         try:
@@ -201,7 +209,7 @@ class RoutedAgentSession:
                     return heavy.primary_model
         except ConfigError:
             pass
-        return self._capability_model("researcher", "planner")
+        return self._capability_model("researcher")
 
     def _planner_available(self) -> bool:
         try:
@@ -238,6 +246,7 @@ class RoutedAgentSession:
         task_id: str | None = None,
         *,
         confirmed: bool = False,
+        on_confirmation: ConfirmationCallback | None = None,
     ) -> str:
         planning_started = time.monotonic()
         outcome = "failed"
@@ -314,7 +323,27 @@ class RoutedAgentSession:
                 },
             ]
             schemas = planning_tool_schemas(self.settings)
+            allowed_tool_names = {
+                str(schema.get("function", {}).get("name", ""))
+                for schema in schemas
+            }
+            # The planner receives the conversation snapshot and repository map
+            # before its first tool call.  Treat them exactly like successful
+            # local read tools for the outbound information-flow guard.
+            self.session.tools.mark_local_data_exposed()
             seen_calls: set[str] = set()
+            confirmation_requests = 0
+            max_confirmation_requests = min(
+                8,
+                max(
+                    0,
+                    int(
+                        self.settings.raw.get("agent", {}).get(
+                            "max_confirmation_requests", 4
+                        )
+                    ),
+                ),
+            )
             for research_step in range(max_steps):
                 if control is not None:
                     control.checkpoint()
@@ -324,6 +353,7 @@ class RoutedAgentSession:
                     tools=schemas,
                     temperature=0.1,
                     max_tokens=int(routing.get("research_turn_max_tokens", 1200)),
+                    checkpoint=control.checkpoint if control is not None else None,
                 )
                 message = response["choices"][0].get("message", {})
                 if not isinstance(message, dict):
@@ -373,7 +403,7 @@ class RoutedAgentSession:
                             ensure_ascii=False,
                             sort_keys=True,
                         )
-                        if name not in PLANNING_TOOLS:
+                        if name not in allowed_tool_names:
                             result = ToolResult(
                                 False,
                                 "denied",
@@ -390,6 +420,34 @@ class RoutedAgentSession:
                             result = self.session.tools.execute(
                                 name, arguments, confirmed=confirmed
                             )
+                            if (
+                                result.status == "confirmation_required"
+                                and on_confirmation is not None
+                            ):
+                                if confirmation_requests >= max_confirmation_requests:
+                                    result = ToolResult(
+                                        False,
+                                        "confirmation_limit",
+                                        "Предел запросов подтверждения для одной задачи достигнут.",
+                                    )
+                                else:
+                                    confirmation_requests += 1
+                                    announce("Нужно подтверждение")
+                                    approved = on_confirmation(
+                                        name, arguments, result.message
+                                    )
+                                    if approved:
+                                        if control is not None:
+                                            control.checkpoint()
+                                        result = self.session.tools.execute(
+                                            name, arguments, confirmed=True
+                                        )
+                                    else:
+                                        result = ToolResult(
+                                            False,
+                                            "confirmation_declined",
+                                            "Пользователь не подтвердил действие.",
+                                        )
                     allowed_chars = min(per_result_chars, remaining_chars)
                     payload = bounded_tool_payload(result, max_chars=max(200, allowed_chars))
                     remaining_chars -= min(len(payload), allowed_chars)
@@ -486,6 +544,7 @@ class RoutedAgentSession:
         on_status: StatusCallback | None = None,
         on_confirmation: ConfirmationCallback | None = None,
         control: TaskControl | None = None,
+        on_final_delta: FinalDeltaCallback | None = None,
     ) -> AgentReply:
         with SingleInstance(self.settings.root, "agent-task") as acquired:
             if not acquired:
@@ -534,6 +593,7 @@ class RoutedAgentSession:
                     on_status=on_status,
                     on_confirmation=on_confirmation,
                     control=control,
+                    on_final_delta=on_final_delta,
                 )
                 outcome = "completed"
                 return reply
@@ -560,6 +620,7 @@ class RoutedAgentSession:
         on_status: StatusCallback | None = None,
         on_confirmation: ConfirmationCallback | None = None,
         control: TaskControl | None = None,
+        on_final_delta: FinalDeltaCallback | None = None,
     ) -> AgentReply:
         request_started = time.monotonic()
         self.session.tools.begin_task()
@@ -600,6 +661,8 @@ class RoutedAgentSession:
         )
         if fast_reply is not None:
             self.session.record_exchange(text, fast_reply)
+            if on_final_delta is not None:
+                on_final_delta(fast_reply)
             if task_id:
                 self.handoffs.append(task_id, "assistant", "result", fast_reply)
             diagnostic_event(
@@ -623,6 +686,8 @@ class RoutedAgentSession:
                     on_status=on_status,
                     control=control,
                 )
+                if on_final_delta is not None:
+                    on_final_delta(reply.text)
                 if task_id:
                     self.handoffs.append(
                         task_id,
@@ -652,6 +717,7 @@ class RoutedAgentSession:
                     control,
                     task_id,
                     confirmed=confirmed,
+                    on_confirmation=on_confirmation,
                 )
             except (ChatError, ModelManagerError, OSError) as exc:
                 if task_id:
@@ -672,10 +738,9 @@ class RoutedAgentSession:
                 if on_status:
                     on_status("Планировщик недоступен, продолжаю основной моделью")
                 plan = f"Планировщик не сработал: {exc}. Самостоятельно спланируй задачу."
-            finally:
-                if on_status:
-                    on_status("Переключаюсь на модель-исполнителя")
-                self.manager.start(execution_model)
+            if on_status:
+                on_status("Переключаюсь на модель-исполнителя")
+            self.manager.start(execution_model)
         else:
             selected_model = assistant_model if direct_conversation else execution_model
             if not self.manager.is_current(selected_model):
@@ -710,6 +775,8 @@ class RoutedAgentSession:
                 on_confirmation=on_confirmation,
                 control=control,
                 conversation_only=not plan and direct_conversation,
+                on_final_delta=on_final_delta,
+                reset_tool_state=False,
             )
             if task_id:
                 self.handoffs.append(

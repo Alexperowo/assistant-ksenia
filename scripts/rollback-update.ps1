@@ -21,6 +21,7 @@ $projectRoot = if ($ProjectRoot) {
     [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 }
 $updatesRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot 'runtime\updates'))
+. (Join-Path $PSScriptRoot 'runtime-paths.ps1')
 
 function Assert-ChildPath {
     param([string]$Parent, [string]$Child)
@@ -31,26 +32,17 @@ function Assert-ChildPath {
     }
 }
 
-function Find-Python {
-    if ($PythonPath -and (Test-Path -LiteralPath $PythonPath -PathType Leaf)) { return $PythonPath }
-    $userConfigPath = Join-Path $projectRoot 'config\user.json'
-    if (Test-Path -LiteralPath $userConfigPath) {
-        try {
-            $user = Get-Content -Raw -Encoding UTF8 -LiteralPath $userConfigPath | ConvertFrom-Json
-            if ($user.voice.python -and (Test-Path -LiteralPath ([string]$user.voice.python))) {
-                return [string]$user.voice.python
-            }
-        }
-        catch {}
+function Write-Metadata {
+    param([object]$Value, [string]$Path)
+    $parent = Split-Path -Parent $Path
+    $temporary = Join-Path $parent ('.' + (Split-Path -Leaf $Path) + '.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        [IO.File]::WriteAllText($temporary, (($Value | ConvertTo-Json -Depth 12) + "`n"), $utf8)
+        Move-Item -Force -LiteralPath $temporary -Destination $Path
     }
-    foreach ($candidate in @(
-        'D:\AI\Butler\venv\Scripts\python.exe',
-        'C:\butler-venv\Scripts\python.exe',
-        (Join-Path $env:LocalAppData 'Ksenia\Butler\venv\Scripts\python.exe')
-    )) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    finally {
+        Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $temporary
     }
-    throw 'Python Ксении не найден для отката.'
 }
 
 if (-not $UpdateDirectory) {
@@ -73,7 +65,8 @@ if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
     throw "Не найден metadata.json: $metadataPath"
 }
 $metadata = Get-Content -Raw -Encoding UTF8 -LiteralPath $metadataPath | ConvertFrom-Json
-$PythonPath = Find-Python
+$PythonPath = Resolve-KseniaPython -ProjectRoot $projectRoot -ExplicitPath $PythonPath
+if (-not $PythonPath) { throw 'Python Ксении не найден для отката.' }
 
 $currentStatusRaw = & $PythonPath (Join-Path $PSScriptRoot 'maintenance.py') status --root $projectRoot
 if ($LASTEXITCODE -ne 0) { throw "Не удалось снять состояние перед откатом: $currentStatusRaw" }
@@ -90,6 +83,11 @@ if ($currentStatus.model) {
 $restoredSomething = $false
 $backupEngine = [string]$metadata.engine_backup
 $installEngine = Join-Path $projectRoot 'tools\llama.cpp'
+$engineExistedBefore = if ($null -ne $metadata.engine_existed_before) {
+    [bool]$metadata.engine_existed_before
+} else {
+    [bool]($backupEngine -and (Test-Path -LiteralPath $backupEngine -PathType Container))
+}
 if ($backupEngine -and (Test-Path -LiteralPath $backupEngine -PathType Container)) {
     $backupEngine = [IO.Path]::GetFullPath($backupEngine)
     Assert-ChildPath $UpdateDirectory $backupEngine
@@ -101,6 +99,16 @@ if ($backupEngine -and (Test-Path -LiteralPath $backupEngine -PathType Container
     Move-Item -LiteralPath $backupEngine -Destination $installEngine
     $restoredSomething = $true
     Write-Host 'Предыдущий llama.cpp восстановлен.'
+} elseif ([bool]$metadata.engine_changed -and -not $engineExistedBefore) {
+    if (Test-Path -LiteralPath $installEngine) {
+        $displaced = Join-Path $UpdateDirectory ('rollback-displaced-engine-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        Assert-ChildPath $UpdateDirectory $displaced
+        Move-Item -LiteralPath $installEngine -Destination $displaced
+    }
+    $restoredSomething = $true
+    Write-Host 'Возвращено исходное отсутствие управляемого llama.cpp.'
+} elseif ([bool]$metadata.engine_changed) {
+    throw 'Нельзя подтвердить откат llama.cpp: резервная копия предыдущего движка отсутствует.'
 }
 
 $configBackup = [string]$metadata.config_backup
@@ -149,18 +157,47 @@ if ($role -and -not $NoRestart) {
 $afterStatusRaw = & $PythonPath (Join-Path $PSScriptRoot 'maintenance.py') status --root $projectRoot
 if ($LASTEXITCODE -ne 0) { throw "Не удалось проверить компоненты после отката: $afterStatusRaw" }
 $afterStatus = $afterStatusRaw | Out-String | ConvertFrom-Json
-if ([bool]$metadata.engine_changed -and -not $afterStatus.engine.matches) {
-    throw 'Откат вернул папку движка, но версия не совпала с lock-файлом.'
+if ([bool]$metadata.engine_changed -and $engineExistedBefore) {
+    $restoredServer = [string]$afterStatus.engine.path
+    if (-not (Test-Path -LiteralPath $restoredServer -PathType Leaf)) {
+        throw 'Откат не вернул прежний исполняемый файл llama.cpp.'
+    }
+    $restoredHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $restoredServer).Hash.ToLowerInvariant()
+    if (-not $metadata.engine_sha256_before -or $restoredHash -ne [string]$metadata.engine_sha256_before) {
+        throw 'SHA-256 восстановленного llama.cpp не совпал со снимком до обновления.'
+    }
+    if ($metadata.engine_version_before -and [string]$afterStatus.engine.version_output -ne [string]$metadata.engine_version_before) {
+        throw 'Версия восстановленного llama.cpp не совпала со снимком до обновления.'
+    }
+} elseif ([bool]$metadata.engine_changed -and (Test-Path -LiteralPath $installEngine)) {
+    throw 'До обновления управляемого llama.cpp не было, но после отката папка осталась.'
 }
-if ([bool]$metadata.runtime_changed -and (-not $afterStatus.python.matches -or -not $afterStatus.packages_match)) {
-    throw 'Python runtime после отката не совпал с сохранёнными или одобренными версиями.'
+if ([bool]$metadata.runtime_changed) {
+    if ($metadata.python_before -and [string]$afterStatus.python.actual -ne [string]$metadata.python_before) {
+        throw 'Версия Python после отката не совпала со снимком до обновления.'
+    }
+    $pipAfter = @($afterStatus.packages | Where-Object { $_.name -eq 'pip' } | Select-Object -First 1)
+    if ($metadata.pip_before -and (-not $pipAfter.Count -or [string]$pipAfter[0].actual -ne [string]$metadata.pip_before)) {
+        throw 'Версия pip после отката не совпала со снимком до обновления.'
+    }
+    $expectedFreeze = @(
+        Get-Content -LiteralPath $freezeBackup -Encoding UTF8 |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -and -not $_.StartsWith('#') } |
+            Sort-Object -Unique
+    )
+    $actualFreeze = @(& $PythonPath -m pip freeze)
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось проверить Python-пакеты после отката.' }
+    $actualFreeze = @($actualFreeze | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique)
+    $freezeDifference = @(Compare-Object -ReferenceObject $expectedFreeze -DifferenceObject $actualFreeze)
+    if ($freezeDifference.Count -ne 0) {
+        throw 'Python-пакеты после отката не совпали с точным freeze-снимком.'
+    }
 }
 
 $metadata | Add-Member -Force -NotePropertyName rollback_at -NotePropertyValue ([DateTimeOffset]::Now.ToString('o'))
 $metadata | Add-Member -Force -NotePropertyName status -NotePropertyValue 'rolled_back'
-$temporaryMetadata = "$metadataPath.tmp"
-[IO.File]::WriteAllText($temporaryMetadata, (($metadata | ConvertTo-Json -Depth 12) + "`n"), $utf8)
-Move-Item -Force -LiteralPath $temporaryMetadata -Destination $metadataPath
+Write-Metadata $metadata $metadataPath
 
 if (-not $SkipAudit) {
     & (Join-Path $PSScriptRoot 'check.ps1')

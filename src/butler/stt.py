@@ -37,6 +37,9 @@ _AUDIO_TELEMETRY_KEYS = (
     "voice_started_ms",
     "capture_seconds",
     "endpoint_reason",
+    "semantic_endpointing",
+    "semantic_endpointing_error_type",
+    "partial_transcript_chars",
     "recognition_seconds",
 )
 
@@ -70,6 +73,21 @@ class SpeechRecognizer:
         self.max_command_seconds = max(
             5, int(voice.get("stt_max_command_seconds", 45))
         )
+        live = settings.raw.get("live", {})
+        if not isinstance(live, dict):
+            live = {}
+        self.semantic_endpointing = bool(
+            live.get("enabled", False) and live.get("semantic_endpointing", True)
+        )
+        self.turn_complete_silence_seconds = float(
+            live.get("turn_complete_silence_seconds", 0.45)
+        )
+        self.turn_ordinary_silence_seconds = float(
+            live.get("turn_ordinary_silence_seconds", 0.85)
+        )
+        self.turn_incomplete_silence_seconds = float(
+            live.get("turn_incomplete_silence_seconds", 2.2)
+        )
         self._service: subprocess.Popen[str] | None = None
         self._service_info: dict[str, object] = {}
         self._events: queue.Queue[dict[str, object]] = queue.Queue()
@@ -97,19 +115,22 @@ class SpeechRecognizer:
                 continue
             if isinstance(worker_event, dict):
                 event_name = str(worker_event.get("event", "unknown"))
+                worker_fields = {
+                    (
+                        "signal_level"
+                        if str(key).casefold() == "level"
+                        else str(key)
+                    ): value
+                    for key, value in worker_event.items()
+                    if key != "event"
+                }
+                if event_name == "partial_transcript":
+                    worker_fields.pop("text", None)
                 diagnostic_event(
                     self.settings,
                     "stt",
                     f"worker_{event_name}",
-                    **{
-                        (
-                            "signal_level"
-                            if str(key).casefold() == "level"
-                            else str(key)
-                        ): value
-                        for key, value in worker_event.items()
-                        if key != "event"
-                    },
+                    **worker_fields,
                 )
                 self._events.put(worker_event)
         self._events.put({"event": "worker_exit"})
@@ -132,6 +153,42 @@ class SpeechRecognizer:
                     level="error" if is_error else "info",
                     detail=detail,
                 )
+
+    def _service_command(self) -> list[str]:
+        command = [
+            str(self.python),
+            "-u",
+            str(self.service_worker),
+            "--model",
+            str(self.whisper_model),
+            "--fallback-model",
+            str(self.model),
+            "--sample-rate",
+            str(self.sample_rate),
+            "--audio-device",
+            self.device,
+            "--device",
+            self.whisper_device,
+            "--compute-type",
+            self.whisper_compute_type,
+            "--silence-seconds",
+            str(self.silence_seconds),
+            "--no-speech-timeout-seconds",
+            str(self.no_speech_timeout_seconds),
+        ]
+        if self.semantic_endpointing:
+            command.extend(
+                [
+                    "--semantic-endpointing",
+                    "--turn-complete-silence-seconds",
+                    str(self.turn_complete_silence_seconds),
+                    "--turn-ordinary-silence-seconds",
+                    str(self.turn_ordinary_silence_seconds),
+                    "--turn-incomplete-silence-seconds",
+                    str(self.turn_incomplete_silence_seconds),
+                ]
+            )
+        return command
 
     def _start_service(self) -> bool:
         if self.engine == "vosk" or not self.whisper_model.is_dir():
@@ -156,27 +213,7 @@ class SpeechRecognizer:
                 except queue.Empty:
                     break
             self._service = subprocess.Popen(
-                [
-                    str(self.python),
-                    "-u",
-                    str(self.service_worker),
-                    "--model",
-                    str(self.whisper_model),
-                    "--fallback-model",
-                    str(self.model),
-                    "--sample-rate",
-                    str(self.sample_rate),
-                    "--audio-device",
-                    self.device,
-                    "--device",
-                    self.whisper_device,
-                    "--compute-type",
-                    self.whisper_compute_type,
-                    "--silence-seconds",
-                    str(self.silence_seconds),
-                    "--no-speech-timeout-seconds",
-                    str(self.no_speech_timeout_seconds),
-                ],
+                self._service_command(),
                 cwd=str(self.root),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -243,6 +280,7 @@ class SpeechRecognizer:
         self,
         max_seconds: int,
         prompt: Callable[[], None] | None = None,
+        on_partial: Callable[[str], None] | None = None,
     ) -> dict[str, object] | None:
         with self._lock:
             if not self._start_service() or self._service is None:
@@ -284,7 +322,10 @@ class SpeechRecognizer:
                             duration_ms=round((time.monotonic() - started) * 1000),
                         )
                         self.close()
-                        return None
+                        raise SpeechRecognitionError(
+                            "STT-процесс завершился после начала слушания; "
+                            "повторная запись без нового приглашения не запущена."
+                        )
                     if str(event.get("id", "")) != request_id:
                         continue
                     if event.get("event") == "listening_ready" and prompt is not None:
@@ -294,9 +335,24 @@ class SpeechRecognizer:
                         )
                         self._service.stdin.flush()
                         continue
+                    if event.get("event") == "partial_transcript":
+                        partial_text = str(event.get("text", "")).strip()
+                        if partial_text and on_partial is not None:
+                            try:
+                                on_partial(partial_text)
+                            except Exception as exc:
+                                diagnostic_exception(
+                                    self.settings,
+                                    "stt",
+                                    "partial_callback_failed",
+                                    exc,
+                                    request_id=request_id,
+                                )
+                        continue
                     if event.get("event") in {
                         "capture_started",
                         "voice_started",
+                        "semantic_endpointing_unavailable",
                         "capture_completed",
                     }:
                         continue
@@ -311,7 +367,10 @@ class SpeechRecognizer:
                     duration_ms=round((time.monotonic() - started) * 1000),
                 )
                 self.close()
-                return None
+                raise SpeechRecognitionError(
+                    "Связь со STT потеряна после начала слушания; "
+                    "повторная запись без нового приглашения не запущена."
+                ) from exc
             if event.get("event") != "transcript":
                 diagnostic_event(
                     self.settings,
@@ -338,7 +397,11 @@ class SpeechRecognizer:
             return event
 
     def listen_after_prompt(
-        self, prompt: Callable[[], None], max_seconds: int | None = None
+        self,
+        prompt: Callable[[], None],
+        max_seconds: int | None = None,
+        *,
+        on_partial: Callable[[str], None] | None = None,
     ) -> dict[str, object]:
         """Open and drain the microphone before playing the invitation to speak."""
         effective_max_seconds = max_seconds or self.max_command_seconds
@@ -349,7 +412,11 @@ class SpeechRecognizer:
             prompted = True
             prompt()
 
-        service_result = self._listen_service(effective_max_seconds, play_prompt)
+        service_result = self._listen_service(
+            effective_max_seconds,
+            play_prompt,
+            on_partial,
+        )
         if service_result is not None:
             return service_result
         if not prompted:
@@ -363,7 +430,12 @@ class SpeechRecognizer:
                 return dict(self._service_info)
         return {"engine": "vosk-fallback", "device": "cpu"}
 
-    def listen_once(self, max_seconds: int | None = None) -> dict[str, object]:
+    def listen_once(
+        self,
+        max_seconds: int | None = None,
+        *,
+        on_partial: Callable[[str], None] | None = None,
+    ) -> dict[str, object]:
         effective_max_seconds = max_seconds or self.max_command_seconds
         if not self.python.is_file():
             raise SpeechRecognitionError(f"Не найден голосовой Python: {self.python}")
@@ -372,7 +444,10 @@ class SpeechRecognizer:
         if not self.model.is_dir():
             raise SpeechRecognitionError(f"Не найдена модель распознавания: {self.model}")
 
-        service_result = self._listen_service(effective_max_seconds)
+        service_result = self._listen_service(
+            effective_max_seconds,
+            on_partial=on_partial,
+        )
         if service_result is not None:
             return service_result
 

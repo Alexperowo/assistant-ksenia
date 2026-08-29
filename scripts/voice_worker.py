@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import queue
@@ -16,6 +17,14 @@ from pathlib import Path
 
 PLAYBACK_BACKEND = "System.Media.SoundPlayer"
 OUTPUT_ROUTE = "windows_default"
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def split_tts_text(text: str, *, max_chars: int = 260) -> list[str]:
@@ -62,6 +71,9 @@ def append_worker_log(path: Path, line: str, *, max_bytes: int = 2 * 1024 * 1024
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Локальный процесс Silero TTS")
     parser.add_argument("--model", default="v5_ru")
+    parser.add_argument("--model-path", type=Path, required=True)
+    parser.add_argument("--model-size", type=int, required=True)
+    parser.add_argument("--model-sha256", required=True)
     parser.add_argument("--speaker", default="aidar")
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--threads", type=int, default=4)
@@ -104,28 +116,28 @@ class PlaybackController:
             return self._generation
 
     def play(self, path: Path, generation: int) -> bool:
-        if generation != self.generation():
-            return False
         player_script = Path(__file__).with_name("play-wav.ps1")
-        process = subprocess.Popen(
-            [
-                "powershell.exe",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(player_script),
-                "-Path",
-                str(path),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
         with self._lock:
+            if generation != self._generation:
+                return False
+            process = subprocess.Popen(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(player_script),
+                    "-Path",
+                    str(path),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
             self._player = process
         try:
             returncode = process.wait()
@@ -186,10 +198,18 @@ def main() -> int:
 
     try:
         import torch
-        from silero import silero_tts
-
         torch.set_num_threads(max(1, args.threads))
-        model, _ = silero_tts(language="ru", speaker=args.model)
+        if not args.model_path.is_file():
+            raise RuntimeError(f"Локальный файл Silero не найден: {args.model_path}")
+        if args.model_size <= 0 or args.model_path.stat().st_size != args.model_size:
+            raise RuntimeError("Размер локального файла Silero не совпал с lock-конфигурацией.")
+        expected_sha256 = args.model_sha256.strip().casefold()
+        actual_sha256 = sha256_file(args.model_path)
+        if len(expected_sha256) != 64 or actual_sha256 != expected_sha256:
+            raise RuntimeError("SHA-256 локального файла Silero не совпал с lock-конфигурацией.")
+        model = torch.package.PackageImporter(str(args.model_path)).load_pickle(
+            "tts_models", "model"
+        )
         active_device = "cpu"
         if args.device in {"auto", "cuda"} and torch.cuda.is_available():
             free_bytes, _total_bytes = torch.cuda.mem_get_info()

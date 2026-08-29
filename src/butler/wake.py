@@ -6,7 +6,9 @@ import queue
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
+from collections.abc import Iterator
 
 from butler.config import Settings
 from butler.diagnostics import event as diagnostic_event
@@ -23,6 +25,66 @@ class WakeListenerTimeout(WakeListenerError):
 
 class WakeListenerCancelled(WakeListenerError):
     """The owner no longer needs the temporary wake listener."""
+
+
+class _AnyCancellationEvent:
+    """Minimal Event-compatible view that is set when any source is set."""
+
+    def __init__(self, *events: threading.Event) -> None:
+        self._events = events
+
+    def is_set(self) -> bool:
+        return any(event.is_set() for event in self._events)
+
+
+class MicrophoneCaptureGate:
+    """Hand one physical microphone between a monitor and exclusive capture.
+
+    The background wake/stop listener owns the microphone most of the time. A
+    confirmation recognizer must first cancel that listener and wait until its
+    worker has fully closed the device. This gate makes the hand-off explicit
+    instead of allowing two audio workers to race for the same endpoint.
+    """
+
+    def __init__(self) -> None:
+        self._pause_requested = threading.Event()
+        self._monitor_paused = threading.Event()
+        self._exclusive_lock = threading.Lock()
+
+    def monitor_cancel_event(
+        self, owner_cancelled: threading.Event
+    ) -> _AnyCancellationEvent:
+        return _AnyCancellationEvent(owner_cancelled, self._pause_requested)
+
+    def monitor_checkpoint(self, owner_cancelled: threading.Event) -> bool:
+        """Acknowledge a requested hand-off and wait until capture is released."""
+
+        if owner_cancelled.is_set():
+            return False
+        if not self._pause_requested.is_set():
+            return True
+        self._monitor_paused.set()
+        try:
+            while self._pause_requested.is_set() and not owner_cancelled.is_set():
+                owner_cancelled.wait(0.05)
+        finally:
+            self._monitor_paused.clear()
+        return not owner_cancelled.is_set()
+
+    @contextmanager
+    def exclusive_capture(self, timeout: float) -> Iterator[None]:
+        if timeout <= 0:
+            raise ValueError("Тайм-аут передачи микрофона должен быть положительным.")
+        with self._exclusive_lock:
+            self._pause_requested.set()
+            try:
+                if not self._monitor_paused.wait(timeout):
+                    raise TimeoutError(
+                        "Фоновый слушатель не освободил микрофон вовремя."
+                    )
+                yield
+            finally:
+                self._pause_requested.clear()
 
 
 class WakeListener:

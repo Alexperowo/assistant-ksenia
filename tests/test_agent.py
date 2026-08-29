@@ -6,10 +6,12 @@ from unittest.mock import patch
 from butler.agent import (
     AgentSession,
     SYSTEM_PROMPT,
+    _SafeFinalTextStream,
     bounded_result_payload,
     is_raw_tool_markup,
     status_for_tool,
 )
+from butler.chat import ChatError
 from butler.tools import ToolResult
 
 
@@ -38,6 +40,19 @@ def tool_call_response(index: int) -> dict:
 
 class AgentTests(unittest.TestCase):
     @patch("butler.agent.ToolExecutor")
+    @patch("butler.agent.complete_chat")
+    def test_existing_task_security_context_is_not_reset(self, complete, executor_class):
+        complete.return_value = {
+            "choices": [{"message": {"role": "assistant", "content": "Готово."}}]
+        }
+        settings = SimpleNamespace(raw={"memory": {"compression_enabled": False}})
+        session = AgentSession(settings)
+
+        session.ask("Продолжи текущую задачу", reset_tool_state=False)
+
+        executor_class.return_value.begin_task.assert_not_called()
+
+    @patch("butler.agent.ToolExecutor")
     def test_context_snapshot_is_bounded_and_excludes_tool_transcript(self, _executor):
         settings = SimpleNamespace(raw={"memory": {"persistent": False}})
         session = AgentSession(settings)
@@ -61,10 +76,80 @@ class AgentTests(unittest.TestCase):
         self.assertNotIn("Секретный", snapshot)
         self.assertNotIn("Проверяю микрофон", snapshot)
 
+    @patch("butler.agent.ToolExecutor")
+    def test_live_memory_replaces_generated_answer_with_spoken_prefix(self, _executor):
+        settings = SimpleNamespace(raw={"memory": {"persistent": False}})
+        session = AgentSession(settings)
+        session.record_exchange("Продолжай", "Первая. Вторая. Третья.")
+
+        committed = session.commit_spoken_reply(
+            "Первая. Вторая. Третья.", "Первая."
+        )
+
+        self.assertTrue(committed)
+        self.assertEqual(session.messages[-1]["content"], "Первая.")
+
+    @patch("butler.agent.ToolExecutor")
+    def test_live_memory_records_spoken_prefix_after_cancelled_generation(self, _executor):
+        settings = SimpleNamespace(raw={"memory": {"persistent": False}})
+        session = AgentSession(settings)
+        session.messages.append({"role": "user", "content": "Продолжай"})
+
+        committed = session.commit_spoken_reply("Черновик ответа", "Успела сказать.")
+
+        self.assertTrue(committed)
+        self.assertEqual(
+            session.messages[-1],
+            {"role": "assistant", "content": "Успела сказать."},
+        )
+
+    @patch("butler.agent.ToolExecutor")
+    def test_live_memory_refuses_to_rewrite_unrelated_answer(self, _executor):
+        settings = SimpleNamespace(raw={"memory": {"persistent": False}})
+        session = AgentSession(settings)
+        session.record_exchange("Вопрос", "Существующий ответ.")
+
+        committed = session.commit_spoken_reply("Другой ответ.", "Часть.")
+
+        self.assertFalse(committed)
+        self.assertEqual(session.messages[-1]["content"], "Существующий ответ.")
+
     def test_raw_tool_markup_is_never_a_spoken_answer(self):
         self.assertTrue(is_raw_tool_markup("<|tool_call>call:test{}<tool_call|>"))
         self.assertTrue(is_raw_tool_markup("  <tool_call>call:test{}"))
+        self.assertTrue(
+            is_raw_tool_markup("Ищу файл.<tool_call>search_workspace</tool_call>")
+        )
         self.assertFalse(is_raw_tool_markup("Инструмент выполнил проверку."))
+
+    def test_final_text_stream_holds_and_blocks_split_tool_prefix(self):
+        spoken = []
+        stream = _SafeFinalTextStream(spoken.append)
+
+        stream.feed("  <|tool_")
+        self.assertEqual(spoken, [])
+        stream.feed("call>call:test{}")
+        stream.finish("<|tool_call>call:test{}")
+
+        self.assertEqual(spoken, [])
+        self.assertTrue(stream.blocked)
+
+        spoken = []
+        stream = _SafeFinalTextStream(spoken.append)
+        stream.feed("Промежуточный текст.<tool_")
+        stream.feed("call>search_workspace")
+        self.assertEqual(spoken, ["Промежуточный текст."])
+        self.assertTrue(stream.blocked)
+
+    def test_final_text_stream_releases_normal_prefix_without_duplication(self):
+        spoken = []
+        stream = _SafeFinalTextStream(spoken.append)
+
+        stream.feed("Хорошо")
+        stream.feed(", выполняю.")
+        stream.finish("Хорошо, выполняю.")
+
+        self.assertEqual(spoken, ["Хорошо", ", выполняю."])
 
     @patch("butler.agent.ToolExecutor")
     @patch("butler.agent.complete_chat")
@@ -82,6 +167,54 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(reply.text, "Проверка готова.")
         self.assertIsNone(complete.call_args_list[1].kwargs["tools"])
         self.assertIsNone(complete.call_args_list[2].kwargs["tools"])
+
+        complete.reset_mock()
+        complete.side_effect = [
+            tool_call_response(1),
+            {"choices": [{"message": {"role": "assistant", "content": "<|tool_call>call:test{}"}}]},
+            {"choices": [{"message": {"role": "assistant", "content": "<|tool_call>call:test{}"}}]},
+        ]
+        with self.assertRaisesRegex(
+            ChatError, "Успешных изменений файлов: 0.*сохранённого состояния"
+        ):
+            AgentSession(settings).ask("Тест", max_steps=1)
+
+    @patch("butler.agent.ToolExecutor")
+    @patch("butler.agent.complete_chat")
+    def test_raw_markup_after_spoken_prefix_is_not_retried_as_second_answer(
+        self, complete, executor_class
+    ):
+        executor_class.return_value.execute.return_value = ToolResult(True, "ok", "готово")
+        spoken = []
+
+        def malformed_final(*_args, **kwargs):
+            callback = kwargs.get("on_content_delta")
+            callback("Начала. <tool_call>search_workspace</tool_call>")
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Начала. <tool_call>search_workspace</tool_call>",
+                        }
+                    }
+                ]
+            }
+
+        responses = iter([tool_call_response(1), malformed_final])
+
+        def respond(*args, **kwargs):
+            value = next(responses)
+            return value(*args, **kwargs) if callable(value) else value
+
+        complete.side_effect = respond
+        settings = SimpleNamespace(raw={"memory": {"compression_enabled": False}})
+
+        with self.assertRaises(ChatError):
+            AgentSession(settings).ask("Тест", max_steps=1, on_final_delta=spoken.append)
+
+        self.assertEqual(complete.call_count, 2)
+        self.assertEqual(spoken, ["Начала. "])
 
     @patch("butler.agent.ToolExecutor")
     @patch("butler.agent.complete_chat")
@@ -153,11 +286,18 @@ class AgentTests(unittest.TestCase):
             for index in range(20)
         )
 
-        reply = session.ask("Как тебя зовут?", conversation_only=True)
+        deltas = []
+        reply = session.ask(
+            "Как тебя зовут?",
+            conversation_only=True,
+            on_final_delta=deltas.append,
+        )
 
         self.assertEqual(reply.text, "Я Ксения.")
         self.assertIsNone(complete.call_args.kwargs["tools"])
         self.assertEqual(complete.call_args.kwargs["max_tokens"], 512)
+        self.assertIsNotNone(complete.call_args.kwargs["on_content_delta"])
+        self.assertEqual(deltas, ["Я Ксения."])
         self.assertLessEqual(len(complete.call_args.args[1]), 5)
 
     @patch("butler.agent.ToolExecutor")

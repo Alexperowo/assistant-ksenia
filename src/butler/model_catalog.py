@@ -7,7 +7,13 @@ from butler.config import Settings
 
 def find_models(settings: Settings, limit: int = 200) -> list[Path]:
     configured = settings.raw.get("paths", {}).get("model_search_dirs", [])
-    roots = [settings.models_dir, *(Path(str(item)) for item in configured)]
+    roots = [
+        settings.models_dir,
+        *(
+            path if path.is_absolute() else settings.root / path
+            for path in (Path(str(item)).expanduser() for item in configured)
+        ),
+    ]
     seen: set[Path] = set()
     result: list[Path] = []
     for root in roots:

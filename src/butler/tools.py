@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from butler.atomic_io import atomic_write_text, exclusive_file_lock
 from butler.browser import BrowserError, BrowserReader, contains_financial_action
 from butler.config import Settings
 from butler.developer import DeveloperError, DeveloperRunner
@@ -24,6 +26,7 @@ from butler.embeddings import EmbeddingError, LlamaCppEmbeddingService
 from butler.permissions import Decision, PermissionBroker
 from butler.procedures import ProcedureError, ProcedureLibrary
 from butler.rag import HybridRagIndex
+from butler.schema_validation import SchemaValidationError, validate_json_schema
 from butler.sensitive_data import is_sensitive_path
 from butler.windows_bridge import (
     WindowsBridgeError,
@@ -42,6 +45,92 @@ from butler.windows_automation import WindowsAutomation, WindowsAutomationError
 MAX_READ_BYTES = 1_048_576
 MAX_READ_CHARS = 32_000
 MAX_LIST_ENTRIES = 200
+ACTIVE_WINDOWS_TOOLS = frozenset(
+    {
+        "windows_activate_window",
+        "windows_type_text",
+        "windows_press_keys",
+        "windows_invoke_control",
+        "windows_set_control_value",
+        "windows_click_control",
+        "windows_move_pointer",
+        "windows_click_pointer",
+        "windows_scroll_pointer",
+    }
+)
+BROWSER_ACTION_SCHEMA: dict[str, Any] = {
+    "oneOf": [
+        {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["click"]},
+                "selector": {"type": "string", "minLength": 1, "maxLength": 2000},
+            },
+            "required": ["type", "selector"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["click_text"]},
+                "text": {"type": "string", "minLength": 1, "maxLength": 4000},
+            },
+            "required": ["type", "text"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["fill"]},
+                "selector": {"type": "string", "minLength": 1, "maxLength": 2000},
+                "text": {"type": "string", "maxLength": 4000},
+            },
+            "required": ["type", "selector", "text"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["press"]},
+                "selector": {"type": "string", "minLength": 1, "maxLength": 2000},
+                "key": {
+                    "type": "string",
+                    "enum": [
+                        "Enter", "Tab", "Escape", "ArrowUp", "ArrowDown",
+                        "ArrowLeft", "ArrowRight",
+                    ],
+                },
+            },
+            "required": ["type", "key"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["wait"]},
+                "milliseconds": {"type": "integer", "minimum": 0, "maximum": 5000},
+            },
+            "required": ["type"],
+            "additionalProperties": False,
+        },
+    ]
+}
+WINDOWS_SELECTOR_SCHEMA: dict[str, Any] = {
+    "anyOf": [
+        {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                "automation_id": {"type": "string", "minLength": 1, "maxLength": 200},
+                "control_type": {"type": "string", "minLength": 1, "maxLength": 100},
+                "match_index": {"type": "integer", "minimum": 0, "maximum": 1000},
+            },
+            "required": [required_name],
+            "additionalProperties": False,
+        }
+        for required_name in ("name", "automation_id", "control_type")
+    ]
+}
 
 
 @dataclass(frozen=True)
@@ -63,6 +152,24 @@ class ToolResult:
 
 
 def tool_schemas(settings: Settings | None = None) -> list[dict[str, Any]]:
+    procedure_names: list[str] = []
+    root = getattr(settings, "root", None)
+    if isinstance(root, Path):
+        try:
+            procedure_names = [
+                str(item["name"])
+                for item in ProcedureLibrary(root).list()
+                if item.get("name")
+            ]
+        except OSError:
+            procedure_names = []
+    procedure_name_schema: dict[str, Any] = {"type": "string"}
+    procedure_description = (
+        "Прочитать одну локальную процедуру перед сложной профильной задачей."
+    )
+    if procedure_names:
+        procedure_name_schema["enum"] = procedure_names
+        procedure_description += " Допустимые имена: " + ", ".join(procedure_names) + "."
     schemas = [
         {
             "type": "function",
@@ -76,10 +183,10 @@ def tool_schemas(settings: Settings | None = None) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "read_procedure",
-                "description": "Прочитать одну локальную процедуру перед сложной профильной задачей.",
+                "description": procedure_description,
                 "parameters": {
                     "type": "object",
-                    "properties": {"name": {"type": "string"}},
+                    "properties": {"name": procedure_name_schema},
                     "required": ["name"],
                     "additionalProperties": False,
                 },
@@ -142,7 +249,7 @@ def tool_schemas(settings: Settings | None = None) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "list_workspace",
-                "description": "Показать содержимое каталога внутри рабочей папки дворецкого.",
+                "description": "Показать только один уровень известного каталога внутри рабочей папки. Для поиска символов в большом проекте используй search_workspace вместо последовательного обхода дерева.",
                 "parameters": {
                     "type": "object",
                     "properties": {"path": {"type": "string", "description": "Относительный путь, по умолчанию ."}},
@@ -171,7 +278,7 @@ def tool_schemas(settings: Settings | None = None) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "search_workspace",
-                "description": "Найти текст в файлах рабочей папки. Только чтение.",
+                "description": "Найти символ или текст сразу во всём выбранном поддереве рабочей папки. Для незнакомого большого проекта предпочитай этот инструмент ручному обходу list_workspace. Только чтение.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -188,7 +295,12 @@ def tool_schemas(settings: Settings | None = None) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "write_workspace_file",
-                "description": "Записать текстовый файл внутри рабочей папки. Всегда требует подтверждения пользователя.",
+                "description": (
+                    "Создать новый текстовый файл внутри рабочей папки. "
+                    "Существующий путь этот инструмент никогда не перезаписывает; "
+                    "для точечного изменения используйте replace_in_workspace_file. "
+                    "Всегда требует подтверждения пользователя."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
@@ -307,7 +419,7 @@ def tool_schemas(settings: Settings | None = None) -> list[dict[str, Any]]:
                             "type": "array",
                             "minItems": 1,
                             "maxItems": 10,
-                            "items": {"type": "object"}
+                            "items": BROWSER_ACTION_SCHEMA
                         }
                     },
                     "required": ["url", "actions"],
@@ -328,7 +440,7 @@ def tool_schemas(settings: Settings | None = None) -> list[dict[str, Any]]:
                             "type": "array",
                             "minItems": 1,
                             "maxItems": 10,
-                            "items": {"type": "object"}
+                            "items": BROWSER_ACTION_SCHEMA
                         }
                     },
                     "required": ["url", "actions"],
@@ -415,7 +527,7 @@ def tool_schemas(settings: Settings | None = None) -> list[dict[str, Any]]:
                     "type": "object",
                     "properties": {
                         "handle": {"type": "integer"},
-                        "selector": {"type": "object", "description": "Точное имя, automation_id, control_type и при необходимости match_index из структуры окна."}
+                        "selector": WINDOWS_SELECTOR_SCHEMA
                     },
                     "required": ["selector"],
                     "additionalProperties": False,
@@ -431,7 +543,7 @@ def tool_schemas(settings: Settings | None = None) -> list[dict[str, Any]]:
                     "type": "object",
                     "properties": {
                         "handle": {"type": "integer"},
-                        "selector": {"type": "object"},
+                        "selector": WINDOWS_SELECTOR_SCHEMA,
                         "value": {"type": "string", "maxLength": 4000}
                     },
                     "required": ["selector", "value"],
@@ -448,7 +560,7 @@ def tool_schemas(settings: Settings | None = None) -> list[dict[str, Any]]:
                     "type": "object",
                     "properties": {
                         "handle": {"type": "integer"},
-                        "selector": {"type": "object"}
+                        "selector": WINDOWS_SELECTOR_SCHEMA
                     },
                     "required": ["selector"],
                     "additionalProperties": False,
@@ -520,6 +632,27 @@ def tool_schemas(settings: Settings | None = None) -> list[dict[str, Any]]:
                 },
             },
         )
+    active_browser_control = bool(
+        settings is not None
+        and settings.raw.get("browser", {}).get("active_control_enabled", False)
+    )
+    if not active_browser_control:
+        schemas = [
+            schema
+            for schema in schemas
+            if schema.get("function", {}).get("name")
+            not in {"browser_interact", "browser_send_message"}
+        ]
+    active_windows_control = bool(
+        settings is not None
+        and settings.raw.get("windows", {}).get("active_control_enabled", False)
+    )
+    if not active_windows_control:
+        schemas = [
+            schema
+            for schema in schemas
+            if schema.get("function", {}).get("name") not in ACTIVE_WINDOWS_TOOLS
+        ]
     return schemas
 
 
@@ -545,10 +678,32 @@ class ToolExecutor:
         self.log_path = settings.runtime_dir / "logs" / "tool-events.jsonl"
         self._log_lock = threading.Lock()
         self._local_data_exposed = False
+        self._directory_list_calls = 0
+        self._max_directory_list_calls = int(
+            settings.raw.get("agent", {}).get("max_directory_list_calls", 6)
+        )
+        self._browser_active_control_enabled = bool(
+            settings.raw.get("browser", {}).get("active_control_enabled", False)
+        )
+        self._windows_active_control_enabled = bool(
+            settings.raw.get("windows", {}).get("active_control_enabled", False)
+        )
+        self._tool_parameters = {
+            str(schema.get("function", {}).get("name", "")): schema.get(
+                "function", {}
+            ).get("parameters", {})
+            for schema in tool_schemas(settings)
+            if str(schema.get("function", {}).get("name", ""))
+        }
 
     def begin_task(self) -> None:
         """Reset information-flow state at a top-level user request boundary."""
         self._local_data_exposed = False
+        self._directory_list_calls = 0
+
+    def mark_local_data_exposed(self) -> None:
+        """Record that the current model turn received local-only information."""
+        self._local_data_exposed = True
 
     def _outbound_after_local_guard(self, confirmed: bool) -> ToolResult | None:
         if self._local_data_exposed and not confirmed:
@@ -563,21 +718,36 @@ class ToolExecutor:
         self, args: dict[str, Any], confirmed: bool
     ) -> ToolResult | None:
         context: list[object] = [json.dumps(args, ensure_ascii=False)]
-        try:
-            current = active_window()
-            context.append(current.get("title", ""))
-        except WindowsBridgeError:
-            pass
         handle = int(args.get("handle", 0) or 0)
-        if handle:
-            try:
-                context.extend(
-                    item.get("title", "")
+        try:
+            if handle:
+                matching = [
+                    item
                     for item in list_windows()
                     if int(item.get("handle", 0) or 0) == handle
-                )
-            except WindowsBridgeError:
-                pass
+                ]
+                if not matching:
+                    return ToolResult(
+                        False,
+                        "window_context_unavailable",
+                        "Целевое окно не найдено; действие остановлено безопасно.",
+                    )
+                context.extend(item.get("title", "") for item in matching)
+            else:
+                current = active_window()
+                if not int(current.get("handle", 0) or 0):
+                    return ToolResult(
+                        False,
+                        "window_context_unavailable",
+                        "Активное окно не определено; действие остановлено безопасно.",
+                    )
+                context.append(current.get("title", ""))
+        except (WindowsBridgeError, OSError, TypeError, ValueError):
+            return ToolResult(
+                False,
+                "window_context_unavailable",
+                "Не удалось проверить контекст окна; действие остановлено безопасно.",
+            )
         if not contains_financial_action(*context):
             return None
         authorization = self.permissions.authorize(
@@ -588,6 +758,15 @@ class ToolExecutor:
         if not authorization.allowed:
             return ToolResult(False, "denied", authorization.reason)
         return None
+
+    def _windows_active_control_guard(self) -> ToolResult | None:
+        if self._windows_active_control_enabled:
+            return None
+        return ToolResult(
+            False,
+            "disabled",
+            "Активное управление Windows отключено в конфигурации.",
+        )
 
     def _path(self, raw: Any, default: str = ".") -> Path:
         value = str(raw or default)
@@ -615,14 +794,14 @@ class ToolExecutor:
         log_event = {
             "time": datetime.now(timezone.utc).isoformat(),
             "tool": name,
-            "args": self._safe_log_value(args),
+            "argument_names": sorted(str(key) for key in args),
             "status": result.status,
             "ok": result.ok,
             "duration_ms": duration_ms,
             "confirmed": confirmed,
         }
         try:
-            with self._log_lock:
+            with self._log_lock, exclusive_file_lock(self.log_path, timeout=2.0):
                 self.log_path.parent.mkdir(parents=True, exist_ok=True)
                 encoded = json.dumps(log_event, ensure_ascii=False) + "\n"
                 diagnostics = self.settings.raw.get("diagnostics", {})
@@ -694,16 +873,41 @@ class ToolExecutor:
         return value
 
     def _write_text(self, target: Path, content: str) -> dict[str, str]:
-        change = self.journal.prepare(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_suffix(target.suffix + ".tmp")
-        temporary.write_text(content, encoding="utf-8")
-        temporary.replace(target)
-        if target.read_text(encoding="utf-8") != content:
-            raise OSError("Проверка записанного файла не совпала с исходным текстом.")
-        operation_id = self.journal.commit(change)
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        return {"path": str(target), "operation_id": operation_id, "sha256": digest}
+        if target.is_symlink():
+            raise OSError("Запись через символическую ссылку запрещена.")
+        with self.journal.transaction():
+            change = self.journal.prepare(target)
+            atomic_write_text(target, content)
+            if target.read_text(encoding="utf-8") != content:
+                raise OSError("Проверка записанного файла не совпала с исходным текстом.")
+            operation_id = self.journal.commit(change)
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            return {
+                "path": str(target),
+                "operation_id": operation_id,
+                "sha256": digest,
+            }
+
+    def _create_text(self, target: Path, content: str) -> dict[str, str]:
+        """Create a file with an OS-enforced no-overwrite precondition."""
+        with self.journal.transaction():
+            change = self.journal.prepare(target)
+            if change.existed or target.exists():
+                raise FileExistsError(f"Путь уже существует: {target}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("x", encoding="utf-8") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if target.read_text(encoding="utf-8") != content:
+                raise OSError("Проверка созданного файла не совпала с исходным текстом.")
+            operation_id = self.journal.commit(change)
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            return {
+                "path": str(target),
+                "operation_id": operation_id,
+                "sha256": digest,
+            }
 
     def _authorize(self, action: str, target: Path, confirmed: bool) -> ToolResult | None:
         authorization = self.permissions.authorize(action, target, confirmed=confirmed)
@@ -714,8 +918,27 @@ class ToolExecutor:
         return None
 
     def execute(self, name: str, args: dict[str, Any] | None = None, *, confirmed: bool = False) -> ToolResult:
-        args = args or {}
+        args = {} if args is None else args
         started = time.monotonic()
+        parameters = self._tool_parameters.get(name)
+        if parameters is not None:
+            try:
+                validate_json_schema(args, parameters)
+            except SchemaValidationError as exc:
+                result = ToolResult(
+                    False,
+                    "invalid_arguments",
+                    f"Неверные аргументы инструмента: {exc}",
+                )
+                safe_args = args if isinstance(args, dict) else {"value_type": type(args).__name__}
+                self._log(
+                    name,
+                    safe_args,
+                    result,
+                    duration_ms=round((time.monotonic() - started) * 1000),
+                    confirmed=confirmed,
+                )
+                return result
         try:
             if name == "list_procedures":
                 items = self.procedures.list()
@@ -835,7 +1058,16 @@ class ToolExecutor:
                     result = blocked
                 elif not target.is_dir():
                     result = ToolResult(False, "not_found", f"Каталог не найден: {target}")
+                elif self._directory_list_calls >= self._max_directory_list_calls:
+                    result = ToolResult(
+                        False,
+                        "directory_walk_limit",
+                        "Предел ручного обхода каталогов достигнут. Не спускайтесь дальше "
+                        "через list_workspace: найдите нужный символ или имя через "
+                        "search_workspace, затем прочитайте конкретный файл.",
+                    )
                 else:
+                    self._directory_list_calls += 1
                     entries = []
                     for item in sorted(target.iterdir(), key=lambda path: path.name.casefold())[:MAX_LIST_ENTRIES]:
                         if item.is_symlink() or not self._inside_workspace(item):
@@ -939,13 +1171,33 @@ class ToolExecutor:
                 blocked = self._authorize("write_file", target, confirmed)
                 if blocked:
                     result = blocked
-                else:
+                elif target.exists():
                     result = ToolResult(
-                        True,
-                        "ok",
-                        "Файл записан после подтверждения. Изменение можно отменить.",
-                        self._write_text(target, str(args.get("content", ""))),
+                        False,
+                        "existing_file_requires_replace",
+                        "Путь уже существует и не перезаписан. Для существующего текстового "
+                        "файла используйте точную замену replace_in_workspace_file.",
+                        {"path": str(target)},
                     )
+                else:
+                    try:
+                        data = self._create_text(target, str(args.get("content", "")))
+                    except FileExistsError:
+                        result = ToolResult(
+                            False,
+                            "existing_file_requires_replace",
+                            "Путь появился до записи и не перезаписан. Для существующего "
+                            "текстового файла используйте точную замену "
+                            "replace_in_workspace_file.",
+                            {"path": str(target)},
+                        )
+                    else:
+                        result = ToolResult(
+                            True,
+                            "ok",
+                            "Новый файл создан после подтверждения. Изменение можно отменить.",
+                            data,
+                        )
             elif name == "replace_in_workspace_file":
                 target = self._path(args.get("path"), "")
                 blocked = self._authorize("write_file", target, confirmed)
@@ -954,34 +1206,46 @@ class ToolExecutor:
                 elif not target.is_file():
                     result = ToolResult(False, "not_found", f"Файл не найден: {target}")
                 else:
-                    old_text = str(args.get("old_text", ""))
-                    current = target.read_text(encoding="utf-8", errors="strict")
-                    count = current.count(old_text) if old_text else 0
-                    if count != 1:
-                        result = ToolResult(
-                            False,
-                            "ambiguous_replace",
-                            f"Для безопасной замены нужно одно совпадение, найдено: {count}.",
-                        )
-                    else:
-                        content = current.replace(old_text, str(args.get("new_text", "")), 1)
-                        result = ToolResult(
-                            True,
-                            "ok",
-                            "Точная замена выполнена и проверена. Изменение можно отменить.",
-                            self._write_text(target, content),
-                        )
+                    with self.journal.transaction():
+                        old_text = str(args.get("old_text", ""))
+                        current = target.read_text(encoding="utf-8", errors="strict")
+                        count = current.count(old_text) if old_text else 0
+                        if count != 1:
+                            result = ToolResult(
+                                False,
+                                "ambiguous_replace",
+                                "Для безопасной замены нужно одно совпадение, "
+                                f"найдено: {count}.",
+                            )
+                        else:
+                            content = current.replace(
+                                old_text, str(args.get("new_text", "")), 1
+                            )
+                            result = ToolResult(
+                                True,
+                                "ok",
+                                "Точная замена выполнена и проверена. "
+                                "Изменение можно отменить.",
+                                self._write_text(target, content),
+                            )
             elif name == "delete_workspace_file":
                 target = self._path(args.get("path"), "")
                 blocked = self._authorize("delete_file", target, confirmed)
                 if blocked:
                     result = blocked
+                elif target.is_symlink():
+                    result = ToolResult(
+                        False,
+                        "symlink_rejected",
+                        "Удаление через символическую ссылку запрещено.",
+                    )
                 elif not target.is_file():
                     result = ToolResult(False, "not_found", f"Файл не найден: {target}")
                 else:
-                    change = self.journal.prepare(target)
-                    target.unlink()
-                    operation_id = self.journal.commit(change)
+                    with self.journal.transaction():
+                        change = self.journal.prepare(target)
+                        target.unlink()
+                        operation_id = self.journal.commit(change)
                     result = ToolResult(
                         True,
                         "ok",
@@ -1032,22 +1296,38 @@ class ToolExecutor:
                 )
                 result = blocked or ToolResult(True, "ok", "Страница прочитана.", self.browser.read("open", str(args.get("url", ""))))
             elif name == "browser_interact":
-                blocked = self._authorize("browser_write", self.workspace_root, confirmed)
-                if blocked:
-                    result = blocked
-                else:
-                    actions = args.get("actions", [])
-                    if not isinstance(actions, list):
-                        raise ValueError("Действия браузера должны быть списком.")
+                if not self._browser_active_control_enabled:
                     result = ToolResult(
-                        True,
-                        "ok",
-                        "Подтверждённые действия в браузере выполнены.",
-                        self.browser.interact(str(args.get("url", "")), actions),
+                        False,
+                        "disabled",
+                        "Активное управление авторизованным браузером отключено в конфигурации.",
                     )
+                else:
+                    blocked = self._authorize("browser_write", self.workspace_root, confirmed)
+                    if blocked:
+                        result = blocked
+                    else:
+                        actions = args.get("actions", [])
+                        if not isinstance(actions, list):
+                            raise ValueError("Действия браузера должны быть списком.")
+                        result = ToolResult(
+                            True,
+                            "ok",
+                            "Подтверждённые действия в браузере выполнены.",
+                            self.browser.interact(str(args.get("url", "")), actions),
+                        )
             elif name == "browser_send_message":
-                authorization = self.permissions.authorize("send_message", confirmed=confirmed)
-                if authorization.decision == Decision.CONFIRM:
+                if not self._browser_active_control_enabled:
+                    result = ToolResult(
+                        False,
+                        "disabled",
+                        "Отправка через авторизованный браузер отключена в конфигурации.",
+                    )
+                else:
+                    authorization = self.permissions.authorize("send_message", confirmed=confirmed)
+                if not self._browser_active_control_enabled:
+                    pass
+                elif authorization.decision == Decision.CONFIRM:
                     result = ToolResult(False, "confirmation_required", authorization.reason)
                 elif not authorization.allowed:
                     result = ToolResult(False, "denied", authorization.reason)
@@ -1068,20 +1348,26 @@ class ToolExecutor:
                 blocked = self._authorize("windows_read", self.workspace_root, confirmed)
                 result = blocked or ToolResult(True, "ok", "Активное окно прочитано.", active_window())
             elif name == "windows_activate_window":
-                blocked = self._authorize("windows_write", self.workspace_root, confirmed)
+                blocked = self._windows_active_control_guard() or self._authorize(
+                    "windows_write", self.workspace_root, confirmed
+                )
                 result = blocked or ToolResult(
                     True, "ok", "Окно активировано.", activate_window(int(args.get("handle", 0)))
                 )
             elif name == "windows_type_text":
-                blocked = self._windows_financial_guard(args, confirmed) or self._authorize(
-                    "windows_write", self.workspace_root, confirmed
+                blocked = (
+                    self._windows_active_control_guard()
+                    or self._windows_financial_guard(args, confirmed)
+                    or self._authorize("windows_write", self.workspace_root, confirmed)
                 )
                 result = blocked or ToolResult(
                     True, "ok", "Текст введён.", type_text(str(args.get("text", "")))
                 )
             elif name == "windows_press_keys":
-                blocked = self._windows_financial_guard(args, confirmed) or self._authorize(
-                    "windows_write", self.workspace_root, confirmed
+                blocked = (
+                    self._windows_active_control_guard()
+                    or self._windows_financial_guard(args, confirmed)
+                    or self._authorize("windows_write", self.workspace_root, confirmed)
                 )
                 result = blocked or ToolResult(
                     True, "ok", "Клавиши нажаты.", press_keys(str(args.get("keys", "")))
@@ -1105,8 +1391,10 @@ class ToolExecutor:
                 "windows_set_control_value",
                 "windows_click_control",
             }:
-                blocked = self._windows_financial_guard(args, confirmed) or self._authorize(
-                    "windows_write", self.workspace_root, confirmed
+                blocked = (
+                    self._windows_active_control_guard()
+                    or self._windows_financial_guard(args, confirmed)
+                    or self._authorize("windows_write", self.workspace_root, confirmed)
                 )
                 if blocked:
                     result = blocked
@@ -1129,7 +1417,9 @@ class ToolExecutor:
                         self.windows.execute(operation, payload),
                     )
             elif name == "windows_move_pointer":
-                blocked = self._authorize("windows_write", self.workspace_root, confirmed)
+                blocked = self._windows_active_control_guard() or self._authorize(
+                    "windows_write", self.workspace_root, confirmed
+                )
                 result = blocked or ToolResult(
                     True,
                     "ok",
@@ -1137,8 +1427,10 @@ class ToolExecutor:
                     move_pointer(int(args.get("x", 0)), int(args.get("y", 0))),
                 )
             elif name == "windows_click_pointer":
-                blocked = self._windows_financial_guard(args, confirmed) or self._authorize(
-                    "windows_write", self.workspace_root, confirmed
+                blocked = (
+                    self._windows_active_control_guard()
+                    or self._windows_financial_guard(args, confirmed)
+                    or self._authorize("windows_write", self.workspace_root, confirmed)
                 )
                 result = blocked or ToolResult(
                     True,
@@ -1150,7 +1442,9 @@ class ToolExecutor:
                     ),
                 )
             elif name == "windows_scroll_pointer":
-                blocked = self._authorize("windows_write", self.workspace_root, confirmed)
+                blocked = self._windows_active_control_guard() or self._authorize(
+                    "windows_write", self.workspace_root, confirmed
+                )
                 result = blocked or ToolResult(
                     True,
                     "ok",
@@ -1181,7 +1475,7 @@ class ToolExecutor:
             "recall_information",
             "run_project_tests",
             "run_project_command",
-            "windows_get_active_window",
+            "windows_active_window",
             "windows_list_windows",
             "windows_inspect_controls",
         }:

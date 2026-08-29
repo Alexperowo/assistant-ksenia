@@ -19,6 +19,7 @@ from butler.orchestrator import (
     planning_tool_schemas,
     workspace_map,
 )
+from butler.tasking import TaskCancelled
 from butler.tools import ToolResult
 
 
@@ -26,19 +27,18 @@ class OrchestratorTests(unittest.TestCase):
     def test_capability_roles_select_models_without_changing_tools(self):
         settings = load_settings()
         raw = deepcopy(settings.raw)
-        raw["capability_roles"]["assistant"]["primary_model"] = "developer"
-        raw["capability_roles"]["researcher"]["primary_model"] = "developer_qwopus"
-        raw["capability_roles"]["developer"]["primary_model"] = "developer_qwopus"
+        raw["capability_roles"]["assistant"]["primary_model"] = "generalist"
+        raw["capability_roles"]["researcher"]["primary_model"] = "reasoning"
+        raw["capability_roles"]["developer"]["primary_model"] = "generalist"
         raw["capability_roles"]["heavy_brain"].update(
-            {"enabled": True, "primary_model": "planner"}
+            {"enabled": True, "primary_model": "reasoning"}
         )
-        raw["models"]["planner"]["enabled"] = True
         session = RoutedAgentSession(replace(settings, raw=raw))
 
-        self.assertEqual(session._assistant_model(), "developer")
-        self.assertEqual(session._research_model(), "developer_qwopus")
-        self.assertEqual(session._execution_model(), "developer_qwopus")
-        self.assertEqual(session._planning_model(), "planner")
+        self.assertEqual(session._assistant_model(), "generalist")
+        self.assertEqual(session._research_model(), "reasoning")
+        self.assertEqual(session._execution_model(), "generalist")
+        self.assertEqual(session._planning_model(), "reasoning")
 
     def test_durable_task_records_cross_role_request_and_result(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -62,8 +62,8 @@ class OrchestratorTests(unittest.TestCase):
             with self.assertRaisesRegex(ChatError, "уже выполняет"):
                 session.ask("Проверка конкурентного запуска")
 
-    def test_planner_profile_uses_64k_context(self):
-        self.assertEqual(load_settings().model("planner").context_size, 65_536)
+    def test_reasoning_profile_uses_96k_context(self):
+        self.assertEqual(load_settings().model("reasoning").context_size, 98_304)
 
     def test_short_conversation_uses_direct_route_but_actions_do_not(self):
         session = RoutedAgentSession(load_settings())
@@ -107,6 +107,127 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(names, PLANNING_TOOLS)
         self.assertNotIn("write_workspace_file", names)
         self.assertNotIn("browser_interact", names)
+
+    @patch("butler.orchestrator.complete_chat")
+    def test_planner_can_execute_enabled_rag_tool(self, complete_chat):
+        original = load_settings()
+        raw = deepcopy(original.raw)
+        raw["rag"]["enabled"] = True
+        settings = replace(original, raw=raw)
+        complete_chat.side_effect = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "rag-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search_project_knowledge",
+                                        "arguments": '{"query":"граница разрешений"}',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"message": {"role": "assistant", "content": "Факты."}}]},
+            {"choices": [{"message": {"role": "assistant", "content": "План."}}]},
+        ]
+        session = RoutedAgentSession(settings)
+        session.manager.switch = Mock()
+        session.session.tools.execute = Mock(
+            return_value=ToolResult(True, "ok", "Найдено", {"items": []})
+        )
+
+        plan = session._make_plan("Проведи аудит проекта", None)
+
+        self.assertEqual(plan, "План.")
+        session.session.tools.execute.assert_called_once_with(
+            "search_project_knowledge",
+            {"query": "граница разрешений"},
+            confirmed=False,
+        )
+
+    @patch("butler.orchestrator.complete_chat")
+    def test_planner_confirms_outbound_request_after_receiving_local_context(
+        self, complete_chat
+    ):
+        complete_chat.side_effect = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "search-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "browser_search",
+                                        "arguments": '{"query":"официальная документация"}',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"message": {"role": "assistant", "content": "Факты."}}]},
+            {"choices": [{"message": {"role": "assistant", "content": "План."}}]},
+        ]
+        session = RoutedAgentSession(load_settings())
+        session.manager.switch = Mock()
+        session.session.tools.mark_local_data_exposed = Mock()
+        session.session.tools.execute = Mock(
+            side_effect=[
+                ToolResult(False, "confirmation_required", "Нужно подтверждение."),
+                ToolResult(True, "ok", "Найдено", {"results": []}),
+            ]
+        )
+        confirm = Mock(return_value=True)
+
+        plan = session._make_plan(
+            "Изучи проект и официальный источник",
+            None,
+            on_confirmation=confirm,
+        )
+
+        self.assertEqual(plan, "План.")
+        session.session.tools.mark_local_data_exposed.assert_called_once_with()
+        self.assertEqual(session.session.tools.execute.call_count, 2)
+        self.assertFalse(session.session.tools.execute.call_args_list[0].kwargs["confirmed"])
+        self.assertTrue(session.session.tools.execute.call_args_list[1].kwargs["confirmed"])
+        confirm.assert_called_once()
+
+    def test_planning_cancellation_does_not_start_execution_model(self):
+        session = RoutedAgentSession(load_settings())
+        session._planner_available = Mock(return_value=True)
+        session._needs_plan = Mock(return_value=True)
+        session._make_plan = Mock(side_effect=TaskCancelled("остановлено"))
+        session.manager.start = Mock()
+
+        with self.assertRaises(TaskCancelled):
+            session._ask_exclusive("Проведи аудит проекта")
+
+        session.manager.start.assert_not_called()
+
+    def test_execution_preserves_planner_information_flow_state(self):
+        session = RoutedAgentSession(load_settings())
+        session._planner_available = Mock(return_value=True)
+        session._needs_plan = Mock(return_value=True)
+        session._make_plan = Mock(return_value="План.")
+        session.manager.start = Mock()
+        session.session.ask = Mock(return_value=AgentReply("Готово.", ()))
+
+        session._ask_exclusive("Проведи аудит проекта")
+
+        self.assertFalse(session.session.ask.call_args.kwargs["reset_tool_state"])
 
     def test_workspace_map_lists_files_and_skips_runtime(self):
         with tempfile.TemporaryDirectory() as directory:

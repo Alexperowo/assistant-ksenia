@@ -14,9 +14,12 @@ class ApprovalTests(unittest.TestCase):
         self.assertFalse(reusable_approval("delete_workspace_file"))
         self.assertFalse(reusable_approval("send_message"))
         self.assertFalse(reusable_approval("financial_action"))
+        self.assertFalse(reusable_approval("browser_interact"))
+        self.assertFalse(reusable_approval("windows_type_text"))
+        self.assertFalse(reusable_approval("windows_click_pointer"))
 
     def test_explanation_is_accessible(self):
-        self.assertIn("до её завершения", approval_explanation("windows_type_text"))
+        self.assertIn("только к одному действию", approval_explanation("windows_type_text"))
 
 
 if __name__ == "__main__":

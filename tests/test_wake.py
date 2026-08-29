@@ -9,7 +9,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from butler.wake import WakeListener, WakeListenerCancelled, WakeListenerTimeout
+from butler.wake import (
+    MicrophoneCaptureGate,
+    WakeListener,
+    WakeListenerCancelled,
+    WakeListenerTimeout,
+)
 
 
 class WakeListenerTests(unittest.TestCase):
@@ -110,6 +115,35 @@ class WakeListenerTests(unittest.TestCase):
                         timeout=1, cancel_event=cancelled
                     )
             popen.assert_not_called()
+
+
+class MicrophoneCaptureGateTests(unittest.TestCase):
+    def test_exclusive_capture_waits_for_monitor_acknowledgement(self):
+        gate = MicrophoneCaptureGate()
+        owner_cancelled = threading.Event()
+        monitor_cancel = gate.monitor_cancel_event(owner_cancelled)
+        monitor_released = threading.Event()
+
+        def monitor() -> None:
+            while not monitor_cancel.is_set():
+                owner_cancelled.wait(0.01)
+            gate.monitor_checkpoint(owner_cancelled)
+            monitor_released.set()
+
+        thread = threading.Thread(target=monitor)
+        thread.start()
+        with gate.exclusive_capture(1):
+            self.assertFalse(monitor_released.is_set())
+        thread.join(1)
+        self.assertTrue(monitor_released.is_set())
+
+    def test_failed_handoff_releases_pause_request(self):
+        gate = MicrophoneCaptureGate()
+        owner_cancelled = threading.Event()
+        with self.assertRaises(TimeoutError):
+            with gate.exclusive_capture(0.01):
+                self.fail("Захват не должен быть предоставлен без monitor acknowledgement.")
+        self.assertFalse(gate.monitor_cancel_event(owner_cancelled).is_set())
 
 
 if __name__ == "__main__":

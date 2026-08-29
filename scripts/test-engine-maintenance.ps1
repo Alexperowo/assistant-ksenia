@@ -1,5 +1,6 @@
 ﻿param(
-    [string]$CacheRoot = ''
+    [string]$CacheRoot = '',
+    [string]$PythonPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -7,6 +8,9 @@ $utf8 = [Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = $utf8
 $OutputEncoding = $utf8
 $projectRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+. (Join-Path $PSScriptRoot 'runtime-paths.ps1')
+$PythonPath = Resolve-KseniaPython -ProjectRoot $projectRoot -ExplicitPath $PythonPath
+if (-not $PythonPath) { throw 'Python 3.12 для теста обновления не найден.' }
 if (-not $CacheRoot) { $CacheRoot = Join-Path $projectRoot 'tools\downloads' }
 $CacheRoot = [IO.Path]::GetFullPath($CacheRoot)
 $testParent = Join-Path $projectRoot 'runtime\maintenance-tests'
@@ -71,7 +75,7 @@ try {
     }
     $metadataPath = Join-Path $updateDir 'metadata.json'
     [IO.File]::WriteAllText($metadataPath, (($updateMetadata | ConvertTo-Json -Depth 8) + "`n"), $utf8)
-    & (Join-Path $PSScriptRoot 'rollback-update.ps1') -ProjectRoot $sandbox -UpdateDirectory $updateDir -PythonPath 'C:\butler-venv\Scripts\python.exe' -SkipAudit -NoRestart
+    & (Join-Path $PSScriptRoot 'rollback-update.ps1') -ProjectRoot $sandbox -UpdateDirectory $updateDir -PythonPath $PythonPath -SkipAudit -NoRestart
     if ($LASTEXITCODE -ne 0) { throw 'Проверка реального отката не прошла.' }
     $rolledHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $server).Hash
     $rolledMetadata = Get-Content -Raw -Encoding UTF8 -LiteralPath $metadataPath | ConvertFrom-Json

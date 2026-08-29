@@ -1,17 +1,28 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import re
 import subprocess
 import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from butler.diagnostics import event as diagnostic_event
 from butler.diagnostics import exception as diagnostic_exception
 from butler.speech_text import normalize_for_speech
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _speech_metadata(original: str, spoken: str) -> dict[str, object]:
@@ -21,6 +32,39 @@ def _speech_metadata(original: str, spoken: str) -> dict[str, object]:
         "digit_count": len(re.findall(r"\d", original)),
         "normalization_changed": original != spoken,
     }
+
+
+@dataclass(frozen=True)
+class SpeechCompletion:
+    """Final playback result delivered exactly once for tracked speech."""
+
+    request_id: str
+    original_text: str
+    spoken_text: str
+    ok: bool
+    cancelled: bool
+    engine: str
+
+
+SpeechCompletionCallback = Callable[[SpeechCompletion], None]
+
+
+@dataclass
+class _PendingSpeech:
+    waiter: threading.Event | None
+    original_text: str
+    spoken_text: str
+    result: dict[str, bool]
+    on_complete: SpeechCompletionCallback | None = None
+
+
+@dataclass
+class _SapiSpeech:
+    request_id: str
+    original_text: str
+    spoken_text: str
+    on_complete: SpeechCompletionCallback | None = None
+    cancelled: bool = False
 
 
 class SpeechAnnouncer:
@@ -43,7 +87,33 @@ class SpeechAnnouncer:
         self.python = Path(str(voice_config.get("python", "")))
         self.worker_script = root / "scripts" / "voice_worker.py"
         self.model = str(voice_config.get("model", "v5_ru"))
-        self.speaker = str(voice_config.get("speaker", "aidar"))
+        raw_tts_model_path = str(voice_config.get("tts_model_path", "")).strip()
+        if raw_tts_model_path:
+            configured_tts_model = Path(raw_tts_model_path)
+            self.tts_model_path = (
+                configured_tts_model
+                if configured_tts_model.is_absolute()
+                else root / configured_tts_model
+            )
+        elif str(voice_config.get("python", "")).strip():
+            self.tts_model_path = (
+                self.python.parent.parent
+                / "Lib"
+                / "site-packages"
+                / "silero"
+                / "model"
+                / f"{self.model}.pt"
+            )
+        else:
+            self.tts_model_path = root / ".missing-silero-model"
+        self.tts_model_expected_size = int(
+            voice_config.get("tts_model_expected_size_bytes", 0) or 0
+        )
+        self.tts_model_sha256 = str(
+            voice_config.get("tts_model_sha256", "")
+        ).strip().casefold()
+        self._tts_model_signature: tuple[int, int] | None = None
+        self.speaker = str(voice_config.get("speaker", "xenia"))
         self.sample_rate = int(voice_config.get("sample_rate", 48000))
         self.threads = int(voice_config.get("threads", 4))
         self.device = str(voice_config.get("tts_device", "cpu")).casefold()
@@ -54,26 +124,46 @@ class SpeechAnnouncer:
         self.cold_leading_silence_ms = int(
             voice_config.get("cold_leading_silence_ms", 1000)
         )
+        self.startup_timeout_seconds = max(
+            5.0, float(voice_config.get("tts_startup_timeout_seconds", 120))
+        )
         self._worker: subprocess.Popen[str] | None = None
         self._reader: threading.Thread | None = None
         self._stderr_reader: threading.Thread | None = None
         self._request_counter = 0
-        self._pending: dict[
-            str, tuple[threading.Event | None, str, dict[str, bool]]
-        ] = {}
-        self._sapi_processes: set[subprocess.Popen] = set()
+        self._pending: dict[str, _PendingSpeech] = {}
+        self._sapi_processes: dict[subprocess.Popen, _SapiSpeech] = {}
         self._lock = threading.Lock()
+        self._worker_ready = threading.Event()
+        self._worker_start_error = ""
         atexit.register(self.close)
 
     def _silero_available(self) -> bool:
-        return (
+        if not (
             self.enabled
             and self.engine == "silero"
             and self.python.is_file()
             and self.worker_script.is_file()
-        )
+            and self.tts_model_path.is_file()
+            and self.tts_model_expected_size > 0
+            and len(self.tts_model_sha256) == 64
+        ):
+            return False
+        stat = self.tts_model_path.stat()
+        signature = (stat.st_size, stat.st_mtime_ns)
+        if stat.st_size != self.tts_model_expected_size:
+            return False
+        if self._tts_model_signature == signature:
+            return True
+        actual = _sha256_file(self.tts_model_path)
+        if actual != self.tts_model_sha256:
+            return False
+        self._tts_model_signature = signature
+        return True
 
     def _start_worker(self) -> bool:
+        if self._worker is not None and self._worker.poll() is None:
+            return True
         if not self._silero_available():
             diagnostic_event(
                 self.diagnostics_source,
@@ -82,10 +172,14 @@ class SpeechAnnouncer:
                 engine=self.engine,
                 python_exists=self.python.is_file(),
                 worker_exists=self.worker_script.is_file(),
+                model_exists=self.tts_model_path.is_file(),
+                model_size=self.tts_model_path.stat().st_size
+                if self.tts_model_path.is_file()
+                else 0,
             )
             return False
-        if self._worker is not None and self._worker.poll() is None:
-            return True
+        self._worker_ready.clear()
+        self._worker_start_error = ""
         try:
             worker_env = os.environ.copy()
             worker_env["PYTHONIOENCODING"] = "utf-8"
@@ -97,6 +191,12 @@ class SpeechAnnouncer:
                     str(self.worker_script),
                     "--model",
                     self.model,
+                    "--model-path",
+                    str(self.tts_model_path),
+                    "--model-size",
+                    str(self.tts_model_expected_size),
+                    "--model-sha256",
+                    self.tts_model_sha256,
                     "--speaker",
                     self.speaker,
                     "--sample-rate",
@@ -146,6 +246,29 @@ class SpeechAnnouncer:
                 speaker=self.speaker,
                 requested_device=self.device,
             )
+            if not self._worker_ready.wait(timeout=self.startup_timeout_seconds):
+                diagnostic_event(
+                    self.diagnostics_source,
+                    "tts",
+                    "worker_ready_timeout",
+                    level="error",
+                    worker_pid=self._worker.pid,
+                    timeout_seconds=self.startup_timeout_seconds,
+                )
+                if self._worker.poll() is None:
+                    self._worker.terminate()
+                self._worker = None
+                return False
+            if self._worker_start_error or self._worker.poll() is not None:
+                diagnostic_event(
+                    self.diagnostics_source,
+                    "tts",
+                    "worker_not_ready",
+                    level="error",
+                    error=self._worker_start_error or "worker exited",
+                )
+                self._worker = None
+                return False
             return True
         except OSError as exc:
             diagnostic_exception(
@@ -189,6 +312,13 @@ class SpeechAnnouncer:
                 )
                 continue
             event_name = str(worker_event.get("event", "unknown"))
+            if event_name == "ready":
+                self._worker_ready.set()
+            elif event_name == "worker_error":
+                self._worker_start_error = str(
+                    worker_event.get("error", "Silero worker failed during startup.")
+                )
+                self._worker_ready.set()
             event_level = (
                 "warning"
                 if bool(worker_event.get("audio_suspiciously_short", False))
@@ -212,23 +342,32 @@ class SpeechAnnouncer:
                 pending = self._pending.pop(request_id, None)
             if pending is None:
                 continue
-            waiter, text, result = pending
-            result["ok"] = bool(worker_event.get("ok", False))
-            result["cancelled"] = bool(worker_event.get("cancelled", False))
-            if waiter is not None:
-                waiter.set()
-            elif not result["ok"] and not result["cancelled"]:
-                self._speak_with_sapi(text, wait=False)
+            completion = SpeechCompletion(
+                request_id=request_id,
+                original_text=pending.original_text,
+                spoken_text=pending.spoken_text,
+                ok=bool(worker_event.get("ok", False)),
+                cancelled=bool(worker_event.get("cancelled", False)),
+                engine="silero",
+            )
+            self._complete_pending(pending, completion)
 
+        self._worker_ready.set()
         with self._lock:
             abandoned = list(self._pending.values())
             self._pending.clear()
-        for waiter, text, result in abandoned:
-            result["ok"] = False
-            if waiter is not None:
-                waiter.set()
-            else:
-                self._speak_with_sapi(text, wait=False)
+        for pending in abandoned:
+            self._complete_pending(
+                pending,
+                SpeechCompletion(
+                    request_id="",
+                    original_text=pending.original_text,
+                    spoken_text=pending.spoken_text,
+                    ok=False,
+                    cancelled=False,
+                    engine="silero",
+                ),
+            )
         diagnostic_event(
             self.diagnostics_source,
             "tts",
@@ -238,12 +377,34 @@ class SpeechAnnouncer:
             abandoned_count=len(abandoned),
         )
 
+    def _complete_pending(
+        self, pending: _PendingSpeech, completion: SpeechCompletion
+    ) -> None:
+        pending.result["ok"] = completion.ok
+        pending.result["cancelled"] = completion.cancelled
+        if pending.waiter is not None:
+            pending.waiter.set()
+        if pending.on_complete is None:
+            return
+        try:
+            pending.on_complete(completion)
+        except Exception as exc:
+            diagnostic_event(
+                self.diagnostics_source,
+                "tts",
+                "completion_callback_failed",
+                level="error",
+                error_type=type(exc).__name__,
+            )
+
     def _send_silero(
         self,
         text: str,
         speaker: str | None = None,
         *,
         wait: bool = False,
+        original_text: str | None = None,
+        on_complete: SpeechCompletionCallback | None = None,
     ) -> bool:
         waiter = threading.Event() if wait else None
         result: dict[str, bool] = {}
@@ -255,7 +416,13 @@ class SpeechAnnouncer:
                 return False
             self._request_counter += 1
             request_id = str(self._request_counter)
-            self._pending[request_id] = (waiter, text, result)
+            self._pending[request_id] = _PendingSpeech(
+                waiter=waiter,
+                original_text=original_text if original_text is not None else text,
+                spoken_text=text,
+                result=result,
+                on_complete=on_complete,
+            )
             try:
                 self._worker.stdin.write(
                     json.dumps(
@@ -288,7 +455,6 @@ class SpeechAnnouncer:
                     "request_write_failed",
                     level="error",
                     request_id=request_id,
-                    text=text,
                 )
                 return False
         if waiter is None:
@@ -303,12 +469,18 @@ class SpeechAnnouncer:
                 level="error",
                 request_id=request_id,
                 duration_ms=round((time.monotonic() - started) * 1000),
-                text=text,
             )
             return False
         return bool(result.get("ok", False))
 
-    def _speak_with_sapi(self, text: str, *, wait: bool) -> None:
+    def _speak_with_sapi(
+        self,
+        text: str,
+        *,
+        wait: bool,
+        original_text: str | None = None,
+        on_complete: SpeechCompletionCallback | None = None,
+    ) -> bool:
         try:
             process = subprocess.Popen(
                 [
@@ -331,21 +503,27 @@ class SpeechAnnouncer:
             if process.stdin is not None:
                 process.stdin.write(text)
                 process.stdin.close()
+            sapi_speech = _SapiSpeech(
+                request_id=f"sapi-{process.pid}",
+                original_text=original_text if original_text is not None else text,
+                spoken_text=text,
+                on_complete=on_complete,
+            )
             with self._lock:
-                self._sapi_processes.add(process)
+                self._sapi_processes[process] = sapi_speech
             diagnostic_event(
                 self.diagnostics_source,
                 "tts",
                 "sapi_started",
                 worker_pid=process.pid,
                 wait=wait,
-                text=text,
+                spoken_chars=len(text),
             )
             if wait:
                 returncode = process.wait(timeout=max(30.0, len(text) / 4.0))
                 detail = process.stderr.read().strip() if process.stderr is not None else ""
                 with self._lock:
-                    self._sapi_processes.discard(process)
+                    completed = self._sapi_processes.pop(process, sapi_speech)
                 diagnostic_event(
                     self.diagnostics_source,
                     "tts",
@@ -355,18 +533,59 @@ class SpeechAnnouncer:
                     returncode=returncode,
                     detail=detail,
                 )
+                self._complete_sapi(completed, returncode == 0)
+                return returncode == 0
             else:
                 threading.Thread(
                     target=self._forget_sapi,
                     args=(process,),
                     daemon=True,
                 ).start()
-        except (OSError, subprocess.TimeoutExpired) as exc:
+            return True
+        except subprocess.TimeoutExpired as exc:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+            with self._lock:
+                timed_out = self._sapi_processes.pop(process, None)
+            if timed_out is not None:
+                self._complete_sapi(timed_out, False)
             diagnostic_exception(
                 self.diagnostics_source, "tts", "sapi_failed", exc
             )
+            return False
+        except OSError as exc:
+            diagnostic_exception(
+                self.diagnostics_source, "tts", "sapi_failed", exc
+            )
+            return False
+
+    def _complete_sapi(self, speech: _SapiSpeech, ok: bool) -> None:
+        if speech.on_complete is None:
+            return
+        pending = _PendingSpeech(
+            waiter=None,
+            original_text=speech.original_text,
+            spoken_text=speech.spoken_text,
+            result={},
+            on_complete=speech.on_complete,
+        )
+        self._complete_pending(
+            pending,
+            SpeechCompletion(
+                request_id=speech.request_id,
+                original_text=speech.original_text,
+                spoken_text=speech.spoken_text,
+                ok=ok and not speech.cancelled,
+                cancelled=speech.cancelled,
+                engine="sapi",
+            ),
+        )
 
     def _forget_sapi(self, process: subprocess.Popen) -> None:
+        completed: _SapiSpeech | None = None
+        returncode = -1
         try:
             returncode = process.wait()
             detail = process.stderr.read().strip() if process.stderr is not None else ""
@@ -381,13 +600,17 @@ class SpeechAnnouncer:
             )
         finally:
             with self._lock:
-                self._sapi_processes.discard(process)
+                completed = self._sapi_processes.pop(process, None)
+            if completed is not None:
+                self._complete_sapi(completed, returncode == 0)
 
     def stop(self) -> None:
         """Stop current and queued speech without shutting the voice engine down."""
         with self._lock:
             worker = self._worker
             sapi_processes = list(self._sapi_processes)
+            for pending in self._sapi_processes.values():
+                pending.cancelled = True
             if worker is not None and worker.stdin is not None:
                 try:
                     worker.stdin.write('{"cmd":"stop"}\n')
@@ -422,9 +645,49 @@ class SpeechAnnouncer:
         if self._send_silero(spoken_text):
             return
         diagnostic_event(
-            self.diagnostics_source, "tts", "fallback_to_sapi", text=spoken_text
+            self.diagnostics_source,
+            "tts",
+            "fallback_to_sapi",
+            spoken_chars=len(spoken_text),
         )
         self._speak_with_sapi(spoken_text, wait=False)
+
+    def say_tracked(
+        self, text: str, on_complete: SpeechCompletionCallback
+    ) -> bool:
+        """Queue speech and report whether the whole phrase reached playback end."""
+        if not self.enabled or not text.strip() or not self.script.exists():
+            return False
+        spoken_text = normalize_for_speech(text)
+        diagnostic_event(
+            self.diagnostics_source,
+            "tts",
+            "request_prepared",
+            engine=self.engine,
+            speaker=self.speaker,
+            wait=False,
+            tracked=True,
+            **_speech_metadata(text, spoken_text),
+        )
+        if self._send_silero(
+            spoken_text,
+            original_text=text,
+            on_complete=on_complete,
+        ):
+            return True
+        diagnostic_event(
+            self.diagnostics_source,
+            "tts",
+            "tracked_request_rejected",
+            level="error",
+            spoken_chars=len(spoken_text),
+            tracked=True,
+        )
+        return False
+
+    def live_available(self) -> bool:
+        """Return whether the ordered persistent Silero queue can support Live."""
+        return self._silero_available()
 
     def say_and_wait(self, text: str) -> None:
         if not self.enabled or not text.strip() or not self.script.exists():
@@ -442,7 +705,10 @@ class SpeechAnnouncer:
         if self._send_silero(spoken_text, wait=True):
             return
         diagnostic_event(
-            self.diagnostics_source, "tts", "fallback_to_sapi", text=spoken_text
+            self.diagnostics_source,
+            "tts",
+            "fallback_to_sapi",
+            spoken_chars=len(spoken_text),
         )
         self._speak_with_sapi(spoken_text, wait=True)
 

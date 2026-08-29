@@ -49,6 +49,7 @@
     "docs/ARCHITECTURE.md",
     "docs/AUDIT.md",
     "docs/HANDOFF.md",
+    "docs/TRANSFER-2026-08-28.md",
     "docs/INSTALLATION.md",
     "docs/MAINTENANCE.md",
     "docs/CONFIGURATION.md",
@@ -67,6 +68,9 @@
     "scripts/install-runtime.ps1",
     "scripts/install-llama.ps1",
     "scripts/maintenance.py",
+    "scripts/model-assets.py",
+    "scripts/download-model-assets.ps1",
+    "scripts/runtime-paths.ps1",
     "scripts/update.ps1",
     "scripts/rollback-update.ps1",
     "scripts/test-clean-package-install.ps1",
@@ -75,8 +79,16 @@
     "scripts/verify-release.ps1",
     "scripts/validate_release.py",
     "src/butler/__init__.py",
+    "src/butler/atomic_io.py",
+    "src/butler/live.py",
+    "src/butler/model_assets.py",
+    "src/butler/schema_validation.py",
+    "src/butler/turn_detection.py",
     "tests/test_doctor.py",
-    "tests/test_distribution.py"
+    "tests/test_distribution.py",
+    "tests/test_live.py",
+    "tests/test_model_assets.py",
+    "tests/test_turn_detection.py"
   ],
   "package": {
     "included_roots": [
@@ -145,6 +157,12 @@
       ".gguf",
       ".safetensors",
       ".bin",
+      ".pt",
+      ".pth",
+      ".onnx",
+      ".ckpt",
+      ".tflite",
+      ".nemo",
       ".key",
       ".pem",
       ".pfx",
@@ -158,7 +176,7 @@
     "workspace"
   ],
   "quality_gate": {
-    "minimum_tests": 217,
+    "minimum_tests": 326,
     "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1"
   },
   "models": {

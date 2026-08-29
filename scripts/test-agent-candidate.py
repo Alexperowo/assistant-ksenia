@@ -28,17 +28,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Изолированный сквозной тест модели-исполнителя"
     )
-    parser.add_argument("--role", default="developer_qwopus")
+    parser.add_argument("--profile", default="candidate")
     args = parser.parse_args()
 
     base = load_settings(ROOT)
     raw = deepcopy(base.raw)
-    raw["capability_roles"]["developer"]["primary_model"] = args.role
+    try:
+        raw["models"][args.profile]["enabled"] = True
+    except (KeyError, TypeError):
+        parser.error(f"неизвестный профиль: {args.profile}")
+    raw["capability_roles"]["developer"]["primary_model"] = args.profile
     test_root = base.runtime_dir / "agent-candidate-tests"
     test_root.mkdir(parents=True, exist_ok=True)
     report: dict[str, object] = {
         "started_at": datetime.now().astimezone().isoformat(),
-        "role": args.role,
+        "profile": args.profile,
         "request": REQUEST,
     }
     with tempfile.TemporaryDirectory(
@@ -89,7 +93,7 @@ def main() -> int:
             report["port_released"] = manager._wait_port_closed()
 
     report["finished_at"] = datetime.now().astimezone().isoformat()
-    output = base.runtime_dir / "benchmarks" / f"agent-{args.role}-latest.json"
+    output = base.runtime_dir / "benchmarks" / f"agent-{args.profile}-latest.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"

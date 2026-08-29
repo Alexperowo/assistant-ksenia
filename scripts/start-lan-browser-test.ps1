@@ -4,7 +4,10 @@ $pidPath = Join-Path $projectRoot 'runtime\lan-browser-test.pid'
 $env:PYTHONPATH = Join-Path $projectRoot 'src'
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
-$process = Start-Process -FilePath 'C:\butler-venv\Scripts\python.exe' -ArgumentList @(
+. (Join-Path $PSScriptRoot 'runtime-paths.ps1')
+$python = Resolve-KseniaPython -ProjectRoot $projectRoot
+if (-not $python) { throw 'Python 3.12 для LAN-теста не найден.' }
+$process = Start-Process -FilePath $python -ArgumentList @(
     '-m', 'butler', '--no-speech', 'lan', '--host', '127.0.0.1',
     '--port', '18766', '--pin', '123456'
 ) -WorkingDirectory $projectRoot -WindowStyle Hidden -PassThru

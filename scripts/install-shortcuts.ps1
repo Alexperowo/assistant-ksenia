@@ -1,4 +1,10 @@
 ﻿$ErrorActionPreference = 'Stop'
+$utf8 = [System.Text.UTF8Encoding]::new()
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $desktop = [Environment]::GetFolderPath('Desktop')
 $shell = New-Object -ComObject WScript.Shell
@@ -26,7 +32,16 @@ foreach ($item in $shortcuts) {
     $link.IconLocation = "$kseniaIcon,0"
     $link.Description = $item.Description
     $link.WindowStyle = 1
-    if ($item.Hotkey) { $link.Hotkey = $item.Hotkey }
+    $link.Hotkey = if ($item.Hotkey) { $item.Hotkey } else { '' }
     $link.Save()
+    $saved = $shell.CreateShortcut((Join-Path $desktop ($item.Name + '.lnk')))
+    if (
+        [IO.Path]::GetFullPath($saved.TargetPath) -ne
+        [IO.Path]::GetFullPath((Join-Path $projectRoot $item.Target)) -or
+        [IO.Path]::GetFullPath($saved.WorkingDirectory) -ne
+        [IO.Path]::GetFullPath($projectRoot)
+    ) {
+        throw "Ярлык не прошёл проверку после сохранения: $($item.Name)"
+    }
 }
 Write-Host "Ярлыки Ксении созданы: $desktop"

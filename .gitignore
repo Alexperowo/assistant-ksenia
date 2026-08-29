@@ -24,9 +24,13 @@ latest_silero_models.yml
 tools/downloads/
 tools/llama.cpp/
 tools/.llama-stage-*/
+toolchains/
 dist/
 *.partial
 *.zip
+
+# Local application logs
+/main.log
 
 # Model and speech weights
 models/

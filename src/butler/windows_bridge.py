@@ -87,8 +87,33 @@ class _KeyboardInput(ctypes.Structure):
     ]
 
 
+class _MouseInput(ctypes.Structure):
+    _fields_ = [
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
+
+
+class _HardwareInput(ctypes.Structure):
+    _fields_ = [
+        ("uMsg", wintypes.DWORD),
+        ("wParamL", wintypes.WORD),
+        ("wParamH", wintypes.WORD),
+    ]
+
+
 class _InputUnion(ctypes.Union):
-    _fields_ = [("ki", _KeyboardInput)]
+    # INPUT is a tagged union.  Keeping only KEYBDINPUT makes cbSize too small
+    # on x64 even when every emitted event is a keyboard event.
+    _fields_ = [
+        ("mi", _MouseInput),
+        ("ki", _KeyboardInput),
+        ("hi", _HardwareInput),
+    ]
 
 
 class _Input(ctypes.Structure):
@@ -100,7 +125,10 @@ def _send_keyboard(inputs: list[_Input]) -> None:
     if not inputs:
         return
     array_type = _Input * len(inputs)
-    sent = ctypes.windll.user32.SendInput(len(inputs), array_type(*inputs), ctypes.sizeof(_Input))
+    user32 = ctypes.windll.user32
+    user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_Input), ctypes.c_int]
+    user32.SendInput.restype = wintypes.UINT
+    sent = user32.SendInput(len(inputs), array_type(*inputs), ctypes.sizeof(_Input))
     if sent != len(inputs):
         raise WindowsBridgeError("Windows приняла не все нажатия клавиатуры.")
 

@@ -1,6 +1,7 @@
 ﻿param(
     [string]$DestinationRoot = '',
-    [string]$PythonPath = ''
+    [string]$PythonPath = '',
+    [switch]$AllowDirtySource
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,6 +13,25 @@ $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
 
 $projectRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+. (Join-Path $PSScriptRoot 'runtime-paths.ps1')
+if ((Test-Path -LiteralPath (Join-Path $projectRoot '.git')) -and -not $AllowDirtySource) {
+    $git = Get-Command git.exe -ErrorAction SilentlyContinue
+    if (-not $git) { $git = Get-Command git -ErrorAction SilentlyContinue }
+    if (-not $git) {
+        throw 'Git-репозиторий найден, но git недоступен для проверки чистоты исходников.'
+    }
+    $sourceStatus = @(& $git.Source -C $projectRoot status --porcelain=v1 --untracked-files=all)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Не удалось проверить состояние Git перед сборкой выпуска.'
+    }
+    if ($sourceStatus.Count -gt 0) {
+        throw (
+            'Сборка выпуска из изменённого дерева остановлена. Сначала проверьте и ' +
+            'зафиксируйте изменения; -AllowDirtySource предназначен только для явной ' +
+            'локальной диагностики.'
+        )
+    }
+}
 $manifestPath = Join-Path $projectRoot 'config\release-manifest.json'
 $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
 $version = [string]$manifest.project.version
@@ -38,30 +58,10 @@ function Get-RelativePathCompat {
     [Uri]::UnescapeDataString($baseUri.MakeRelativeUri($targetUri).ToString()).Replace('/', '\')
 }
 
-function Find-Python {
-    param([string]$Preferred)
-    $candidates = [Collections.Generic.List[string]]::new()
-    if ($Preferred) { $candidates.Add($Preferred) }
-    $userConfigPath = Join-Path $projectRoot 'config\user.json'
-    if (Test-Path -LiteralPath $userConfigPath) {
-        try {
-            $user = Get-Content -Raw -Encoding UTF8 -LiteralPath $userConfigPath | ConvertFrom-Json
-            if ($user.voice.python) { $candidates.Add([string]$user.voice.python) }
-        }
-        catch {}
-    }
-    $candidates.Add('D:\AI\Butler\venv\Scripts\python.exe')
-    $candidates.Add('C:\butler-venv\Scripts\python.exe')
-    $candidates.Add((Join-Path $env:LocalAppData 'Ksenia\Butler\venv\Scripts\python.exe'))
-    foreach ($candidate in $candidates) {
-        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
-        & $candidate --version *> $null
-        if ($LASTEXITCODE -eq 0) { return [IO.Path]::GetFullPath($candidate) }
-    }
+$PythonPath = Resolve-KseniaPython -ProjectRoot $projectRoot -ExplicitPath $PythonPath
+if (-not $PythonPath) {
     throw 'Python 3.12 для проверки архива не найден. Сначала установите среду Ксении.'
 }
-
-$PythonPath = Find-Python $PythonPath
 $stageRoot = Join-Path $DestinationRoot ('.ksenia-stage-' + [Guid]::NewGuid().ToString('N'))
 $packageRoot = Join-Path $stageRoot $packageName
 $verifyRoot = Join-Path $DestinationRoot ('.ksenia-verify-' + [Guid]::NewGuid().ToString('N'))

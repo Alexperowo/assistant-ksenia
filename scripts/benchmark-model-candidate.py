@@ -15,7 +15,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from butler.config import Settings, load_settings  # noqa: E402
-from butler.model_evaluation import base_cases, build_long_context_case, run_case  # noqa: E402
+from butler.model_assets import model_asset_from_config, verify_model_path  # noqa: E402
+from butler.model_evaluation import (  # noqa: E402
+    base_cases,
+    build_long_context_case,
+    run_case,
+    with_mtp_mode,
+)
 from butler.model_manager import ModelManager, RuntimeState  # noqa: E402
 
 
@@ -42,20 +48,24 @@ def gpu_snapshot() -> dict[str, object]:
     }
 
 
-def without_mtp(settings: Settings, role: str) -> Settings:
+def with_profile_enabled(settings: Settings, role: str) -> Settings:
     raw = deepcopy(settings.raw)
-    args = list(raw["models"][role].get("extra_args", []))
-    for flag in ("--spec-type", "--spec-draft-n-max"):
-        while flag in args:
-            position = args.index(flag)
-            del args[position : position + 2]
-    raw["models"][role]["extra_args"] = args
+    try:
+        raw["models"][role]["enabled"] = True
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError(f"Неизвестный профиль модели: {role}") from exc
     return replace(settings, raw=raw)
 
 
 def verify_model_file(settings: Settings, role: str, *, verify_hash: bool) -> dict[str, object]:
     profile = settings.model(role)
     metadata = settings.raw["models"][role]
+    if isinstance(metadata.get("artifacts"), dict):
+        asset = model_asset_from_config(settings.raw["models"], role)
+        # A pinned candidate is always hashed in full. The optional flag remains
+        # useful only for legacy local profiles without supply-chain metadata.
+        return verify_model_path(asset, profile.model_path, verify_hash=True)
+
     expected_size = int(metadata.get("expected_size_bytes", 0) or 0)
     expected_hash = str(metadata.get("sha256", "")).casefold()
     if not profile.model_path.is_file():
@@ -100,7 +110,7 @@ def restore_model(settings: Settings, original: RuntimeState | None, tested_role
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Безопасная локальная проверка модели-кандидата")
-    parser.add_argument("--role", default="developer_qwopus")
+    parser.add_argument("--profile", "--role", dest="profile", default="candidate")
     parser.add_argument("--mtp", choices=("on", "off"), default="on")
     parser.add_argument("--long-context", action="store_true")
     parser.add_argument(
@@ -113,22 +123,25 @@ def main() -> int:
     parser.add_argument(
         "--plan-tokens",
         type=int,
-        default=480,
-        help="Лимит ответа для длинного структурированного плана, от 480 до 4096.",
+        default=768,
+        help="Лимит ответа для длинного структурированного плана, по умолчанию 768; допустимо 480–4096.",
     )
     args = parser.parse_args()
     if not 480 <= args.plan_tokens <= 4096:
         parser.error("--plan-tokens должен быть от 480 до 4096.")
 
     base_settings = load_settings(ROOT)
-    test_settings = (
-        base_settings if args.mtp == "on" else without_mtp(base_settings, args.role)
+    candidate_settings = with_profile_enabled(base_settings, args.profile)
+    test_settings = with_mtp_mode(
+        candidate_settings,
+        args.profile,
+        enabled=args.mtp == "on",
     )
     base_manager = ModelManager(base_settings)
     original = base_manager.running_state()
     report: dict[str, object] = {
         "started_at": datetime.now().astimezone().isoformat(),
-        "role": args.role,
+        "profile": args.profile,
         "mtp": args.mtp,
         "original_state": asdict(original) if original else None,
         "gpu_before": gpu_snapshot(),
@@ -137,18 +150,18 @@ def main() -> int:
     output_dir = base_settings.runtime_dir / "benchmarks"
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    output = output_dir / f"{args.role}-{args.mtp}-{stamp}.json"
+    output = output_dir / f"{args.profile}-{args.mtp}-{stamp}.json"
 
     try:
         report["model_file"] = verify_model_file(
-            test_settings, args.role, verify_hash=args.verify_hash
+            test_settings, args.profile, verify_hash=args.verify_hash
         )
-        print(f"Запускаю профиль {args.role}, MTP: {args.mtp}.", flush=True)
-        state = ModelManager(test_settings).start(args.role)
+        print(f"Запускаю профиль {args.profile}, MTP: {args.mtp}.", flush=True)
+        state = ModelManager(test_settings).start(args.profile)
         report["test_state"] = asdict(state)
         report["gpu_loaded"] = gpu_snapshot()
         cases = base_cases()
-        if args.plan_tokens != 480:
+        if args.plan_tokens != 768:
             cases = [
                 replace(case, max_tokens=args.plan_tokens)
                 if case.name == "structured_russian_plan"
@@ -188,7 +201,7 @@ def main() -> int:
         report["fatal_error"] = f"{type(exc).__name__}: {exc}"
     finally:
         try:
-            restore_model(base_settings, original, args.role)
+            restore_model(base_settings, original, args.profile)
             report["restored_state"] = (
                 asdict(ModelManager(base_settings).running_state())
                 if ModelManager(base_settings).running_state()

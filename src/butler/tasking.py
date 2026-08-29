@@ -11,6 +11,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from butler.atomic_io import atomic_write_text, exclusive_file_lock
 from butler.processes import process_image_path
 from butler.diagnostics import event as diagnostic_event
 
@@ -66,10 +67,13 @@ class TaskRecord:
     state: str = TaskState.QUEUED
     status: str = "В очереди"
     answer: str = ""
+    generated_answer: str = ""
+    spoken_answer: str = ""
     error: str = ""
     confirmation: dict[str, Any] | None = None
     resumable: bool = True
     owner_pid: int = 0
+    revision: int = 0
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
     events: list[TaskEvent] = field(default_factory=list)
@@ -123,12 +127,10 @@ class DurableTaskStore:
 
     def _write(self, record: TaskRecord) -> None:
         target = self._path(record.id)
-        temporary = target.with_suffix(".json.tmp")
-        temporary.write_text(
+        atomic_write_text(
+            target,
             json.dumps(record.snapshot(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
-        temporary.replace(target)
 
     def _read(self, task_id: str) -> TaskRecord:
         target = self._path(task_id)
@@ -188,17 +190,40 @@ class DurableTaskStore:
         status: str,
         *,
         answer: str = "",
+        generated_answer: str | None = None,
+        spoken_answer: str | None = None,
         error: str = "",
         confirmation: dict[str, Any] | None | object = ...,
         resumable: bool | None = None,
+        expected_revision: int | None = None,
+        expected_states: set[TaskState] | None = None,
     ) -> dict[str, Any]:
-        with self._lock:
+        with self._lock, exclusive_file_lock(self._path(task_id)):
             record = self._read(task_id)
+            current_state = TaskState(record.state)
+            if expected_revision is not None and record.revision != expected_revision:
+                raise ValueError(
+                    f"Состояние задачи изменилось: ожидалась ревизия {expected_revision}, "
+                    f"получена {record.revision}."
+                )
+            if expected_states is not None and current_state not in expected_states:
+                allowed = ", ".join(sorted(str(item) for item in expected_states))
+                raise ValueError(
+                    f"Переход из состояния {current_state} запрещён; ожидалось: {allowed}."
+                )
+            if current_state in TERMINAL_STATES and state != current_state:
+                raise ValueError(
+                    f"Завершённая задача {current_state} не может перейти в {state}."
+                )
             record.state = state
             record.status = status.strip() or record.status
             record.updated_at = _now()
             if answer:
                 record.answer = answer
+            if generated_answer is not None:
+                record.generated_answer = generated_answer
+            if spoken_answer is not None:
+                record.spoken_answer = spoken_answer
             if error:
                 record.error = error
             if confirmation is not ...:
@@ -206,6 +231,7 @@ class DurableTaskStore:
             if resumable is not None:
                 record.resumable = resumable
             record.owner_pid = 0 if state in TERMINAL_STATES else os.getpid()
+            record.revision += 1
             if (
                 not record.events
                 or record.events[-1].state != state
@@ -222,6 +248,12 @@ class DurableTaskStore:
             state=str(state),
             status=record.status,
             has_answer=bool(answer),
+            generated_answer_chars=(
+                len(generated_answer) if generated_answer is not None else None
+            ),
+            spoken_answer_chars=(
+                len(spoken_answer) if spoken_answer is not None else None
+            ),
             has_error=bool(error),
             waiting_confirmation=record.confirmation is not None,
             resumable=record.resumable,
@@ -271,21 +303,23 @@ class DurableTaskStore:
         with self._lock:
             for path in self.root.glob("*.json"):
                 try:
-                    record = self._read(path.stem)
-                    if TaskState(record.state) not in active:
-                        continue
-                    if _process_alive(record.owner_pid):
-                        continue
-                    record.state = TaskState.INTERRUPTED
-                    record.status = "Прервано при завершении программы"
-                    record.confirmation = None
-                    record.owner_pid = 0
-                    record.updated_at = _now()
-                    record.events.append(
-                        TaskEvent(record.state, record.status, record.updated_at)
-                    )
-                    self._write(record)
-                    recovered += 1
+                    with exclusive_file_lock(path):
+                        record = self._read(path.stem)
+                        if TaskState(record.state) not in active:
+                            continue
+                        if _process_alive(record.owner_pid):
+                            continue
+                        record.state = TaskState.INTERRUPTED
+                        record.status = "Прервано при завершении программы"
+                        record.confirmation = None
+                        record.owner_pid = 0
+                        record.revision += 1
+                        record.updated_at = _now()
+                        record.events.append(
+                            TaskEvent(record.state, record.status, record.updated_at)
+                        )
+                        self._write(record)
+                        recovered += 1
                 except (KeyError, OSError, ValueError, json.JSONDecodeError):
                     continue
         if recovered:

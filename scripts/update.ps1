@@ -15,29 +15,7 @@ $env:PYTHONIOENCODING = 'utf-8'
 
 $projectRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $updatesRoot = Join-Path $projectRoot 'runtime\updates'
-
-function Find-Python {
-    param([string]$Preferred)
-    $candidates = [Collections.Generic.List[string]]::new()
-    if ($Preferred) { $candidates.Add($Preferred) }
-    $userConfigPath = Join-Path $projectRoot 'config\user.json'
-    if (Test-Path -LiteralPath $userConfigPath) {
-        try {
-            $user = Get-Content -Raw -Encoding UTF8 -LiteralPath $userConfigPath | ConvertFrom-Json
-            if ($user.voice.python) { $candidates.Add([string]$user.voice.python) }
-        }
-        catch {}
-    }
-    $candidates.Add('D:\AI\Butler\venv\Scripts\python.exe')
-    $candidates.Add('C:\butler-venv\Scripts\python.exe')
-    $candidates.Add((Join-Path $env:LocalAppData 'Ksenia\Butler\venv\Scripts\python.exe'))
-    foreach ($candidate in $candidates) {
-        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
-        & $candidate --version *> $null
-        if ($LASTEXITCODE -eq 0) { return [IO.Path]::GetFullPath($candidate) }
-    }
-    throw 'Рабочая среда Python Ксении не найдена. Используйте INSTALL.cmd.'
-}
+. (Join-Path $PSScriptRoot 'runtime-paths.ps1')
 
 function Get-Status {
     $raw = & $PythonPath (Join-Path $PSScriptRoot 'maintenance.py') status --root $projectRoot
@@ -64,12 +42,22 @@ function Show-Status {
 
 function Write-Metadata {
     param([System.Collections.IDictionary]$Value, [string]$Path)
-    $temporary = "$Path.tmp"
-    [IO.File]::WriteAllText($temporary, (($Value | ConvertTo-Json -Depth 12) + "`n"), $utf8)
-    Move-Item -Force -LiteralPath $temporary -Destination $Path
+    $parent = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    $temporary = Join-Path $parent ('.' + (Split-Path -Leaf $Path) + '.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        [IO.File]::WriteAllText($temporary, (($Value | ConvertTo-Json -Depth 12) + "`n"), $utf8)
+        Move-Item -Force -LiteralPath $temporary -Destination $Path
+    }
+    finally {
+        Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $temporary
+    }
 }
 
-$PythonPath = Find-Python $PythonPath
+$PythonPath = Resolve-KseniaPython -ProjectRoot $projectRoot -ExplicitPath $PythonPath
+if (-not $PythonPath) {
+    throw 'Рабочая среда Python Ксении не найдена. Используйте INSTALL.cmd.'
+}
 $status = Get-Status
 Show-Status $status
 if ($CheckOnly) {
@@ -96,8 +84,13 @@ New-Item -ItemType Directory -Force -Path $updateDir | Out-Null
 $metadataPath = Join-Path $updateDir 'metadata.json'
 $activeRole = if ($status.model) { [string]$status.model.role } else { $null }
 $pipBefore = @($status.packages | Where-Object { $_.name -eq 'pip' } | Select-Object -First 1)
+$enginePathBefore = [IO.Path]::GetFullPath([string]$status.engine.path)
+$engineExistedBefore = Test-Path -LiteralPath $enginePathBefore -PathType Leaf
+$engineHashBefore = if ($engineExistedBefore) {
+    (Get-FileHash -Algorithm SHA256 -LiteralPath $enginePathBefore).Hash.ToLowerInvariant()
+} else { $null }
 $metadata = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     update_id = $stamp
     project_root = $projectRoot
     started_at = [DateTimeOffset]::Now.ToString('o')
@@ -106,6 +99,10 @@ $metadata = [ordered]@{
     voice_was_running = [bool]$status.voice_state_present
     engine_changed = $false
     runtime_changed = $false
+    engine_existed_before = [bool]$engineExistedBefore
+    engine_sha256_before = $engineHashBefore
+    engine_version_before = [string]$status.engine.version_output
+    python_before = [string]$status.python.actual
     pip_before = if ($pipBefore.Count) { [string]$pipBefore[0].actual } else { $null }
     engine_backup = $null
     config_backup = $null
@@ -142,11 +139,11 @@ try {
             throw "Настроен внешний llama-server; автоматическое обновление запрещено: $($status.engine.path)"
         }
         $engineBackupRoot = Join-Path $updateDir 'engine-backup'
-        & (Join-Path $PSScriptRoot 'install-llama.ps1') -Force -BackupRoot $engineBackupRoot
-        if ($LASTEXITCODE -ne 0) { throw 'Стадийное обновление llama.cpp завершилось ошибкой.' }
         $metadata.engine_changed = $true
         $metadata.engine_backup = Join-Path $engineBackupRoot 'llama.cpp'
         Write-Metadata $metadata $metadataPath
+        & (Join-Path $PSScriptRoot 'install-llama.ps1') -Force -BackupRoot $engineBackupRoot
+        if ($LASTEXITCODE -ne 0) { throw 'Стадийное обновление llama.cpp завершилось ошибкой.' }
     }
 
     if (-not $status.python.matches -or -not $status.packages_match) {

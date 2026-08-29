@@ -24,6 +24,12 @@
     "size_bytes": 46236750,
     "sha256": "961D5FF98A17F4AA6DE69864D0AA71FA5BAC682301D2B5D17A3F24C5C99A46D4"
   },
+  "silero_tts": {
+    "filename": "v5_ru.pt",
+    "url": "https://models.silero.ai/models/tts/ru/v5_ru.pt",
+    "size_bytes": 145382211,
+    "sha256": "7BA04D42340FE0398042EED2E0D12D62E23096D626B1B9FEFF4DCB1309197AB4"
+  },
   "whisper": {
     "repo": "dropbox-dash/faster-whisper-large-v3-turbo",
     "revision": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
