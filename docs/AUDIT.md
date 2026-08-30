@@ -148,6 +148,8 @@ Permission Broker остаётся главной границей полном�
 
 Запуск Python/Node/Git/npm по умолчанию закрыт: `developer.execution.backend = disabled`. Legacy `unsafe_host` требует точного локального признания риска и не является песочницей. Production-grade Sandbox Worker с файловыми, сетевыми, процессными, CPU/RAM/time limits всё ещё главный незакрытый security-приоритет.
 
+30 августа read-only capability probe подтвердил, что на компьютере Александра выключена аппаратная виртуализация (`VirtualizationFirmwareEnabled=False`), hypervisor отсутствует, WSL и container runtime не установлены. Поэтому Windows Sandbox/Hyper-V worker заблокирован до отдельного изменения UEFI и перезагрузки. AppContainer является реальной системной границей, но ни MXC preview, ни experimental `CreateProcessInSandbox`, ни один Job Object не приняты вместо production backend. Полная матрица и fault-injection acceptance находятся в `docs/SANDBOX-AUDIT.md`.
+
 ### Реальная проверка модуля разработки
 
 Модуль проверялся на чистой staging-копии Android-проекта FUTO Keyboard, а не только моками. Динамическая процедура разработки, общий предел tool-вызовов, предпочтение поиска перед обходом каталогов и блокировка сырой tool-разметки отработали как задумано. При этом экспериментальное скрытие инструментов чтения после фиксированного числа вызовов выявило опасное поведение модели: Laguna сохранила намерение «прочитать», но выбрала оставшийся `write_workspace_file` и попыталась записать короткий маркер в четыре существующих Kotlin-файла и один новый неверный путь.

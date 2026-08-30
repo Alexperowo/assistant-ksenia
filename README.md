@@ -156,6 +156,7 @@ INSTALL.cmd -InstallRoot "<каталог среды>" -ModelStorageRoot "<ка�
 | [TESTING.md](docs/TESTING.md) | Стратегия автоматических и живых проверок |
 | [PERFORMANCE.md](docs/PERFORMANCE.md) | Сквозные trace_id, milestones, p50/p95 и измерение Live-задержек |
 | [AUDIO-FULL-DUPLEX-AUDIT.md](docs/AUDIO-FULL-DUPLEX-AUDIT.md) | Фактический аудиотракт, AEC-кандидаты и этапы безопасного full-duplex |
+| [SANDBOX-AUDIT.md](docs/SANDBOX-AUDIT.md) | Фактические Windows-границы, проверенные blockers и критерии Sandbox Worker |
 | [MAINTENANCE.md](docs/MAINTENANCE.md) | Обновление и откат |
 | [DECISIONS.md](docs/DECISIONS.md) | Причины ключевых архитектурных решений |
 

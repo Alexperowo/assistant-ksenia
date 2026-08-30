@@ -140,6 +140,14 @@ Microsoft Execution Containers 0.8.0 был закреплён по версии
 
 Отвергнуты: включение NS/AEC только перед текущим amplitude VAD; использование момента создания WAV как far timing; автоматический выбор первого input при отсутствии Windows default; немедленная замена стабильного обычного голосового режима. Риск следующего этапа — смена output backend может повредить начало речи, FIFO callbacks и barge-in. Поэтому старый путь остаётся fallback до физической приёмки, `live.enabled=false`, а каждый этап проходит synthetic, unit и реальный JBL gate. Подробности: `docs/AUDIO-FULL-DUPLEX-AUDIT.md`.
 
+## D-023: production sandbox не подменяется частичной изоляцией
+
+Проблема: fail-closed `DeveloperRunner` безопасен, но не выполняет полезные команды. Job Object, restricted token и проверки argv уменьшают отдельные риски, однако не задают одновременно workspace-only filesystem и network deny. На компьютере Александра Windows Sandbox/Hyper-V/WSL2 сейчас недоступны: read-only probe подтвердил выключенную AMD-V/SVM, отсутствующий hypervisor и неустановленный WSL/container runtime.
+
+Выбрано сохранить `developer.execution.backend=disabled` до живой приёмки настоящей системной границы. Предпочтительный кандидат после включения виртуализации — отдельный Windows Sandbox/Hyper-V worker с staging workspace, закрытыми redirections, offline/networked профилями, чистым environment и управляемым уничтожением. Нативный AppContainer + Job Object остаётся вторым кандидатом: Microsoft признаёт AppContainer kernel-enforced boundary, но launcher должен отдельно доказать ACL, inherited handles, reparse-point safety, process tree, resource limits и cleanup.
+
+Отвергнуты production-активация MXC 0.8.0, одного Job Object или нового `Experimental_CreateProcessInSandbox`: первый upstream называет preview без security guarantee, второй не изолирует файлы/сеть, третий официально experimental и не имеет публичного header. Риск решения — команды разработчика временно недоступны без осознанного legacy `unsafe_host`; это безопаснее ложной границы. Проверка после изменения UEFI — capability probe и полный отрицательный fault-injection набор из `docs/SANDBOX-AUDIT.md`. Откат нового backend-а всегда возвращает `disabled`, а не host execution.
+
 ## Как добавлять решение
 
 Новая запись должна содержать проблему, выбранный вариант, отвергнутые альтернативы, риски, способ проверки и план отката. Если решение меняет безопасность или пользовательский контракт, требуется согласование Александра.
