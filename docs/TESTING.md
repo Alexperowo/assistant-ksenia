@@ -13,7 +13,7 @@
 ### 1. Статический и быстрый слой
 
 - синтаксис PowerShell, JSON и Python;
-- не менее 358 unit/integration-тестов;
+- не менее 363 unit/integration-тестов;
 - отсутствие неожиданных warnings и skips;
 - три полных shuffled-order запуска;
 - тайм-ауты сети/subprocess и запрет shell;

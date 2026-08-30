@@ -782,3 +782,22 @@ def set_user_headset_control(
         )
 
     return _edit_user_settings(target, edit)
+
+
+def set_user_microphone(root: Path, selector: str) -> Path:
+    """Persist a stable microphone name fragment without replacing voice settings."""
+    target = root.resolve() / "config" / "user.json"
+    selector = str(selector).strip()
+
+    def edit(value: dict[str, Any]) -> None:
+        voice = value.setdefault("voice", {})
+        if not isinstance(voice, dict):
+            raise ConfigError("Раздел voice в пользовательской конфигурации повреждён.")
+        if selector:
+            voice["wake_device"] = selector
+        else:
+            voice.pop("wake_device", None)
+            if not voice:
+                value.pop("voice", None)
+
+    return _edit_user_settings(target, edit)

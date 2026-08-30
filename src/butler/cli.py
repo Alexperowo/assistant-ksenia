@@ -23,6 +23,7 @@ from butler.config import (
     response_budget_label,
     set_user_capability_model,
     set_user_headset_control,
+    set_user_microphone,
     set_user_reasoning,
     set_user_response_budget,
     write_user_settings,
@@ -399,7 +400,24 @@ def _dictation_test_active(settings, speech: SpeechAnnouncer) -> int:
     return 0
 
 
-def _audio_devices(settings, speech: SpeechAnnouncer) -> int:
+def _audio_devices(
+    settings,
+    speech: SpeechAnnouncer,
+    *,
+    select: str | None = None,
+    clear: bool = False,
+    interactive: bool = False,
+) -> int:
+    if clear:
+        set_user_microphone(settings.root, "")
+        print(
+            "Сохранённый выбор микрофона удалён. "
+            "Будет использован вход Windows по умолчанию."
+        )
+        speech.say_and_wait(
+            "Сохранённый выбор микрофона удалён. Будет использован вход по умолчанию."
+        )
+        return 0
     devices = SpeechRecognizer(settings).list_devices()
     print("\n=== Доступные микрофоны ===")
     if not devices:
@@ -412,6 +430,61 @@ def _audio_devices(settings, speech: SpeechAnnouncer) -> int:
             f"{device.get('index')}: {device.get('name')} — {device.get('host_api')}, "
             f"{device.get('sample_rate')} Гц {marker}"
         )
+    if interactive and select is None:
+        speech.say_and_wait(
+            "Введите уникальную часть названия нужного микрофона. "
+            "Чтобы ничего не менять, нажмите Enter. "
+            "Чтобы вернуться к входу по умолчанию, введите дефис."
+        )
+        selected_text = input(
+            "Уникальная часть названия; Enter — не менять; - — вход по умолчанию: "
+        ).strip()
+        if selected_text == "-":
+            set_user_microphone(settings.root, "")
+            print("Сохранённый выбор удалён. Будет использован вход Windows по умолчанию.")
+            speech.say_and_wait("Сохранённый выбор микрофона удалён.")
+            return 0
+        if selected_text:
+            select = selected_text
+    if select is not None:
+        selector = str(select).strip()
+        if not selector:
+            print("ОШИБКА: селектор микрофона не может быть пустым.")
+            speech.say_and_wait("Название микрофона не может быть пустым.")
+            return 1
+        matches = [
+            device
+            for device in devices
+            if selector.casefold() in str(device.get("name", "")).casefold()
+        ]
+        if not matches:
+            print(f"ОШИБКА: микрофон, содержащий «{selector}», не найден.")
+            speech.say_and_wait("Указанный микрофон не найден.")
+            return 1
+        distinct_names = {
+            str(device.get("name", "")).strip().casefold() for device in matches
+        }
+        if len(distinct_names) > 1:
+            print(
+                "ОШИБКА: селектор неоднозначен. Уточните название так, чтобы он "
+                "соответствовал одному микрофону:"
+            )
+            for name in sorted({str(device.get("name", "")) for device in matches}):
+                print(f"  - {name}")
+            speech.say_and_wait("Название микрофона неоднозначно. Уточните его.")
+            return 1
+        set_user_microphone(settings.root, selector)
+        api_names = sorted(
+            {str(device.get("host_api", "")) for device in matches if device.get("host_api")}
+        )
+        print(
+            f"Выбран микрофон: {next(iter({str(device.get('name', '')) for device in matches}))}."
+        )
+        if api_names:
+            print("Доступные пути захвата: " + ", ".join(api_names))
+        print("Выбор сохранён атомарно в config/user.json.")
+        speech.say_and_wait(f"Микрофон {_spoken_device_name(selector)} выбран.")
+        return 0
     selection_required = len(devices) > 1 and not any(
         bool(device.get("default")) for device in devices
     )
@@ -1448,7 +1521,7 @@ def _menu(settings, speech: SpeechAnnouncer) -> int:
             elif choice in {"11", "голосовой режим", "голосовой диалог"}:
                 _voice_agent(settings, speech)
             elif choice in {"12", "устройства", "список микрофонов"}:
-                _audio_devices(settings, speech)
+                _audio_devices(settings, speech, interactive=True)
             elif choice in {"13", "модели", "список моделей"}:
                 _show_models(settings, speech)
             elif choice in {"14", "выбрать модель", "настроить планировщик"}:
@@ -1522,7 +1595,23 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("wake-test")
     sub.add_parser("dictation-test")
     sub.add_parser("voice-agent")
-    sub.add_parser("audio-devices")
+    audio_devices = sub.add_parser("audio-devices")
+    selection = audio_devices.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--select",
+        metavar="NAME",
+        help="сохранить устойчивый фрагмент имени микрофона",
+    )
+    selection.add_argument(
+        "--clear",
+        action="store_true",
+        help="вернуться к входу Windows по умолчанию",
+    )
+    audio_devices.add_argument(
+        "--interactive",
+        action="store_true",
+        help="предложить выбрать микрофон по устойчивой части имени",
+    )
     sub.add_parser("headset-test")
     sub.add_parser("models")
     sub.add_parser("trust-next-task")
@@ -1592,7 +1681,13 @@ def main(argv: list[str] | None = None) -> int:
         if command == "voice-agent":
             return _voice_agent(settings, speech)
         if command == "audio-devices":
-            return _audio_devices(settings, speech)
+            return _audio_devices(
+                settings,
+                speech,
+                select=getattr(args, "select", None),
+                clear=bool(getattr(args, "clear", False)),
+                interactive=bool(getattr(args, "interactive", False)),
+            )
         if command == "headset-test":
             return _headset_controls_test(settings, speech)
         if command == "models":

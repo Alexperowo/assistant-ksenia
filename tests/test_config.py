@@ -10,6 +10,7 @@ from butler.config import (
     reasoning_arguments,
     response_budget_label,
     set_user_headset_control,
+    set_user_microphone,
     set_user_model,
     set_user_reasoning,
     set_user_response_budget,
@@ -339,6 +340,27 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(
                 saved["headset_controls"]["activation_button"], "play_pause"
             )
+
+    def test_microphone_update_is_atomic_and_preserves_voice_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            (root / "config" / "user.json").write_text(
+                json.dumps({"voice": {"speaker": "xenia"}}), encoding="utf-8"
+            )
+
+            set_user_microphone(root, "Tour One M3")
+            selected = json.loads(
+                (root / "config" / "user.json").read_text(encoding="utf-8")
+            )
+            set_user_microphone(root, "")
+            cleared = json.loads(
+                (root / "config" / "user.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(selected["voice"]["speaker"], "xenia")
+        self.assertEqual(selected["voice"]["wake_device"], "Tour One M3")
+        self.assertEqual(cleared["voice"], {"speaker": "xenia"})
 
     def test_default_roles_and_execution_policy_are_safe(self):
         with tempfile.TemporaryDirectory() as directory:
