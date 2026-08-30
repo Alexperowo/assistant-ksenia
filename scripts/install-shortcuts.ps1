@@ -10,7 +10,7 @@ $desktop = [Environment]::GetFolderPath('Desktop')
 $shell = New-Object -ComObject WScript.Shell
 $kseniaIcon = Join-Path $projectRoot 'assets\icons\ksenia.ico'
 $shortcuts = @(
-    @{ Name = 'Ксения — инструкция Александра'; Target = 'OPEN-ALEXANDER-GUIDE.cmd'; Description = 'Личная пошаговая инструкция Александра по проверке и работе с Ксенией.' },
+    @{ Name = 'Ксения — инструкция пользователя'; Target = 'OPEN-USER-GUIDE.cmd'; Description = 'Пошаговая инструкция пользователя по проверке и работе с Ксенией.' },
     @{ Name = 'Ксения — запрос для поиска моделей'; Target = 'OPEN-MODEL-SEARCH-REQUEST.cmd'; Description = 'Открыть готовое сообщение для поиска Dense MTP и MoE APEX MTP моделей.' },
     @{ Name = 'Ксения — НАЧАТЬ РАЗГОВОР'; Target = 'START-VOICE.cmd'; Hotkey = 'CTRL+ALT+K'; Description = 'Главный голосовой режим. Горячая клавиша Control Alt K.' },
     @{ Name = 'Ксения — ОСТАНОВИТЬ ГОЛОС'; Target = 'STOP-VOICE.cmd'; Hotkey = 'CTRL+ALT+S'; Description = 'Аварийно остановить только голосовой режим. Горячая клавиша Control Alt S.' },

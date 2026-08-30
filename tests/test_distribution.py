@@ -340,7 +340,7 @@ class DistributionTests(unittest.TestCase):
 
     def test_desktop_shortcut_contract_is_complete_and_verified(self):
         expected = {
-            "Ксения — инструкция Александра": ("OPEN-ALEXANDER-GUIDE.cmd", ""),
+            "Ксения — инструкция пользователя": ("OPEN-USER-GUIDE.cmd", ""),
             "Ксения — запрос для поиска моделей": ("OPEN-MODEL-SEARCH-REQUEST.cmd", ""),
             "Ксения — НАЧАТЬ РАЗГОВОР": ("START-VOICE.cmd", "CTRL+ALT+K"),
             "Ксения — ОСТАНОВИТЬ ГОЛОС": ("STOP-VOICE.cmd", "CTRL+ALT+S"),
