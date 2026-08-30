@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from butler.chat import complete_chat, count_chat_tokens
@@ -65,8 +66,15 @@ class EvaluationCase:
     check: Callable[[dict[str, Any]], tuple[bool, str]]
 
 
-def with_mtp_mode(settings: Settings, role: str, *, enabled: bool) -> Settings:
-    """Return an in-memory profile with MTP explicitly enabled or disabled."""
+def with_acceleration_mode(
+    settings: Settings,
+    role: str,
+    *,
+    enabled: bool,
+    max_tokens: int | None = None,
+    acceleration_type: str | None = None,
+) -> Settings:
+    """Return an in-memory profile with benchmark acceleration toggled."""
 
     raw = deepcopy(settings.raw)
     try:
@@ -77,11 +85,82 @@ def with_mtp_mode(settings: Settings, role: str, *, enabled: bool) -> Settings:
     if not isinstance(acceleration, dict):
         raise ValueError(f"Профиль модели {role} содержит повреждённое acceleration.")
     profile["acceleration"] = dict(acceleration)
+    declared_type = str(acceleration.get("type", "none")).strip().casefold()
+    selected_type = (
+        str(acceleration_type).strip().casefold()
+        if acceleration_type is not None
+        else declared_type
+    )
+    if selected_type not in {"none", "draft-mtp", "draft-dflash"}:
+        raise ValueError(f"Неизвестный тип ускорения: {selected_type}.")
+    if enabled and selected_type == "none":
+        raise ValueError(
+            f"Для профиля модели {role} не выбран тип ускорения."
+        )
     if enabled:
-        profile["acceleration"].update({"type": "draft-mtp", "max_tokens": 2})
+        selected_max_tokens = (
+            int(acceleration.get("max_tokens", 0) or 0)
+            if max_tokens is None
+            else int(max_tokens)
+        )
+        if not 1 <= selected_max_tokens <= 32:
+            raise ValueError("Число speculative tokens должно быть от 1 до 32.")
+        profile["acceleration"].update(
+            {"type": selected_type, "max_tokens": selected_max_tokens}
+        )
     else:
-        profile["acceleration"].update({"type": "none", "max_tokens": 0})
+        profile["acceleration"].update(
+            {"type": "none", "max_tokens": 0, "draft_gpu_layers": 0}
+        )
     return replace(settings, raw=raw)
+
+
+_DRAFT_ACCEPTANCE_PATTERN = re.compile(
+    r"draft acceptance\s*=\s*([0-9.]+)\s*\(\s*(\d+) accepted\s*/\s*"
+    r"(\d+) generated\),\s*mean len\s*=\s*([0-9.]+)",
+    flags=re.IGNORECASE,
+)
+
+
+def parse_speculative_metrics(log_path: Path | None) -> dict[str, Any]:
+    """Aggregate request-level speculative counters from one llama-server log."""
+    if log_path is None:
+        return {
+            "request_count": 0,
+            "accepted_tokens": 0,
+            "generated_tokens": 0,
+            "acceptance_rate": None,
+            "requests": [],
+        }
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    requests: list[dict[str, int | float]] = []
+    for match in _DRAFT_ACCEPTANCE_PATTERN.finditer(text):
+        accepted = int(match.group(2))
+        generated = int(match.group(3))
+        requests.append(
+            {
+                "reported_rate": float(match.group(1)),
+                "accepted_tokens": accepted,
+                "generated_tokens": generated,
+                "mean_length": float(match.group(4)),
+            }
+        )
+    accepted_total = sum(item["accepted_tokens"] for item in requests)
+    generated_total = sum(item["generated_tokens"] for item in requests)
+    return {
+        "request_count": len(requests),
+        "accepted_tokens": accepted_total,
+        "generated_tokens": generated_total,
+        "acceptance_rate": (
+            round(accepted_total / generated_total, 6)
+            if generated_total
+            else None
+        ),
+        "requests": requests,
+    }
 
 
 def _message(response: dict[str, Any]) -> dict[str, Any]:

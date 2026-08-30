@@ -5,6 +5,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import time
 from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import datetime
@@ -14,13 +15,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from butler.atomic_io import atomic_write_text  # noqa: E402
 from butler.config import Settings, load_settings  # noqa: E402
 from butler.model_assets import model_asset_from_config, verify_model_path  # noqa: E402
 from butler.model_evaluation import (  # noqa: E402
     base_cases,
     build_long_context_case,
     run_case,
-    with_mtp_mode,
+    parse_speculative_metrics,
+    with_acceleration_mode,
 )
 from butler.model_manager import ModelManager, RuntimeState  # noqa: E402
 
@@ -62,9 +65,15 @@ def verify_model_file(settings: Settings, role: str, *, verify_hash: bool) -> di
     metadata = settings.raw["models"][role]
     if isinstance(metadata.get("artifacts"), dict):
         asset = model_asset_from_config(settings.raw["models"], role)
-        # A pinned candidate is always hashed in full. The optional flag remains
-        # useful only for legacy local profiles without supply-chain metadata.
-        return verify_model_path(asset, profile.model_path, verify_hash=True)
+        # ModelManager performs the mandatory full hash check (or accepts its
+        # identity-bound integrity cache) immediately before Popen. This optional
+        # independent pass is useful for supply-chain audits, but repeating it for
+        # every point of a sweep would read a 40–70 GiB model twice per launch.
+        return verify_model_path(
+            asset,
+            profile.model_path,
+            verify_hash=verify_hash,
+        )
 
     expected_size = int(metadata.get("expected_size_bytes", 0) or 0)
     expected_hash = str(metadata.get("sha256", "")).casefold()
@@ -111,7 +120,29 @@ def restore_model(settings: Settings, original: RuntimeState | None, tested_role
 def main() -> int:
     parser = argparse.ArgumentParser(description="Безопасная локальная проверка модели-кандидата")
     parser.add_argument("--profile", "--role", dest="profile", default="candidate")
-    parser.add_argument("--mtp", choices=("on", "off"), default="on")
+    parser.add_argument(
+        "--acceleration",
+        "--mtp",
+        dest="acceleration",
+        choices=("on", "off"),
+        default="on",
+        help="Включить или выключить ускорение, объявленное выбранным профилем.",
+    )
+    parser.add_argument(
+        "--spec-tokens",
+        type=int,
+        default=0,
+        help="Переопределить acceleration.max_tokens только в памяти; 1–32.",
+    )
+    parser.add_argument(
+        "--acceleration-type",
+        choices=("draft-mtp", "draft-dflash"),
+        default=None,
+        help=(
+            "Явно выбрать экспериментальное ускорение только для этого прогона; "
+            "постоянная конфигурация не меняется."
+        ),
+    )
     parser.add_argument("--long-context", action="store_true")
     parser.add_argument(
         "--context-tokens",
@@ -129,20 +160,30 @@ def main() -> int:
     args = parser.parse_args()
     if not 480 <= args.plan_tokens <= 4096:
         parser.error("--plan-tokens должен быть от 480 до 4096.")
+    if args.spec_tokens and not 1 <= args.spec_tokens <= 32:
+        parser.error("--spec-tokens должен быть от 1 до 32.")
+    if args.acceleration == "off" and args.spec_tokens:
+        parser.error("--spec-tokens нельзя задавать при --acceleration off.")
+    if args.acceleration == "off" and args.acceleration_type:
+        parser.error("--acceleration-type нельзя задавать при --acceleration off.")
 
     base_settings = load_settings(ROOT)
     candidate_settings = with_profile_enabled(base_settings, args.profile)
-    test_settings = with_mtp_mode(
+    test_settings = with_acceleration_mode(
         candidate_settings,
         args.profile,
-        enabled=args.mtp == "on",
+        enabled=args.acceleration == "on",
+        max_tokens=args.spec_tokens or None,
+        acceleration_type=args.acceleration_type,
     )
     base_manager = ModelManager(base_settings)
     original = base_manager.running_state()
     report: dict[str, object] = {
         "started_at": datetime.now().astimezone().isoformat(),
         "profile": args.profile,
-        "mtp": args.mtp,
+        "acceleration": args.acceleration,
+        "acceleration_type": test_settings.model(args.profile).acceleration_type,
+        "spec_tokens": test_settings.model(args.profile).acceleration_max_tokens,
         "original_state": asdict(original) if original else None,
         "gpu_before": gpu_snapshot(),
         "tests": [],
@@ -150,14 +191,20 @@ def main() -> int:
     output_dir = base_settings.runtime_dir / "benchmarks"
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    output = output_dir / f"{args.profile}-{args.mtp}-{stamp}.json"
+    output = output_dir / f"{args.profile}-{args.acceleration}-{stamp}.json"
 
     try:
         report["model_file"] = verify_model_file(
             test_settings, args.profile, verify_hash=args.verify_hash
         )
-        print(f"Запускаю профиль {args.profile}, MTP: {args.mtp}.", flush=True)
+        print(
+            f"Запускаю профиль {args.profile}, ускорение: {args.acceleration}, "
+            f"тип: {report['acceleration_type']}, tokens: {report['spec_tokens']}.",
+            flush=True,
+        )
+        load_started = time.perf_counter()
         state = ModelManager(test_settings).start(args.profile)
+        report["load_ms"] = round((time.perf_counter() - load_started) * 1000, 3)
         report["test_state"] = asdict(state)
         report["gpu_loaded"] = gpu_snapshot()
         cases = base_cases()
@@ -197,6 +244,9 @@ def main() -> int:
         passed = sum(1 for item in tests if item.get("passed"))
         report["summary"] = {"passed": passed, "total": len(tests)}
         report["gpu_after_tests"] = gpu_snapshot()
+        report["speculative_metrics"] = parse_speculative_metrics(
+            Path(state.log_path) if state.log_path else None
+        )
     except Exception as exc:
         report["fatal_error"] = f"{type(exc).__name__}: {exc}"
     finally:
@@ -210,7 +260,10 @@ def main() -> int:
         except Exception as exc:
             report["restore_error"] = f"{type(exc).__name__}: {exc}"
         report["finished_at"] = datetime.now().astimezone().isoformat()
-        output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(
+            output,
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+        )
         print(f"Отчёт: {output}", flush=True)
 
     if report.get("fatal_error") or report.get("restore_error"):

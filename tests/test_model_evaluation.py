@@ -8,7 +8,8 @@ from butler.model_evaluation import (
     check_structured_russian_plan,
     check_tool,
     check_untrusted_source,
-    with_mtp_mode,
+    parse_speculative_metrics,
+    with_acceleration_mode,
 )
 from butler.config import load_settings
 
@@ -28,19 +29,77 @@ def response(*, content="", tool_calls=None, finish_reason="stop"):
 
 
 class ModelEvaluationTests(unittest.TestCase):
-    def test_mtp_benchmark_mode_is_explicit_and_does_not_mutate_defaults(self):
+    def test_acceleration_benchmark_mode_preserves_declared_type_and_defaults(self):
         settings = load_settings(Path(__file__).resolve().parents[1])
 
-        enabled = with_mtp_mode(settings, "candidate", enabled=True)
-        disabled = with_mtp_mode(enabled, "candidate", enabled=False)
+        enabled = with_acceleration_mode(
+            settings,
+            "candidate",
+            enabled=True,
+            max_tokens=4,
+            acceleration_type="draft-mtp",
+        )
+        disabled = with_acceleration_mode(enabled, "candidate", enabled=False)
 
         original = settings.raw["models"]["candidate"]["acceleration"]
         enabled_mode = enabled.raw["models"]["candidate"]["acceleration"]
         disabled_mode = disabled.raw["models"]["candidate"]["acceleration"]
-        self.assertEqual(original, {"type": "draft-mtp", "max_tokens": 2})
-        self.assertEqual(enabled_mode, {"type": "draft-mtp", "max_tokens": 2})
-        self.assertEqual(disabled_mode, {"type": "none", "max_tokens": 0})
+        self.assertEqual(original, {"type": "none", "max_tokens": 0})
+        self.assertEqual(enabled_mode, {"type": "draft-mtp", "max_tokens": 4})
+        self.assertEqual(
+            disabled_mode,
+            {"type": "none", "max_tokens": 0, "draft_gpu_layers": 0},
+        )
         self.assertEqual(settings.raw["models"]["candidate"]["acceleration"], original)
+
+        dflash_enabled = with_acceleration_mode(
+            settings,
+            "heavy_candidate",
+            enabled=True,
+            max_tokens=5,
+            acceleration_type="draft-dflash",
+        )
+        self.assertEqual(
+            dflash_enabled.raw["models"]["heavy_candidate"]["acceleration"],
+            {"type": "draft-dflash", "max_tokens": 5},
+        )
+
+    def test_acceleration_benchmark_rejects_enabling_undeclared_mode(self):
+        settings = load_settings(Path(__file__).resolve().parents[1])
+        raw = dict(settings.raw)
+        raw["models"] = dict(settings.raw["models"])
+        raw["models"]["candidate"] = dict(raw["models"]["candidate"])
+        raw["models"]["candidate"]["acceleration"] = {
+            "type": "none",
+            "max_tokens": 0,
+        }
+
+        from dataclasses import replace
+
+        with self.assertRaisesRegex(ValueError, "не выбран тип ускорения"):
+            with_acceleration_mode(
+                replace(settings, raw=raw), "candidate", enabled=True
+            )
+
+    def test_speculative_metrics_aggregate_request_counters(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "llama.log"
+            log.write_text(
+                "draft acceptance = 0.50000 (  10 accepted /  20 generated), "
+                "mean len = 3.00\n"
+                "draft acceptance = 0.25000 (   5 accepted /  20 generated), "
+                "mean len = 2.00\n",
+                encoding="utf-8",
+            )
+
+            metrics = parse_speculative_metrics(log)
+
+        self.assertEqual(metrics["request_count"], 2)
+        self.assertEqual(metrics["accepted_tokens"], 15)
+        self.assertEqual(metrics["generated_tokens"], 40)
+        self.assertEqual(metrics["acceptance_rate"], 0.375)
 
     def test_structured_plan_budget_can_complete_its_own_eight_step_contract(self):
         case = next(item for item in base_cases() if item.name == "structured_russian_plan")

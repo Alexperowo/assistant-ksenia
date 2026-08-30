@@ -55,7 +55,7 @@ PoolSide используется только профилем, который 
 
 1. Создать отдельную временную venv Python 3.12.
 2. Изменить одну логическую группу зависимостей, а не всё одновременно.
-3. Выполнить импорт, `pip check`, 356+ тестов и живые voice/browser/Windows gates.
+3. Выполнить импорт, `pip check`, 358+ тестов и живые voice/browser/Windows gates.
 4. Снять точный `pip freeze` в `requirements/runtime.lock.txt`.
 5. Сверить верхнеуровневые версии с `runtime-assets.lock.json`.
 6. Проверить CUDA Torch и faster-whisper на реальном GPU, затем CPU fallback.
@@ -72,8 +72,8 @@ PoolSide используется только профилем, который 
 ```powershell
 python scripts\model-assets.py download candidate
 python scripts\model-assets.py verify candidate
-python scripts\benchmark-model-candidate.py --profile candidate --mtp off
-python scripts\benchmark-model-candidate.py --profile candidate --mtp on
+python scripts\benchmark-model-candidate.py --profile candidate --acceleration off
+python scripts\benchmark-model-candidate.py --profile candidate --acceleration on --acceleration-type draft-mtp --spec-tokens 1
 ```
 
 Загрузчик не использует пользовательский Hugging Face token, не принимает плавающий revision и после загрузки всегда перечитывает весь файл для SHA-256. Benchmark временно разрешает выключенный профиль только в памяти своего процесса; `config/user.json` и переносимый `enabled: false` не меняются.

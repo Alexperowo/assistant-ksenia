@@ -65,6 +65,8 @@ class ModelManagerTests(unittest.TestCase):
         generalist_command = manager.build_command(generalist)
         reasoning = settings.model("reasoning")
         reasoning_command = manager.build_command(reasoning)
+        heavy_candidate = settings.model("heavy_candidate")
+        heavy_command = manager.build_command(heavy_candidate)
 
         self.assertEqual(generalist.context_size, 98_304)
         self.assertEqual(
@@ -80,6 +82,11 @@ class ModelManagerTests(unittest.TestCase):
         )
         self.assertIn("--mmproj", reasoning_command)
         self.assertNotIn("--model-draft", reasoning_command)
+        self.assertEqual(heavy_candidate.context_size, 98_304)
+        self.assertNotIn("--spec-type", heavy_command)
+        self.assertNotIn("--spec-draft-n-max", heavy_command)
+        self.assertNotIn("--model-draft", heavy_command)
+        self.assertIn("--n-cpu-moe", heavy_command)
 
     def test_profile_backend_controls_executable_and_supported_cors_flags(self):
         settings = load_settings()

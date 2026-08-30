@@ -57,7 +57,11 @@
 
 - `generalist`: Laguna XS 2.1 APEX I-Quality + DFlash, PoolSide backend, 96K;
 - `reasoning`: Qwen 3.8 27B Opus Distill v2 + MTP + projector, официальный backend, 96K;
-- `candidate`: conFIGur8tor Ornith 1.5 35B-A3B APEX MTP Fixed, 16K, `draft-mtp`, `experimental: true`, `enabled: false` до собственного A/B.
+- `heavy_candidate`: Laguna S 2.1 UD-IQ3_S, PoolSide backend, 96K, `experimental: true`, `enabled: false`;
+- `candidate`: conFIGur8tor Ornith 1.5 35B-A3B APEX MTP Fixed, 16K, `experimental: true`, `enabled: false`;
+- `quality_candidate`: mudler Ornith 1.5 35B-A3B APEX Quality Q6_K без MTP, 16K, `experimental: true`, `enabled: false`.
+
+У кандидатов хранится лучший измеренный режим запуска, поэтому после A/B у `heavy_candidate`, `candidate` и `quality_candidate` стоит `acceleration: none`. Наличие DFlash/MTP-артефакта не означает, что ускорение полезно. Для воспроизводимого sweep benchmark принимает явные `--acceleration-type` и `--spec-tokens`, изменяя профиль только в памяти процесса. Результаты: `docs/MODEL-RUNTIME-AB-2026-08-30.md`.
 
 Новый GGUF сначала добавляется отдельным выключенным кандидатом. Штатная команда `python scripts\model-assets.py download candidate` загружает все объявленные артефакты только из закреплённых commit и принимает их после совпадения размера и полного SHA-256. `python scripts\model-assets.py verify candidate` не обращается к сети и проверяет уже разрешённые локальные пути. PowerShell-вход `scripts\download-model-assets.ps1 -Profile candidate` использует тот же код и каталог.
 

@@ -21,7 +21,7 @@
 
 - Четыре функциональные роли: ассистент, исследователь, разработчик и тяжёлый мозг.
 - Один активный `llama-server` с безопасной сменой GGUF-профиля и декларативным выбором executable backend-а.
-- Семантический каталог без модельных ветвлений в коде: `generalist` Laguna+DFlash и `reasoning` Qwen+MTP/mmproj по 96K; выключенный 16K `candidate` — точно закреплённый conFIGur8tor Ornith APEX MTP Fixed. Старый A/B другого SC117-файла к нему не относится.
+- Семантический каталог без модельных ветвлений в коде: `generalist` Laguna XS+DFlash и `reasoning` Qwen+MTP/mmproj по 96K; выключены Laguna S `heavy_candidate`, conFIGur8tor Ornith `candidate` и mudler Ornith Q6_K `quality_candidate`. Роли не менялись. A/B и карантин несовпавшего SC117-подобного файла описаны в `docs/MODEL-RUNTIME-AB-2026-08-30.md`.
 - Голос: Vosk для активации/остановки, faster-whisper для команды, Silero Xenia и SAPI-резерв.
 - Live v1 как отдельный opt-in контур: Vosk partial transcripts → hybrid turn detector → финальный faster-whisper, безопасные дельты LLM, отслеживаемые фразы TTS, barge-in state machine и раздельные generated/spoken ответы. Весь режим по умолчанию выключен до AEC/full-duplex-приёмки.
 - Сквозной performance harness: `trace_id/turn_id/task_id/request_id`, voice→STT→LLM→TTS milestones, cancellation latency, p50/p95 и явные неполные traces без отдельной telemetry-службы.

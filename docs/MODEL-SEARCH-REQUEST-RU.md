@@ -20,7 +20,7 @@
 
 - `generalist`: Laguna XS 2.1 APEX I-Quality + отдельный DFlash на PoolSide backend;
 - `reasoning`: Qwen 3.8 27B Opus Distill v2 + MTP + multimodal projector на официальном backend;
-- `candidate`: выключенный conFIGur8tor Ornith 1.5 35B-A3B APEX MTP Fixed, точный артефакт закреплён, но собственный 16K MTP on/off gate ещё не выполнялся; старый A/B SC117 к нему не относится.
+- выключенные кандидаты: Laguna S 2.1 `heavy_candidate`, conFIGur8tor Ornith MTP Fixed `candidate` и mudler Ornith Quality Q6_K `quality_candidate`; собственный A/B завершён, роли не назначены. conFIGur8tor MTP и Laguna S DFlash замедлили текущий корпус, поэтому default у кандидатов — off. Локальный SC117-подобный файл не допущен из-за несовпадения опубликованного SHA-256. Точные данные: `docs/MODEL-RUNTIME-AB-2026-08-30.md`.
 
 Для каждого кандидата укажи:
 

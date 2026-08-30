@@ -396,15 +396,24 @@ class ConfigTests(unittest.TestCase):
             "344925ae3f65a57a55c1db1acaf52e7ca49aaf5e0b845b797964e73106f6e340",
         )
         self.assertEqual(candidate["context_size"], 16_384)
-        self.assertEqual(candidate["acceleration"]["type"], "draft-mtp")
-        self.assertEqual(candidate["acceleration"]["max_tokens"], 2)
+        self.assertEqual(candidate["acceleration"]["type"], "none")
+        self.assertEqual(candidate["acceleration"]["max_tokens"], 0)
         self.assertFalse(candidate["enabled"])
         self.assertTrue(candidate["experimental"])
 
     def test_working_profiles_are_generic_pinned_and_have_declared_capabilities(self):
         settings = load_settings()
 
-        self.assertEqual(settings.model_roles(), ("generalist", "reasoning", "candidate"))
+        self.assertEqual(
+            settings.model_roles(),
+            (
+                "generalist",
+                "reasoning",
+                "heavy_candidate",
+                "candidate",
+                "quality_candidate",
+            ),
+        )
         self.assertEqual(settings.agent_max_steps, 8)
         self.assertEqual(settings.developer_max_steps, 24)
         self.assertGreaterEqual(
@@ -413,6 +422,8 @@ class ConfigTests(unittest.TestCase):
         )
         generalist = settings.model("generalist")
         reasoning = settings.model("reasoning")
+        heavy_candidate = settings.model("heavy_candidate")
+        quality_candidate = settings.model("quality_candidate")
 
         self.assertEqual(generalist.backend.name, "poolside")
         self.assertEqual(reasoning.backend.name, "official")
@@ -421,6 +432,17 @@ class ConfigTests(unittest.TestCase):
         self.assertIsNotNone(generalist.draft_model_path)
         self.assertEqual(reasoning.acceleration_type, "draft-mtp")
         self.assertIsNotNone(reasoning.projector_path)
+        self.assertEqual(heavy_candidate.backend.name, "poolside")
+        self.assertEqual(heavy_candidate.acceleration_type, "none")
+        self.assertEqual(heavy_candidate.acceleration_max_tokens, 0)
+        self.assertIsNotNone(heavy_candidate.draft_model_path)
+        self.assertFalse(heavy_candidate.enabled)
+        self.assertTrue(heavy_candidate.experimental)
+        self.assertEqual(quality_candidate.backend.name, "official")
+        self.assertEqual(quality_candidate.acceleration_type, "none")
+        self.assertIsNone(quality_candidate.draft_model_path)
+        self.assertFalse(quality_candidate.enabled)
+        self.assertTrue(quality_candidate.experimental)
         for profile_name in settings.model_roles():
             artifacts = settings.raw["models"][profile_name]["artifacts"]
             for artifact in artifacts.values():
