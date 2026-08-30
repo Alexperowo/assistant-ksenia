@@ -92,6 +92,7 @@
 | `performance.py` | чтение ротированного JSONL, trace waterfall, completeness и статистики p50/p95 |
 | `scripts/performance-report.py` | человеко- и машиночитаемый отчёт реальных задержек |
 | `scripts/test_model_cancellation.py` | живой gate отмены LLM-stream и фактического завершения HTTP reader |
+| `scripts/runtime_context_benchmark.py` | безопасный временный sweep context, load/TTFT/cache/RAM/VRAM и восстановление исходной модели |
 | `scripts/check.ps1` | объединённый quality gate |
 | `scripts/run_test_suite.py` | инвентарь, warnings, skips и shuffled order |
 

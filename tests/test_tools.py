@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from butler.config import load_settings
 from butler.tasking import TaskCancelled
-from butler.tools import ToolExecutor, tool_schemas
+from butler.tools import ToolExecutor, tool_schema_metrics, tool_schemas
 from butler.windows_bridge import WindowsBridgeError
 
 
@@ -401,6 +401,16 @@ class ToolExecutorTests(unittest.TestCase):
             "remember_information", {"text": "локальный тест"}
         )
         self.assertEqual(pending.status, "confirmation_required")
+
+    def test_tool_schema_identity_is_stable_and_contains_no_arguments(self):
+        schemas = tool_schemas(load_settings())
+        first = tool_schema_metrics(schemas)
+        second = tool_schema_metrics(tool_schemas(load_settings()))
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["tool_count"], len(schemas))
+        self.assertEqual(len(first["tool_schema_sha256"]), 64)
+        self.assertNotIn("schemas", first)
 
     def test_active_browser_control_is_hidden_and_blocked_until_safe_adapter_enabled(self):
         original = load_settings()

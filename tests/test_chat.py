@@ -237,6 +237,7 @@ class ChatTransportTests(unittest.TestCase):
             payload["messages"][0]["content"],
             "Основные правила.\n\nТолько итог.",
         )
+        self.assertIs(payload["cache_prompt"], True)
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 600)
         completed = next(
             call
@@ -304,7 +305,50 @@ class ChatTransportTests(unittest.TestCase):
         self.assertEqual(chunks, ["Ответ"])
         self.assertEqual([item["role"] for item in payload["messages"]], ["system", "user"])
         self.assertEqual(payload["stream_options"], {"include_usage": True})
+        self.assertIs(payload["cache_prompt"], True)
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 600)
+
+    def test_stream_transport_reports_numeric_prompt_cache_usage(self):
+        events = [
+            {"choices": [{"delta": {"content": "Ответ"}}]},
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 4,
+                    "total_tokens": 104,
+                    "prompt_tokens_details": {
+                        "cached_tokens": 75,
+                        "untrusted_text": "never promote this field",
+                    },
+                },
+            },
+        ]
+        response = _FakeResponse(
+            lines=[
+                ("data: " + json.dumps(event, ensure_ascii=False) + "\n").encode(
+                    "utf-8"
+                )
+                for event in events
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self._settings(Path(directory))
+            with (
+                patch("butler.chat.urllib.request.urlopen", return_value=response),
+                patch("butler.chat.diagnostic_event") as diagnostic_event,
+            ):
+                self.assertEqual(list(stream_chat(settings, self._messages())), ["Ответ"])
+
+        completed = next(
+            call
+            for call in diagnostic_event.call_args_list
+            if call.args[2] == "stream_completed"
+        )
+        self.assertEqual(completed.kwargs["prompt_tokens"], 100)
+        self.assertEqual(completed.kwargs["cached_prompt_tokens"], 75)
+        self.assertEqual(completed.kwargs["prompt_cache_hit_ratio"], 0.75)
+        self.assertNotIn("untrusted_text", completed.kwargs)
 
     def test_stream_transport_emits_correlated_llm_milestones(self):
         event = {"choices": [{"delta": {"content": "Ответ"}}]}

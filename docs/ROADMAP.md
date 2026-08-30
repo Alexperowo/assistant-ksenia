@@ -36,7 +36,7 @@
 - [x] Полный комплект передачи проекта человеку или другой нейросети: `AGENTS.md`, архитектура, карта кода, конфигурация, данные, безопасность, тестирование, решения и журнал изменений.
 - [x] Машинные lock-файлы Python/`llama.cpp`, аппаратные профили, проверка состояния без изменений и отчёт по реальному VRAM.
 - [x] Чистый online-архив без LLM и личных данных, стадийное обновление `llama.cpp`, резервная копия и проверенный откат.
-- [x] 349 автоматических тестов, контроль количества и предупреждений, три случайных порядка, полный контракт ярлыков, performance tracing, tool lifecycle/cancellation, fail-closed выбор аудиовхода и регрессии запрета модельного/машинного хардкода.
+- [x] 356 автоматических тестов, контроль количества и предупреждений, три случайных порядка, полный контракт ярлыков, performance tracing, tool lifecycle/cancellation, runtime cache/profiles, fail-closed выбор аудиовхода и регрессии запрета модельного/машинного хардкода.
 
 ## Пользовательская приёмка Александра
 
@@ -58,8 +58,9 @@
 - [ ] Довести mid-operation cancellation до браузерных subprocess, Windows UI Automation и Sandbox Worker с управлением деревом процессов; принимать каждый backend отдельным fault-injection тестом.
 - [ ] После завершения загрузки проверить SHA-256 нового `candidate`, затем провести отдельный 16K A/B MTP on/off: 7 функций, acceptance, скорость, VRAM и отсутствие зависания. До этого профиль не включать и не смешивать результаты со старым SC117-файлом.
 - [x] Через штатный `ModelManager` принять базовую совместимость обоих рабочих runtime: Laguna + DFlash на PoolSide и Qwen + MTP + mmproj на официальном b10621, оба при фактических 96K, с русским ответом и корректным освобождением порта.
-- [x] Выполнить полный `check.ps1`: 349 тестов и три перемешанных прогона, Doctor, LAN и Silero→Whisper CUDA зелёные; отдельный streaming-gate Laguna/PoolSide 96K собрал полную LLM-трассу и штатно остановил сервер; RAG пропущен, потому что выключен конфигурацией.
+- [x] Выполнить полный `check.ps1`: 356 тестов и три перемешанных прогона, Doctor, LAN и Silero→Whisper CUDA зелёные; отдельный streaming-gate Laguna/PoolSide 96K собрал полную LLM-трассу и штатно остановил сервер; RAG пропущен, потому что выключен конфигурацией.
 - [ ] Дополнить live-gate инструментами, длинным benchmark/VRAM для Laguna и настоящим image-input/plan/tool-schema для Qwen; отдельно проверить RAG при его включении.
+- [x] Измерить RuntimeProfile 16K/32K/48K/96K на обеих рабочих моделях: меньший context экономит память, но не TTFT; автоматическое переключение отклонено из-за reload/cache penalty. Явный `cache_prompt`, cache hit telemetry и стабильный snapshot `AGENT_FULL` внедрены. Детали: `docs/RUNTIME-OPTIMIZATION-BASELINE.md`.
 - [ ] Production Sandbox Worker — **BLOCKED внешним prerequisite**: аудит подтвердил `VirtualizationFirmwareEnabled=False`, отсутствие WSL/container runtime и неактивный hypervisor. До включения AMD-V/SVM команды остаются выключенными. Затем живым fault-injection набором сравнить Windows Sandbox/Hyper-V worker и нативный AppContainer + Job Object; experimental `CreateProcessInSandbox` и MXC 0.8.0 не считать production boundary. Контракт и доказательства: `docs/SANDBOX-AUDIT.md`.
 - [ ] AEC/full-duplex — **PARTIAL**: supply-chain и CPU-spike `pywebrtc-audio` 0.1.0 завершены, wheel закреплён SHA-256, 129 upstream-тестов зелёные, AEC+NS+AGC работает около 96× realtime. Production dependency не добавлять до единого near/far worker. Далее: Windows APO probe, общий 10-мс capture/render тракт, synthetic A/B и реальные динамики/JBL. Лишь живые echo/barge-in тесты разрешают `live.enabled` по умолчанию.
 - [ ] Собрать небольшой постоянный русский benchmark реальных задач Александра для сравнения будущих моделей.

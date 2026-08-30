@@ -148,6 +148,16 @@ Microsoft Execution Containers 0.8.0 был закреплён по версии
 
 Отвергнуты production-активация MXC 0.8.0, одного Job Object или нового `Experimental_CreateProcessInSandbox`: первый upstream называет preview без security guarantee, второй не изолирует файлы/сеть, третий официально experimental и не имеет публичного header. Риск решения — команды разработчика временно недоступны без осознанного legacy `unsafe_host`; это безопаснее ложной границы. Проверка после изменения UEFI — capability probe и полный отрицательный fault-injection набор из `docs/SANDBOX-AUDIT.md`. Откат нового backend-а всегда возвращает `disabled`, а не host execution.
 
+## D-024: RuntimeProfile вводится только при выигрыше больше цены reload
+
+Проблема: 96K резервирует больше KV, но предположение «16K обязательно быстрее отвечает» не было измерено. Одновременно schemas строились заново на каждом agent step, что могло сломать общий prefix при изменении процедур или feature flags посреди задачи.
+
+Проведён живой sweep 16K/32K/48K/96K на Laguna/PoolSide/DFlash и Qwen/official/MTP с одинаковым полным tool prefix. Размер context почти не изменил cold или warm TTFT, но 16K освободил 1,8–2,9 ГБ VRAM и 2,9–3,3 ГБ private RAM. Переключение требует reload 7–11 секунд и уничтожает KV cache; при этом следующий ход с cache оказался 1,1–1,8 секунды против 23–64 секунд cold prompt evaluation.
+
+Выбрано сохранить рабочие 96K и не добавлять автоматическое переключение до реального VRAM bottleneck или отдельного постоянно живого Live runtime. `cache_prompt=true` теперь передаётся явно, а diagnostics фиксирует numeric cached tokens/hit ratio. Tool schemas снимаются один раз в начале agent task; фактические стабильные профили — `CHAT`, `RESEARCH_INTERNAL`, `PLANNING_READ_ONLY`, `AGENT_FULL`. Более узкие профили отклонены до corpus маршрутизации: неверно выбранный набор опаснее экономии первого prompt. `--cache-reuse` также не включён без отдельного A/B.
+
+Риск — первый cold `AGENT_FULL` на Laguna всё ещё занимает около минуты. Он уменьшается prefix cache последующих ходов, но не скрывается документацией. Проверка: повторяемый `runtime_context_benchmark.py`, schema fingerprint и регрессии snapshot-once/cache accounting. Откат явного request flag безопасен, если будущий backend его отвергнет; возвращение динамических schemas внутри loop не допускается.
+
 ## Как добавлять решение
 
 Новая запись должна содержать проблему, выбранный вариант, отвергнутые альтернативы, риски, способ проверки и план отката. Если решение меняет безопасность или пользовательский контракт, требуется согласование Александра.

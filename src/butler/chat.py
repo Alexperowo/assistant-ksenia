@@ -185,6 +185,27 @@ def _optional_nonnegative_int(value: object) -> int | None:
         return None
 
 
+def _usage_token_metrics(usage: object) -> dict[str, int | float | None]:
+    value = usage if isinstance(usage, dict) else {}
+    details = value.get("prompt_tokens_details", {})
+    details = details if isinstance(details, dict) else {}
+    prompt_tokens = _optional_nonnegative_int(value.get("prompt_tokens"))
+    completion_tokens = _optional_nonnegative_int(value.get("completion_tokens"))
+    total_tokens = _optional_nonnegative_int(value.get("total_tokens"))
+    cached_tokens = _optional_nonnegative_int(details.get("cached_tokens"))
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "cached_prompt_tokens": cached_tokens,
+        "prompt_cache_hit_ratio": (
+            round(cached_tokens / prompt_tokens, 6)
+            if cached_tokens is not None and prompt_tokens
+            else None
+        ),
+    }
+
+
 def default_max_tokens(settings: Settings) -> int:
     value = settings.raw.get("generation", {}).get("max_tokens", 4096)
     try:
@@ -439,6 +460,7 @@ def stream_chat(
             "messages": message_list,
             "stream": True,
             "stream_options": {"include_usage": True},
+            "cache_prompt": True,
             "temperature": temperature,
             "max_tokens": selected_max_tokens,
         },
@@ -455,6 +477,7 @@ def stream_chat(
     first_token_ms: int | None = None
     output_chars = 0
     completed = False
+    usage: dict[str, Any] = {}
     diagnostic_event(
         settings,
         "chat",
@@ -495,9 +518,14 @@ def stream_chat(
                         continue
                     try:
                         event = json.loads(payload)
-                        delta = event["choices"][0].get("delta", {})
+                        if isinstance(event.get("usage"), dict):
+                            usage = event["usage"]
+                        choices = event.get("choices", [])
+                        if not isinstance(choices, list) or not choices:
+                            continue
+                        delta = choices[0].get("delta", {})
                         content = delta.get("content")
-                    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
+                    except (json.JSONDecodeError, AttributeError, TypeError):
                         continue
                     if content:
                         if first_token_ms is None:
@@ -555,6 +583,7 @@ def stream_chat(
             )
         raise
     finally:
+        token_metrics = _usage_token_metrics(usage)
         diagnostic_event(
             settings,
             "chat",
@@ -564,6 +593,8 @@ def stream_chat(
             first_token_ms=first_token_ms,
             output_chars=output_chars,
             request_id=request_id,
+            usage_available=bool(usage),
+            **token_metrics,
         )
         diagnostic_milestone(
             settings,
@@ -591,6 +622,7 @@ def complete_chat(
     payload: dict[str, Any] = {
         "messages": message_list,
         "stream": streaming,
+        "cache_prompt": True,
         "temperature": temperature,
         "max_tokens": selected_max_tokens,
     }
@@ -665,9 +697,9 @@ def complete_chat(
         elapsed_ms = round((time.monotonic() - started) * 1000)
         usage = value.get("usage", {})
         usage = usage if isinstance(usage, dict) else {}
-        prompt_tokens = _optional_nonnegative_int(usage.get("prompt_tokens"))
-        completion_tokens = _optional_nonnegative_int(usage.get("completion_tokens"))
-        total_tokens = _optional_nonnegative_int(usage.get("total_tokens"))
+        token_metrics = _usage_token_metrics(usage)
+        prompt_tokens = token_metrics["prompt_tokens"]
+        completion_tokens = token_metrics["completion_tokens"]
         diagnostic_event(
             settings,
             "chat",
@@ -685,9 +717,7 @@ def complete_chat(
                 if isinstance(first_choice, dict)
                 else ""
             ),
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
+            **token_metrics,
             effective_completion_tokens_per_second=(
                 round(completion_tokens * 1000 / elapsed_ms, 3)
                 if completion_tokens is not None and elapsed_ms > 0

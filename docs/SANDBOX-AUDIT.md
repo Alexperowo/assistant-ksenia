@@ -93,4 +93,3 @@ WSL2 или Hyper-V container могут стать альтернативным
 - [Create Process in Sandbox — experimental](https://learn.microsoft.com/windows/win32/secauthz/createprocessinsandbox)
 - [Job Objects](https://learn.microsoft.com/windows/win32/procthread/job-objects)
 - [Install Windows Sandbox](https://learn.microsoft.com/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-install)
-

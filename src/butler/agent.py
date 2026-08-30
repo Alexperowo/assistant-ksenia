@@ -18,7 +18,7 @@ from butler.diagnostics import new_trace_id
 from butler.memory import ConversationMemory
 from butler.model_manager import ModelManager
 from butler.tasking import TaskCancelled, TaskControl
-from butler.tools import ToolExecutor, ToolResult, tool_schemas
+from butler.tools import ToolExecutor, ToolResult, tool_schema_metrics, tool_schemas
 
 
 SYSTEM_PROMPT = (
@@ -481,6 +481,8 @@ class AgentSession:
         task_started = time.monotonic()
         if reset_tool_state:
             self.tools.begin_task()
+        task_tool_schemas = [] if conversation_only else tool_schemas(self.settings)
+        tool_profile = "CHAT" if conversation_only else "AGENT_FULL"
         outcome = "failed"
         diagnostic_event(
             self.settings,
@@ -491,6 +493,8 @@ class AgentSession:
             max_steps=max_steps,
             conversation_only=conversation_only,
             history_message_count=len(self.messages),
+            tool_profile=tool_profile,
+            **tool_schema_metrics(task_tool_schemas),
         )
         last_status = ""
         last_status_at = time.monotonic()
@@ -601,7 +605,7 @@ class AgentSession:
                 response = complete_chat(
                     self.settings,
                     request_messages,
-                    tools=None if final_turn else tool_schemas(self.settings),
+                    tools=None if final_turn else task_tool_schemas,
                     # The transport reassembles streamed tool-call fragments,
                     # so every model turn remains cancellable while preserving
                     # one complete structure for the executor.

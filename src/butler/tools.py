@@ -656,6 +656,21 @@ def tool_schemas(settings: Settings | None = None) -> list[dict[str, Any]]:
     return schemas
 
 
+def tool_schema_metrics(schemas: list[dict[str, Any]]) -> dict[str, object]:
+    """Return content-free identity for a stable per-task tool profile."""
+    serialized = json.dumps(
+        schemas,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "tool_count": len(schemas),
+        "tool_schema_bytes": len(serialized),
+        "tool_schema_sha256": hashlib.sha256(serialized).hexdigest(),
+    }
+
+
 class ToolExecutor:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings

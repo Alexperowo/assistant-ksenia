@@ -40,6 +40,38 @@ def tool_call_response(index: int) -> dict:
 
 
 class AgentTests(unittest.TestCase):
+    @patch("butler.agent.ToolExecutor")
+    @patch("butler.agent.tool_schemas")
+    @patch("butler.agent.complete_chat")
+    def test_tool_profile_is_snapshotted_once_for_the_whole_agent_loop(
+        self, complete, schemas, executor_class
+    ):
+        stable_profile = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "browser_search",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+        schemas.return_value = stable_profile
+        complete.side_effect = [
+            tool_call_response(1),
+            {"choices": [{"message": {"role": "assistant", "content": "Готово."}}]},
+        ]
+        executor_class.return_value.execute.return_value = ToolResult(
+            True, "ok", "найдено"
+        )
+        settings = SimpleNamespace(raw={"memory": {"compression_enabled": False}})
+
+        reply = AgentSession(settings).ask("Проверь сведения")
+
+        self.assertEqual(reply.text, "Готово.")
+        schemas.assert_called_once_with(settings)
+        self.assertIs(complete.call_args_list[0].kwargs["tools"], stable_profile)
+        self.assertIs(complete.call_args_list[1].kwargs["tools"], stable_profile)
+
     @patch("butler.agent.diagnostic_event")
     @patch("butler.agent.ToolExecutor")
     @patch("butler.agent.complete_chat")
