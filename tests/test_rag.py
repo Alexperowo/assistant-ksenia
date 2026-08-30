@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from butler.rag import HybridRagIndex, chunk_text
+from butler.tasking import TaskCancelled
 
 
 class FakeEmbedder:
@@ -30,6 +31,34 @@ class FakeEmbedder:
 
 
 class HybridRagTests(unittest.TestCase):
+    def test_workspace_index_observes_checkpoint_between_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            workspace = base / "workspace"
+            workspace.mkdir()
+            for index in range(3):
+                (workspace / f"file-{index}.md").write_text(
+                    "голосовой проект",
+                    encoding="utf-8",
+                )
+            checkpoints = 0
+
+            def checkpoint() -> None:
+                nonlocal checkpoints
+                checkpoints += 1
+                if checkpoints >= 2:
+                    raise TaskCancelled("остановлено")
+
+            with self.assertRaises(TaskCancelled):
+                HybridRagIndex(base / "runtime").index_workspace(
+                    workspace,
+                    namespace="project",
+                    embedder=FakeEmbedder(),
+                    checkpoint=checkpoint,
+                )
+
+        self.assertEqual(checkpoints, 2)
+
     def test_fts_query_removes_common_russian_stopwords(self):
         query = HybridRagIndex._fts_query(
             "где в программе перехватывается исключение при чтении файла"

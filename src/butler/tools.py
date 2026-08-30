@@ -9,7 +9,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit, urlunsplit
 
 from butler.atomic_io import atomic_write_text, exclusive_file_lock
@@ -917,8 +917,17 @@ class ToolExecutor:
             return ToolResult(False, "denied", authorization.reason)
         return None
 
-    def execute(self, name: str, args: dict[str, Any] | None = None, *, confirmed: bool = False) -> ToolResult:
+    def execute(
+        self,
+        name: str,
+        args: dict[str, Any] | None = None,
+        *,
+        confirmed: bool = False,
+        checkpoint: Callable[[], None] | None = None,
+    ) -> ToolResult:
         args = {} if args is None else args
+        if checkpoint is not None:
+            checkpoint()
         started = time.monotonic()
         parameters = self._tool_parameters.get(name)
         if parameters is not None:
@@ -1006,6 +1015,7 @@ class ToolExecutor:
                                     max_file_bytes=int(
                                         rag_config.get("max_file_bytes", 1_000_000)
                                     ),
+                                    checkpoint=checkpoint,
                                 )
                             items = self.rag.search(
                                 namespace,
@@ -1020,6 +1030,7 @@ class ToolExecutor:
                                 min_vector_similarity=float(
                                     rag_config.get("min_vector_similarity", 0.3)
                                 ),
+                                checkpoint=checkpoint,
                             )
                         data = {
                             "index": asdict(summary) if summary is not None else None,
@@ -1140,6 +1151,8 @@ class ToolExecutor:
                     needle = query if case_sensitive else query.casefold()
                     skipped = {".git", ".venv", "runtime", "tools", "__pycache__"}
                     for path in target.rglob("*"):
+                        if checkpoint is not None:
+                            checkpoint()
                         if len(matches) >= 100:
                             break
                         if (

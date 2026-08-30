@@ -13,7 +13,7 @@
 ### 1. Статический и быстрый слой
 
 - синтаксис PowerShell, JSON и Python;
-- не менее 343 unit/integration-тестов;
+- не менее 346 unit/integration-тестов;
 - отсутствие неожиданных warnings и skips;
 - три полных shuffled-order запуска;
 - тайм-ауты сети/subprocess и запрет shell;
@@ -111,6 +111,8 @@ python scripts\performance-report.py --json
 ```
 
 Регрессии performance harness проверяют вложенный и фоновый trace context, отсутствие утечки в следующую задачу, redaction, STT/TTS request correlation, первый LLM token, cancellation, повреждённый JSONL, rotation order, percentiles, неполные traces и исключение приглашения «Слушаю» из TTFA.
+
+Регрессии tool lifecycle проверяют последовательности обычного исполнения, подтверждённого повтора и `TaskCancelled`, а также cooperative cancellation между файлами workspace/RAG. Они подтверждают terminal-состояние вызова и отсутствие продолжения после safe point, но намеренно не заявляют rollback уже завершённого действия или остановку внутри блокирующего внешнего backend-а.
 
 Фактическая отмена streaming-запроса и завершение HTTP reader проверяются отдельно на уже запущенной модели:
 

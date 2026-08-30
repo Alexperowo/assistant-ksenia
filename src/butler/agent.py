@@ -5,6 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import date
+from enum import StrEnum
 from typing import Any, Callable
 
 from butler.approval import approval_scope, reusable_approval
@@ -13,9 +14,10 @@ from butler.config import Settings
 from butler.diagnostics import bind_trace_context
 from butler.diagnostics import event as diagnostic_event
 from butler.diagnostics import exception as diagnostic_exception
+from butler.diagnostics import new_trace_id
 from butler.memory import ConversationMemory
 from butler.model_manager import ModelManager
-from butler.tasking import TaskControl
+from butler.tasking import TaskCancelled, TaskControl
 from butler.tools import ToolExecutor, ToolResult, tool_schemas
 
 
@@ -41,6 +43,15 @@ SYSTEM_PROMPT = (
     " Если доступен search_project_knowledge, используй его для смыслового поиска по незнакомому "
     "проекту до чтения множества файлов; важные фрагменты затем проверяй в исходном файле."
 )
+
+
+class ToolExecutionState(StrEnum):
+    PLANNED = "PLANNED"
+    APPROVED = "APPROVED"
+    STARTED = "STARTED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 _RAW_TOOL_MARKERS = (
@@ -191,6 +202,30 @@ class AgentSession:
             "session_ready",
             restored_message_count=max(0, len(self.messages) - 1),
             persistent_memory=self.memory is not None,
+        )
+
+    def _record_tool_state(
+        self,
+        execution_id: str,
+        name: str,
+        state: ToolExecutionState,
+        *,
+        step: int,
+        attempt: int = 0,
+        status: str = "",
+        cancellation_stage: str = "",
+    ) -> None:
+        diagnostic_event(
+            self.settings,
+            "agent",
+            "tool_state_changed",
+            tool_execution_id=execution_id,
+            tool_name=name,
+            tool_state=state.value,
+            step=step,
+            attempt=attempt,
+            status=status,
+            cancellation_stage=cancellation_stage,
         )
 
     def _save_memory(self) -> None:
@@ -688,6 +723,14 @@ class AgentSession:
                 for call in calls:
                     function = call.get("function", {}) if isinstance(call, dict) else {}
                     name = str(function.get("name", ""))
+                    tool_execution_id = new_trace_id()
+                    tool_attempt = 0
+                    self._record_tool_state(
+                        tool_execution_id,
+                        name,
+                        ToolExecutionState.PLANNED,
+                        step=step,
+                    )
                     diagnostic_event(
                         self.settings,
                         "agent",
@@ -740,10 +783,55 @@ class AgentSession:
                                     reusable_approval(name) and scope in approved_scopes
                                 )
                                 if control is not None:
-                                    control.checkpoint()
-                                result = self.tools.execute(
-                                    name, arguments, confirmed=scope_confirmed
+                                    try:
+                                        control.checkpoint()
+                                    except TaskCancelled:
+                                        self._record_tool_state(
+                                            tool_execution_id,
+                                            name,
+                                            ToolExecutionState.CANCELLED,
+                                            step=step,
+                                            attempt=tool_attempt,
+                                            cancellation_stage="before_dispatch",
+                                        )
+                                        raise
+                                if scope_confirmed:
+                                    self._record_tool_state(
+                                        tool_execution_id,
+                                        name,
+                                        ToolExecutionState.APPROVED,
+                                        step=step,
+                                        attempt=tool_attempt + 1,
+                                    )
+                                tool_attempt += 1
+                                self._record_tool_state(
+                                    tool_execution_id,
+                                    name,
+                                    ToolExecutionState.STARTED,
+                                    step=step,
+                                    attempt=tool_attempt,
                                 )
+                                dispatch_options: dict[str, Any] = {
+                                    "confirmed": scope_confirmed
+                                }
+                                if control is not None:
+                                    dispatch_options["checkpoint"] = control.checkpoint
+                                try:
+                                    result = self.tools.execute(
+                                        name,
+                                        arguments,
+                                        **dispatch_options,
+                                    )
+                                except TaskCancelled:
+                                    self._record_tool_state(
+                                        tool_execution_id,
+                                        name,
+                                        ToolExecutionState.CANCELLED,
+                                        step=step,
+                                        attempt=tool_attempt,
+                                        cancellation_stage="during_execution",
+                                    )
+                                    raise
                                 if (
                                     result.status == "confirmation_required"
                                     and on_confirmation is not None
@@ -780,9 +868,21 @@ class AgentSession:
                                             confirmation_request_count=confirmation_requests,
                                             max_confirmation_requests=max_confirmation_requests,
                                         )
-                                        approved = on_confirmation(
-                                            name, arguments, result.message
-                                        )
+                                        try:
+                                            approved = on_confirmation(
+                                                name, arguments, result.message
+                                            )
+                                        except TaskCancelled:
+                                            self._record_tool_state(
+                                                tool_execution_id,
+                                                name,
+                                                ToolExecutionState.CANCELLED,
+                                                step=step,
+                                                attempt=tool_attempt,
+                                                status="confirmation_cancelled",
+                                                cancellation_stage="confirmation",
+                                            )
+                                            raise
                                         if approved:
                                             diagnostic_event(
                                                 self.settings,
@@ -793,11 +893,61 @@ class AgentSession:
                                             )
                                             if reusable_approval(name):
                                                 approved_scopes.add(scope)
-                                            if control is not None:
-                                                control.checkpoint()
-                                            result = self.tools.execute(
-                                                name, arguments, confirmed=True
+                                            self._record_tool_state(
+                                                tool_execution_id,
+                                                name,
+                                                ToolExecutionState.APPROVED,
+                                                step=step,
+                                                attempt=tool_attempt + 1,
                                             )
+                                            if control is not None:
+                                                try:
+                                                    control.checkpoint()
+                                                except TaskCancelled:
+                                                    self._record_tool_state(
+                                                        tool_execution_id,
+                                                        name,
+                                                        ToolExecutionState.CANCELLED,
+                                                        step=step,
+                                                        attempt=tool_attempt + 1,
+                                                        cancellation_stage=(
+                                                            "after_approval"
+                                                        ),
+                                                    )
+                                                    raise
+                                            tool_attempt += 1
+                                            self._record_tool_state(
+                                                tool_execution_id,
+                                                name,
+                                                ToolExecutionState.STARTED,
+                                                step=step,
+                                                attempt=tool_attempt,
+                                            )
+                                            confirmed_options: dict[str, Any] = {
+                                                "confirmed": True
+                                            }
+                                            if control is not None:
+                                                confirmed_options["checkpoint"] = (
+                                                    control.checkpoint
+                                                )
+                                            try:
+                                                result = self.tools.execute(
+                                                    name,
+                                                    arguments,
+                                                    **confirmed_options,
+                                                )
+                                            except TaskCancelled:
+                                                self._record_tool_state(
+                                                    tool_execution_id,
+                                                    name,
+                                                    ToolExecutionState.CANCELLED,
+                                                    step=step,
+                                                    attempt=tool_attempt,
+                                                    cancellation_stage=(
+                                                        "during_execution"
+                                                    ),
+                                                )
+                                                raise
                                         else:
                                             diagnostic_event(
                                                 self.settings,
@@ -811,6 +961,27 @@ class AgentSession:
                                                 "confirmation_declined",
                                                 "Пользователь не подтвердил действие.",
                                             )
+                    if result.ok:
+                        terminal_tool_state = ToolExecutionState.COMPLETED
+                    elif result.status in {
+                        "confirmation_declined",
+                        "confirmation_limit",
+                        "confirmation_required",
+                        "denied",
+                        "disabled",
+                        "tool_limit",
+                    }:
+                        terminal_tool_state = ToolExecutionState.CANCELLED
+                    else:
+                        terminal_tool_state = ToolExecutionState.FAILED
+                    self._record_tool_state(
+                        tool_execution_id,
+                        name,
+                        terminal_tool_state,
+                        step=step,
+                        attempt=tool_attempt,
+                        status=result.status,
+                    )
                     events.append(AgentToolEvent(name, arguments, result))
                     diagnostic_event(
                         self.settings,

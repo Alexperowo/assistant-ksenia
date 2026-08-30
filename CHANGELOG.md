@@ -6,6 +6,8 @@
 
 - Added: лёгкий Performance / Acceptance Harness расширяет прежний безопасный JSONL сквозными `trace_id/turn_id/task_id/request_id`, monotonic timestamps и voice→STT→LLM→TTS/cancellation milestones без отдельной telemetry-службы.
 - Fixed: отмена streaming `llama.cpp` теперь сначала делает shutdown loopback-сокета и не блокирует разговор на синхронном `HTTPResponse.close()`; active/cancelled/stuck reader counters и shutdown latency остаются наблюдаемыми до фактической уборки.
+- Added: каждый вызов инструмента получает собственный `tool_execution_id` и наблюдаемый lifecycle `PLANNED/APPROVED/STARTED/COMPLETED/FAILED/CANCELLED`; повтор после явного подтверждения отмечается отдельным attempt.
+- Fixed: task checkpoint передаётся в executor; линейный поиск workspace, RAG-индексация и перебор векторов прекращаются в безопасных точках. Уже завершённые изменения не объявляются откатившимися.
 - Tests: добавлен живой cancellation-gate активной модели. На Laguna/PoolSide исходное воспроизведение заняло 2016 мс при отмене после 500 мс; после исправления три последовательных повтора завершили cancellation за 500–657 мс и вернули active/stuck readers к нулю.
 - Added: `scripts/performance-report.py` читает активный и ротированные журналы, переживает повреждённые строки, показывает неполные traces и считает `count/min/average/p50/p95/max`; служебное «Слушаю» и ранние статусы не подменяют TTFA ответа.
 - Changed: LLM transport фиксирует первый generated fragment, завершение и реальную cooperative cancellation; STT/TTS reader threads восстанавливают correlation только для своего `request_id`; agent/RAG/tool/model/research durations входят в общую измеряемую шкалу.
@@ -26,7 +28,7 @@
 - Fixed: фоновый listener команды «стоп» и голосовое подтверждение передают единственный микрофон через явный gate, не открывая два audio worker одновременно.
 - Fixed: конфигурация, PID/state, API-ключ, LAN PIN, модельный integrity-cache, журнал отмены и файловые изменения используют уникальную атомарную запись и межпроцессную блокировку; операции изменения и их undo-record составляют одну сериализованную транзакцию.
 - Changed: выключенный `candidate` исправлен на действительно запрошенный `conFIGur8tor/ornith15-35b-a3b-apex-mtp-fixed`, commit `63518f71...`, файл `ornith15-trained-head.gguf`; MTP объявлен, но профиль не включается до собственного локального A/B.
-- Tests: быстрый слой содержит 343 уникальных теста без пропусков; полный прогон и три перемешанных порядка проходят без warnings. Отдельный активный Laguna/PoolSide streaming-gate подтверждает usage и коррелированные LLM milestones.
+- Tests: быстрый слой содержит 346 уникальных тестов без пропусков; полный прогон и три перемешанных порядка проходят без warnings. Отдельный активный Laguna/PoolSide streaming-gate подтверждает usage и коррелированные LLM milestones.
 - Security: `write_workspace_file` теперь только создаёт новый файл и на уровне ОС не может перезаписать существующий путь; изменение существующего текста допускается только через `replace_in_workspace_file` с ровно одним совпадением.
 - Fixed: удалён эксперимент с исчезновением read/search-инструментов после лимита исследования. На реальной задаче Laguna подменила намерение чтения доступной записью; пять ошибочных изменений были полностью отменены журналом, а рабочая копия целевого проекта проверена как чистая.
 - Tests: реальная разработческая проверка дополнена регрессией «повторная целиковая запись получает `existing_file_requires_replace`, исходный текст не меняется» без увеличения формального числа тестов.

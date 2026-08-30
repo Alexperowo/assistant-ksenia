@@ -12,6 +12,7 @@ from butler.agent import (
     status_for_tool,
 )
 from butler.chat import ChatError
+from butler.tasking import TaskCancelled
 from butler.tools import ToolResult
 
 
@@ -39,6 +40,30 @@ def tool_call_response(index: int) -> dict:
 
 
 class AgentTests(unittest.TestCase):
+    @patch("butler.agent.diagnostic_event")
+    @patch("butler.agent.ToolExecutor")
+    @patch("butler.agent.complete_chat")
+    def test_tool_cancellation_is_a_terminal_lifecycle_state(
+        self, complete, executor_class, diagnostic_event
+    ):
+        complete.return_value = tool_call_response(1)
+        executor_class.return_value.execute.side_effect = TaskCancelled(
+            "остановлено"
+        )
+        settings = SimpleNamespace(
+            raw={"memory": {"compression_enabled": False}}
+        )
+
+        with self.assertRaises(TaskCancelled):
+            AgentSession(settings).ask("Останови инструмент")
+
+        tool_states = [
+            call.kwargs["tool_state"]
+            for call in diagnostic_event.call_args_list
+            if len(call.args) >= 3 and call.args[2] == "tool_state_changed"
+        ]
+        self.assertEqual(tool_states, ["PLANNED", "STARTED", "CANCELLED"])
+
     @patch("butler.agent.ToolExecutor")
     @patch("butler.agent.complete_chat")
     def test_existing_task_security_context_is_not_reset(self, complete, executor_class):
@@ -386,9 +411,12 @@ class AgentTests(unittest.TestCase):
         self.assertIn("Контекст сжат", statuses)
         self.assertIn("Сжатая память", session.messages[1]["content"])
 
+    @patch("butler.agent.diagnostic_event")
     @patch("butler.agent.ToolExecutor")
     @patch("butler.agent.complete_chat")
-    def test_confirmation_handler_retries_tool_as_confirmed(self, complete, executor_class):
+    def test_confirmation_handler_retries_tool_as_confirmed(
+        self, complete, executor_class, diagnostic_event
+    ):
         executor = executor_class.return_value
         executor.execute.side_effect = [
             ToolResult(False, "confirmation_required", "Нужно подтверждение"),
@@ -409,6 +437,15 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(reply.tool_events[0].result.status, "ok")
         self.assertEqual(confirmations, ["write_workspace_file"])
         self.assertTrue(executor.execute.call_args_list[-1].kwargs["confirmed"])
+        tool_states = [
+            call.kwargs["tool_state"]
+            for call in diagnostic_event.call_args_list
+            if len(call.args) >= 3 and call.args[2] == "tool_state_changed"
+        ]
+        self.assertEqual(
+            tool_states,
+            ["PLANNED", "STARTED", "APPROVED", "STARTED", "COMPLETED"],
+        )
 
     @patch("butler.agent.ToolExecutor")
     @patch("butler.agent.complete_chat")

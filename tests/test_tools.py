@@ -6,11 +6,48 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from butler.config import load_settings
+from butler.tasking import TaskCancelled
 from butler.tools import ToolExecutor, tool_schemas
 from butler.windows_bridge import WindowsBridgeError
 
 
 class ToolExecutorTests(unittest.TestCase):
+    def test_workspace_search_observes_cooperative_cancellation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = load_settings()
+            raw = copy.deepcopy(original.raw)
+            raw.setdefault("developer", {})["workspace_dir"] = "workspace"
+            settings = replace(
+                original,
+                root=root,
+                raw=raw,
+                runtime_dir=root / "runtime",
+            )
+            executor = ToolExecutor(settings)
+            for index in range(4):
+                (executor.workspace_root / f"file-{index}.txt").write_text(
+                    "needle",
+                    encoding="utf-8",
+                )
+            checkpoints = 0
+
+            def checkpoint() -> None:
+                nonlocal checkpoints
+                checkpoints += 1
+                if checkpoints >= 3:
+                    raise TaskCancelled("остановлено")
+
+            with self.assertRaises(TaskCancelled):
+                executor.execute(
+                    "search_workspace",
+                    {"path": ".", "query": "needle"},
+                    confirmed=True,
+                    checkpoint=checkpoint,
+                )
+
+        self.assertEqual(checkpoints, 3)
+
     def test_secret_file_contents_are_never_returned_or_searched(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

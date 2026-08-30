@@ -12,7 +12,7 @@ from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from butler.diagnostics import event as diagnostic_event
 from butler.sensitive_data import is_sensitive_path
@@ -324,6 +324,7 @@ class HybridRagIndex:
         *,
         modified_ns: int,
         embedder: EmbeddingProvider,
+        checkpoint: Callable[[], None] | None = None,
     ) -> tuple[bool, int]:
         clean_namespace = self._namespace(namespace)
         clean_path = str(path).replace("\\", "/").strip("/")
@@ -343,11 +344,15 @@ class HybridRagIndex:
                 and str(existing["embedding_model"]) == embedder.model_id
             ):
                 return False, 0
+        if checkpoint is not None:
+            checkpoint()
         vectors = (
             embedder.embed([chunk.text for chunk in chunks], kind="document")
             if chunks
             else []
         )
+        if checkpoint is not None:
+            checkpoint()
         if len(vectors) != len(chunks):
             raise ValueError("Число векторов не совпадает с числом фрагментов.")
         with closing(self._connect()) as connection:
@@ -404,6 +409,7 @@ class HybridRagIndex:
         namespace: object,
         embedder: EmbeddingProvider,
         max_file_bytes: int = 1_000_000,
+        checkpoint: Callable[[], None] | None = None,
     ) -> IndexSummary:
         root = workspace.resolve()
         if not root.is_dir():
@@ -423,6 +429,8 @@ class HybridRagIndex:
             )
             current_path = Path(current)
             for filename in sorted(filenames, key=str.casefold):
+                if checkpoint is not None:
+                    checkpoint()
                 candidate = current_path / filename
                 if candidate.is_symlink():
                     continue
@@ -454,6 +462,7 @@ class HybridRagIndex:
                     text,
                     modified_ns=stat.st_mtime_ns,
                     embedder=embedder,
+                    checkpoint=checkpoint,
                 )
                 if changed:
                     indexed += 1
@@ -509,6 +518,7 @@ class HybridRagIndex:
         embedder: EmbeddingProvider,
         limit: int = 8,
         min_vector_similarity: float = 0.3,
+        checkpoint: Callable[[], None] | None = None,
     ) -> list[RagResult]:
         clean_namespace = self._namespace(namespace)
         clean_query = re.sub(r"\s+", " ", str(query or "")).strip()
@@ -519,7 +529,11 @@ class HybridRagIndex:
         min_vector_similarity = float(min_vector_similarity)
         if not math.isfinite(min_vector_similarity) or not 0 <= min_vector_similarity <= 1:
             raise ValueError("Порог смыслового совпадения RAG должен быть от 0 до 1.")
+        if checkpoint is not None:
+            checkpoint()
         query_vector = _normalize(embedder.embed([clean_query], kind="query")[0])
+        if checkpoint is not None:
+            checkpoint()
         lexical_ids: list[int] = []
         with closing(self._connect()) as connection:
             fts_query = self._fts_query(clean_query)
@@ -542,7 +556,9 @@ class HybridRagIndex:
             ).fetchall()
         vector_scores: list[tuple[int, float]] = []
         row_by_id: dict[int, sqlite3.Row] = {}
-        for row in rows:
+        for index, row in enumerate(rows):
+            if checkpoint is not None and index % 256 == 0:
+                checkpoint()
             item_id = int(row["id"])
             row_by_id[item_id] = row
             vector = _vector_from_blob(bytes(row["embedding"]))
