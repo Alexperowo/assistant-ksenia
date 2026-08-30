@@ -28,6 +28,14 @@ def _host_api_name(sd, info: dict[str, Any]) -> str:
         return ""
 
 
+def _default_input_index(sd) -> int | None:
+    try:
+        index = int(sd.default.device[0])
+    except (AttributeError, IndexError, TypeError, ValueError, sd.PortAudioError):
+        return None
+    return index if index >= 0 else None
+
+
 def ranked_input_devices(sd, selector: str) -> list[tuple[int, dict[str, Any], str]]:
     devices = []
     host_priority = {
@@ -37,7 +45,7 @@ def ranked_input_devices(sd, selector: str) -> list[tuple[int, dict[str, Any], s
         "windows wdm-ks": 100,
     }
     selector = selector.strip()
-    default_index = sd.default.device[0] if not selector else None
+    default_index = _default_input_index(sd) if not selector else None
     numeric_selector: int | None = None
     try:
         numeric_selector = int(selector) if selector else None
@@ -91,6 +99,16 @@ def open_best_input_stream(
     candidates = ranked_input_devices(sd, selector)
     if not candidates:
         raise RuntimeError(f"Не найден входной микрофон: {selector or 'устройство по умолчанию'}")
+    if (
+        not selector.strip()
+        and len(candidates) > 1
+        and _default_input_index(sd) is None
+    ):
+        raise RuntimeError(
+            "Windows не сообщает микрофон по умолчанию, а доступно несколько "
+            "входов. Выберите устройство через voice.wake_device после команды "
+            "audio-devices; произвольный вход не будет открыт автоматически."
+        )
 
     attempts: list[str] = []
     for index, info, host in candidates:

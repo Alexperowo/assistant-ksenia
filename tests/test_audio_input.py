@@ -61,6 +61,21 @@ class FallbackSoundDevice(FakeSoundDevice):
         return object()
 
 
+class NoDefaultSoundDevice(FallbackSoundDevice):
+    def __init__(self):
+        super().__init__()
+        self.default = type("Default", (), {"device": (-1, -1)})()
+
+
+class OneInputNoDefaultSoundDevice(NoDefaultSoundDevice):
+    def __init__(self):
+        super().__init__()
+        self._devices = [self._devices[1]]
+
+    def check_input_settings(self, **_kwargs):
+        return None
+
+
 class AudioInputTests(unittest.TestCase):
     def test_wasapi_is_preferred_over_wdm_ks(self):
         candidates = ranked_input_devices(FakeSoundDevice(), "JBL Sense Pro")
@@ -84,6 +99,27 @@ class AudioInputTests(unittest.TestCase):
         self.assertEqual(opened.candidate_count, 3)
         self.assertTrue(opened.failed_attempts)
         self.assertIn("endpoint busy", opened.failed_attempts[0])
+
+    def test_multiple_inputs_without_default_require_explicit_selection(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "voice.wake_device",
+        ):
+            open_best_input_stream(
+                NoDefaultSoundDevice(),
+                "",
+                lambda *_args: None,
+                target_rate=16000,
+            )
+
+    def test_single_input_without_default_remains_automatic(self):
+        opened = open_best_input_stream(
+            OneInputNoDefaultSoundDevice(),
+            "",
+            lambda *_args: None,
+            target_rate=16000,
+        )
+        self.assertEqual(opened.device_name, "Headset (JBL Sense Pro)")
 
 
 if __name__ == "__main__":

@@ -132,6 +132,14 @@ Microsoft Execution Containers 0.8.0 был закреплён по версии
 
 Автоматический rollback физически завершённых действий отвергнут. Если отмена пришла после атомарной записи, браузерного действия или Windows input, фактический результат остаётся `COMPLETED`, а отмена блокирует только будущие шаги. Индекс RAG может сохранить уже полностью проиндексированные файлы и безопасно продолжить инкрементально позже. Остаточный риск — legacy `unsafe_host`, однократный browser worker и внешние UI operations пока не имеют надёжной mid-operation cancellation; они ограничены timeout/Permission Broker, а normal developer execution остаётся disabled до production sandbox. Проверка: terminal lifecycle при `TaskCancelled`, точная последовательность confirmation retry, остановка workspace walk и RAG между файлами. Откат — убрать передачу callback, сохранив state events для диагностики.
 
+## D-022: AEC dependency следует за единым near/far трактом, а не предшествует ему
+
+Проблема: Live state machine готова, но wake, final STT и stop monitor открывают микрофон разными процессами, а `System.Media.SoundPlayer` не передаёт capture path фактически отправленные render frames. В такой схеме установка AEC3 создала бы видимость echo cancellation без корректного far reference. Одновременно Windows communications AEC зависит от наличия драйверного APO и не гарантируется одной версией ОС.
+
+Выбрана стадийная реализация: сначала fail-closed device contract и единый 10-мс capture/render worker, затем узкий AEC adapter, offline corpus и физический A/B. `pywebrtc-audio` 0.1.0 принят только как исследовательский кандидат: PyPI wheel `6EEF9065...AE534A`, source commit `9c1c2a2...`, 129 upstream-тестов и локальные ~96× realtime подтверждены, но production lock/voice venv не изменены. Системный Windows backend остаётся вторым кандидатом до фактического APO probe.
+
+Отвергнуты: включение NS/AEC только перед текущим amplitude VAD; использование момента создания WAV как far timing; автоматический выбор первого input при отсутствии Windows default; немедленная замена стабильного обычного голосового режима. Риск следующего этапа — смена output backend может повредить начало речи, FIFO callbacks и barge-in. Поэтому старый путь остаётся fallback до физической приёмки, `live.enabled=false`, а каждый этап проходит synthetic, unit и реальный JBL gate. Подробности: `docs/AUDIO-FULL-DUPLEX-AUDIT.md`.
+
 ## Как добавлять решение
 
 Новая запись должна содержать проблему, выбранный вариант, отвергнутые альтернативы, риски, способ проверки и план отката. Если решение меняет безопасность или пользовательский контракт, требуется согласование Александра.

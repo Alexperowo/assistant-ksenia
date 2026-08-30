@@ -412,14 +412,32 @@ def _audio_devices(settings, speech: SpeechAnnouncer) -> int:
             f"{device.get('index')}: {device.get('name')} — {device.get('host_api')}, "
             f"{device.get('sample_rate')} Гц {marker}"
         )
+    selection_required = len(devices) > 1 and not any(
+        bool(device.get("default")) for device in devices
+    )
+    if selection_required:
+        print(
+            "ВНИМАНИЕ: Windows не выбрала микрофон по умолчанию. "
+            "Укажите имя устройства в voice.wake_device; Ксения не станет "
+            "открывать произвольный вход."
+        )
     spoken_devices = []
     for device in devices[:8]:
         description = _spoken_device_name(device.get("name"))
         if device.get("default"):
             description += ", используется по умолчанию"
         spoken_devices.append(description)
+    spoken_warning = (
+        " Windows не выбрала микрофон по умолчанию. Укажите нужное устройство "
+        "в настройке voice wake device."
+        if selection_required
+        else ""
+    )
     speech.say_and_wait(
-        f"Найдено микрофонов: {len(devices)}. " + "; ".join(spoken_devices) + "."
+        f"Найдено микрофонов: {len(devices)}. "
+        + "; ".join(spoken_devices)
+        + "."
+        + spoken_warning
     )
     return 0
 

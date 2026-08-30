@@ -27,6 +27,7 @@
 - Сквозной performance harness: `trace_id/turn_id/task_id/request_id`, voice→STT→LLM→TTS milestones, cancellation latency, p50/p95 и явные неполные traces без отдельной telemetry-службы.
 - HTTP reader cancellation проверена живьём: socket shutdown не задерживает agent loop синхронным close, cleanup остаётся измеримым до нулевых active/stuck counters.
 - Tool execution имеет коррелированный lifecycle `PLANNED/APPROVED/STARTED/COMPLETED/FAILED/CANCELLED`; workspace search и RAG получили cooperative cancellation в безопасных точках. Mid-operation остановка браузера, Windows UI и будущих sandbox-процессов остаётся следующим слоем, без ложного обещания rollback.
+- Аудиотракт проаудирован отдельно: wake/STT/stop пока переоткрывают input разными workers, а SoundPlayer не предоставляет far-end PCM. Неоднозначный набор входов без Windows default теперь отклоняется fail-closed. `pywebrtc-audio` 0.1.0 прошёл изолированные 129 тестов и CPU-spike, но не установлен в production до общего near/far worker; детали в `docs/AUDIO-FULL-DUPLEX-AUDIT.md`.
 - Память разговора, подтверждённые факты, межролевая передача и гибридный RAG с порогом уверенности и явным `no_match`.
 - Исследование через поиск, изолированный Chromium, стабильный порядок доказательств, приоритет официальных источников и проверку цен.
 - Разработка файлами в `workspace`, Windows Automation, клавиатура, мышь и браузер с неослабляемой политикой и пределом вопросов подтверждения. Запуск команд по умолчанию заблокирован до проверенной ОС-песочницы; `unsafe_host` — только явный legacy-режим.

@@ -64,7 +64,7 @@
 | `speech_text.py` | русское произношение чисел, дат и времени |
 | `media_buttons.py` | AVRCP/медиакнопка как опциональная активация |
 | `resilience.py` | bounded backoff повторяющихся ошибок |
-| `scripts/audio_input.py` | выбор и открытие реального аудиовхода |
+| `scripts/audio_input.py` | выбор и открытие реального аудиовхода; неоднозначный набор без Windows default отклоняется, а не выбирается произвольно |
 | `scripts/wake_worker.py` | дочерний процесс Vosk |
 | `scripts/stt_worker.py`, `stt_service.py` | дочерний/долгоживущий faster-whisper; в opt-in Live сервис дополнительно использует закреплённый Vosk для partial endpointing |
 | `scripts/voice_worker.py` | Silero-синтез и WAV |

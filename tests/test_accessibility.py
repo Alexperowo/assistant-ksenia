@@ -1,11 +1,52 @@
+import io
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
-from butler.cli import _spoken_agent_error, _spoken_device_name, _spoken_microphone_error
+from butler.cli import (
+    _audio_devices,
+    _spoken_agent_error,
+    _spoken_device_name,
+    _spoken_microphone_error,
+)
 from butler.confirmation import confirmation_text
 
 
 class AccessibilityTests(unittest.TestCase):
+    @patch("butler.cli.SpeechRecognizer")
+    def test_device_inventory_warns_when_windows_has_no_default_input(
+        self, recognizer_class
+    ):
+        recognizer_class.return_value.list_devices.return_value = [
+            {
+                "index": 4,
+                "name": "Input A",
+                "host_api": "Windows WASAPI",
+                "sample_rate": 48000,
+                "default": False,
+            },
+            {
+                "index": 5,
+                "name": "Input B",
+                "host_api": "MME",
+                "sample_rate": 44100,
+                "default": False,
+            },
+        ]
+        speech = MagicMock()
+
+        with redirect_stdout(io.StringIO()) as output:
+            result = _audio_devices(SimpleNamespace(), speech)
+
+        self.assertEqual(result, 0)
+        self.assertIn("не выбрала микрофон по умолчанию", output.getvalue())
+        self.assertIn(
+            "не выбрала микрофон по умолчанию",
+            speech.say_and_wait.call_args.args[0],
+        )
+
     def test_microphone_errors_are_actionable_when_spoken(self):
         message = _spoken_microphone_error(RuntimeError("PortAudio device unavailable"))
         self.assertIn("Микрофон недоступен", message)
