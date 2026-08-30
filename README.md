@@ -86,12 +86,13 @@ flowchart LR
 
 На текущей системе Александра с Windows 11, RTX 2080 Ti 22 ГБ и 48 ГБ ОЗУ проверены:
 
-- 363 unit/integration-теста и три дополнительных прогона в случайном порядке;
+- 368 unit/integration-тестов и три дополнительных прогона в случайном порядке;
 - официальный `llama.cpp b10621` (stable v0.3.0), CUDA 12.4, с закреплёнными SHA-256;
 - отдельный закреплённый PoolSide backend commit `06f8ceb` для Laguna/DFlash, с patch provenance и SHA-256 runtime-файлов;
 - конфигурационно-управляемые DFlash, MTP, multimodal projector и квантованный KV;
 - русский TTS → WAV → faster-whisper на CUDA без потери контрольных частей;
 - RAG, LAN, браузерное исследование, процессы и безопасные инструменты;
+- единый near-end `AudioCaptureService`: один input stream на весь `voice-agent`, аутентифицированные 10-мс PCM-подписки для wake/STT/stop и безопасный прежний fallback;
 - программный Live v1: Vosk partial transcripts → hybrid turn detector, поток итогового ответа, barge-in state machine и раздельные generated/spoken ответы; режим остаётся выключенным до живой проверки AEC, микрофона и произвольного речевого barge-in;
 - стадийная установка, резервная копия и откат `llama.cpp`;
 - распаковка release ZIP и изолированный online installer smoke-test.

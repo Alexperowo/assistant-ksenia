@@ -55,7 +55,7 @@ PoolSide используется только профилем, который 
 
 1. Создать отдельную временную venv Python 3.12.
 2. Изменить одну логическую группу зависимостей, а не всё одновременно.
-3. Выполнить импорт, `pip check`, 363+ теста и живые voice/browser/Windows gates.
+3. Выполнить импорт, `pip check`, 368+ тестов и живые voice/browser/Windows gates.
 4. Снять точный `pip freeze` в `requirements/runtime.lock.txt`.
 5. Сверить верхнеуровневые версии с `runtime-assets.lock.json`.
 6. Проверить CUDA Torch и faster-whisper на реальном GPU, затем CPU fallback.

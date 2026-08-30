@@ -9,7 +9,11 @@ import time
 from collections import deque
 from pathlib import Path
 
-from audio_input import open_best_input_stream
+from audio_input import (
+    TOKEN_ENVIRONMENT_KEY,
+    input_stream_ended,
+    open_configured_input_stream,
+)
 from pcm_audio import ratecv, rms
 
 
@@ -52,6 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fallback-model", type=Path, required=True)
     parser.add_argument("--sample-rate", type=int, default=16000)
     parser.add_argument("--audio-device", default="")
+    parser.add_argument("--capture-host", default="")
+    parser.add_argument("--capture-port", type=int, default=0)
     parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
     parser.add_argument("--compute-type", default="int8_float16")
     parser.add_argument("--silence-seconds", type=float, default=0.85)
@@ -152,8 +158,14 @@ def capture_phrase(
         if len(indata):
             audio_queue.put(bytes(indata))
 
-    opened = open_best_input_stream(
-        sd, args.audio_device, callback, target_rate=args.sample_rate
+    opened = open_configured_input_stream(
+        sd,
+        args.audio_device,
+        callback,
+        target_rate=args.sample_rate,
+        capture_host=args.capture_host,
+        capture_port=args.capture_port,
+        capture_token=os.environ.get(TOKEN_ENVIRONMENT_KEY, ""),
     )
     try:
         if before_capture is not None:
@@ -171,7 +183,9 @@ def capture_phrase(
             max_seconds, max(2.0, float(args.no_speech_timeout_seconds))
         )
         resample_state = None
-        pre_roll: deque[bytes] = deque(maxlen=4)
+        pre_roll: deque[bytes] = deque()
+        pre_roll_bytes = 0
+        pre_roll_limit_bytes = args.sample_rate * 2
         captured = bytearray()
         noise_gate = AdaptiveNoiseGate(minimum_threshold=220, multiplier=2.2)
         threshold = noise_gate.threshold
@@ -211,6 +225,8 @@ def capture_phrase(
             try:
                 data = audio_queue.get(timeout=0.5)
             except queue.Empty:
+                if input_stream_ended(opened):
+                    raise RuntimeError("Связь с сервисом микрофона потеряна.")
                 continue
             if opened.sample_rate != args.sample_rate:
                 data, resample_state = ratecv(
@@ -221,7 +237,11 @@ def capture_phrase(
             level_sum += level
             peak_level = max(peak_level, level)
             now = time.monotonic()
-            pre_roll.append(data)
+            if not speech_started:
+                pre_roll.append(data)
+                pre_roll_bytes += len(data)
+                while pre_roll_bytes > pre_roll_limit_bytes and len(pre_roll) > 1:
+                    pre_roll_bytes -= len(pre_roll.popleft())
             voice_active = noise_gate.observe(level) if not speech_started else level >= threshold
             threshold = noise_gate.threshold
             endpoint_observation = None

@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import re
 import sys
 import time
 from pathlib import Path
 
-from audio_input import open_best_input_stream
+from audio_input import (
+    TOKEN_ENVIRONMENT_KEY,
+    input_stream_ended,
+    open_configured_input_stream,
+)
 from pcm_audio import ratecv
 
 
@@ -18,6 +23,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--phrase", default="Ксения слушай")
     parser.add_argument("--sample-rate", type=int, default=16000)
     parser.add_argument("--device", default="")
+    parser.add_argument("--capture-host", default="")
+    parser.add_argument("--capture-port", type=int, default=0)
     parser.add_argument("--timeout", type=int, default=120)
     return parser.parse_args()
 
@@ -50,11 +57,14 @@ def main() -> int:
             if not status:
                 audio_queue.put(bytes(indata))
 
-        opened = open_best_input_stream(
+        opened = open_configured_input_stream(
             sd,
             args.device,
             callback,
             target_rate=args.sample_rate,
+            capture_host=args.capture_host,
+            capture_port=args.capture_port,
+            capture_token=os.environ.get(TOKEN_ENVIRONMENT_KEY, ""),
         )
         model = Model(str(args.model))
         grammar = list(
@@ -99,6 +109,8 @@ def main() -> int:
             try:
                 data = audio_queue.get(timeout=0.5)
             except queue.Empty:
+                if input_stream_ended(opened):
+                    raise RuntimeError("Связь с сервисом микрофона потеряна.")
                 continue
             if opened.sample_rate != args.sample_rate:
                 data, resample_state = ratecv(

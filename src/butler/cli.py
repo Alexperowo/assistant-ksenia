@@ -15,6 +15,7 @@ from typing import Callable, TypeVar
 from butler.chat import ChatError, SentenceChunker, stream_chat
 from butler.approval import approval_explanation
 from butler.atomic_io import atomic_write_text
+from butler.audio_capture import AudioCaptureService, AudioCaptureServiceError
 from butler.confirmation import confirmation_text
 from butler.config import (
     ConfigError,
@@ -745,8 +746,19 @@ def _voice_agent(settings, speech: SpeechAnnouncer) -> int:
 def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
     session = RoutedAgentSession(settings)
     task_store = DurableTaskStore(settings.runtime_dir)
-    recognizer = SpeechRecognizer(settings)
-    wake_listener = WakeListener(settings)
+    capture_service = AudioCaptureService(settings)
+    capture_endpoint = None
+    try:
+        capture_endpoint = capture_service.start()
+    except AudioCaptureServiceError as exc:
+        diagnostic_exception(
+            settings,
+            "voice_agent",
+            "shared_capture_unavailable",
+            exc,
+        )
+    recognizer = SpeechRecognizer(settings, capture_endpoint)
+    wake_listener = WakeListener(settings, capture_endpoint)
     live_config = settings.raw.get("live", {})
     live_enabled = bool(live_config.get("enabled", False))
     live_minimum_phrase_chars = max(
@@ -959,6 +971,8 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
         }:
             if headset_listener is not None:
                 headset_listener.stop()
+            recognizer.close()
+            capture_service.close()
             speech.say_and_wait("Голосовой диалог завершён.")
             return 0
 
@@ -1060,7 +1074,7 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
         live_token = live_output.begin_response(user_text) if live_output else None
 
         def monitor_voice_stop() -> None:
-            stop_listener = WakeListener(settings)
+            stop_listener = WakeListener(settings, capture_endpoint)
             while not task_finished.is_set():
                 if not microphone_gate.monitor_checkpoint(task_finished):
                     return

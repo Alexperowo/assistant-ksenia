@@ -6,14 +6,15 @@
 
 Существующий Live-контур нельзя переписывать: state machine, streaming TTS, hybrid endpointing, barge-in ordering и разделение `generated_text`/`spoken_text` уже реализованы и покрыты тестами. Незакрытая часть находится ниже этого слоя — во владении физическим аудиоустройством и синхронизации near/far PCM.
 
-Сейчас единого `AudioCaptureService` нет. Микрофон последовательно открывают разные процессы:
+В обычном `voice-agent` теперь работает единый `AudioCaptureService`. Один дочерний процесс открывает физический input stream и публикует mono/int16 PCM по 10 мс через ограниченные очереди. `wake_worker.py`, `stt_service.py`, Vosk fallback и busy stop-monitor подключаются как потребители к одному локальному потоку:
 
-1. `wake_worker.py` слушает wake/stop через Vosk и закрывает устройство.
-2. `stt_service.py` открывает его заново, записывает команду и закрывает.
-3. Во время agent/TTS отдельный `wake_worker.py` снова открывает вход и распознаёт только wake/stop grammar.
-4. Для голосового подтверждения `MicrophoneCaptureGate` останавливает monitor worker, ждёт освобождения устройства и передаёт его STT.
+1. Родитель запускает capture worker и получает случайный 256-битный ключ только в памяти.
+2. Worker слушает только loopback; ключ передаётся дочерним потребителям через environment, не попадает в argv, repr или журнал.
+3. Каждый подписчик получает только будущие 10-мс кадры; его очередь ограничена двумя секундами и при отставании отбрасывает старейшие кадры.
+4. `MicrophoneCaptureGate` по-прежнему сериализует stop-monitor и голосовое подтверждение, но переключает подписчиков, не переоткрывая Bluetooth endpoint.
+5. Если общий worker не запустился, старый локальный путь остаётся безопасным fallback и сохраняет прежний gate.
 
-Эта схема защищена от одновременного открытия микрофона, но не является постоянным full-duplex. Она добавляет handoff/open latency, не поддерживает произвольный речевой barge-in и не даёт AEC общей шкалы near/far кадров.
+Это устраняет повторное открытие input внутри штатного голосового сеанса и создаёт общую монотонную сетку near-end кадров. Это ещё не полный full-duplex: произвольный речевой barge-in не подключён, а TTS пока не публикует far-end PCM.
 
 TTS-сервис синтезирует WAV, затем отдельный PowerShell-процесс проигрывает его через `System.Media.SoundPlayer`. Родитель видит software-события начала/конца, но capture path не получает тот PCM, который реально поступил в render buffer. Поэтому подключить AEC3 только перед VAD недостаточно: far reference отсутствует и не синхронизирован.
 
@@ -26,8 +27,8 @@ TTS-сервис синтезирует WAV, затем отдельный Power
 | LLM cancellation | DONE | живой Laguna/PoolSide gate, 500–657 мс до отмены |
 | Keyword/headset barge-in | PARTIAL | stop monitor работает, но распознаёт grammar wake/stop, а не произвольную речь |
 | Hybrid turn detection | DONE для записываемой команды | Vosk partial + amplitude gate + semantic timing; не работает постоянно во время TTS |
-| Единоличное владение устройством | PARTIAL | `MicrophoneCaptureGate` предотвращает гонку monitor/confirmation, но физический stream переоткрывается разными workers |
-| `AudioCaptureService` / ring buffer | MISSING | общей подписки wake/VAD/STT/Live нет |
+| Единоличное владение устройством | DONE для `voice-agent` | один capture worker владеет endpoint; wake/STT/stop переключают подписки, fallback сохраняет прежний gate |
+| `AudioCaptureService` / ring buffer | DONE для near-end | loopback + случайный ключ, точные 10-мс mono/int16 frames, bounded drop-oldest queues и обнаружение разрыва |
 | AEC | MISSING | нет системной проверки APO и нет WebRTC far reference |
 | Noise suppression / AGC | MISSING | amplitude noise gate не является NS/AGC |
 | Input/output device profile | PARTIAL | строковый `wake_device` теперь можно доступно и атомарно выбрать по устойчивому фрагменту имени; пары endpoint id/output/echo delay ещё нет |
@@ -39,7 +40,9 @@ TTS-сервис синтезирует WAV, затем отдельный Power
 
 Минимальное исправление сделано fail-closed: если selector пуст, default input отсутствует и входов несколько, Ксения просит выбрать `voice.wake_device` и не открывает произвольное устройство. Один-единственный вход по-прежнему выбирается автоматически. Ярлык списка микрофонов принимает уникальную часть имени, валидирует её по текущему списку и атомарно сохраняет личную настройку; неоднозначность и отсутствие совпадения не меняют конфигурацию. PortAudio index намеренно не сохраняется. Имена JBL, индексы и пути машины в код не добавлены.
 
-Живая проверка 30 августа 2026 года на подключённой Bluetooth-гарнитуре открыла default MME, явный WASAPI и WDM-KS без ошибок, но все три пути дали почти цифровой ноль (`peak 0`, `58` и `37` при пороге `220`). Следовательно, текущий отказ произошёл до Whisper и не доказывает дефект STT. До проверки индикатора входа Windows, аппаратного mute и Bluetooth multipoint менять приоритет host API или пороги нельзя.
+Живая проверка 30 августа 2026 года на подключённой Bluetooth-гарнитуре открыла default MME, явный WASAPI и WDM-KS без ошибок, но все три пути дали почти цифровой ноль (`peak 0`, `58` и `37` при пороге `220`). Новый общий worker затем отдал подписчику 200 точных кадров `320 bytes / 16 kHz` и штатно закрылся, но сигнал снова имел только `peak=5`. Следовательно, текущий отказ произошёл до Whisper и не доказывает дефект STT. До проверки индикатора входа Windows, аппаратного mute и Bluetooth multipoint менять приоритет host API или пороги нельзя.
+
+Настоящие desktop-ярлыки запуска и остановки также пройдены. START создал валидный state, один физический capture worker, постоянный faster-whisper CUDA service и wake subscriber на одном loopback port. STOP удалил state и весь процессный подграф без оставшегося аудиосервиса.
 
 ## AEC-кандидаты
 
@@ -68,11 +71,11 @@ Microsoft sample требует Windows build 22540+; текущая машин�
 
 ## Минимальная последовательность реализации
 
-1. **Device contract.** Хранить не индекс, а пользовательское предпочтение и фактически открытый endpoint; fail-closed при неоднозначности. Логировать input/output endpoint, sample rate, block size и open latency без записи звука.
-2. **Единый audio worker.** Один процесс физически владеет input stream и публикует 10-мс monotonic frames в ограниченный ring buffer. Wake, VAD, partial STT и final recorder становятся потребителями, а не владельцами устройства. Старый путь сохраняется как fallback до приёмки.
+1. **Device contract — DONE для input.** Хранится не индекс, а пользовательское предпочтение и фактически открытый endpoint; неоднозначность даёт fail-closed. В журнале есть input endpoint, sample rate, frame size и startup latency без записи звука.
+2. **Единый near-end worker — DONE для `voice-agent`.** Один процесс владеет input stream и публикует 10-мс frames в ограниченные очереди. Wake, partial/final STT и stop-monitor являются потребителями. Старый путь сохранён как fallback.
 3. **Render reference.** Перевести Live playback на backend, который принимает PCM Silero и одновременно кладёт фактически отправленные render frames в тот же audio worker. Нельзя считать момент генерации WAV моментом воспроизведения.
 4. **AEC adapter.** Подключить backend через узкий интерфейс. Сначала offline synthetic corpus, затем реальный A/B Windows APO против закреплённого WebRTC wheel. NS и AGC включать отдельно и сравнивать STT, чтобы не ухудшить окончания.
 5. **Calibration profile.** Только если измерения показывают пользу: `input_endpoint`, `output_endpoint`, sample rates, estimated echo delay и AEC settings. При смене устройства профиль не переиспользовать вслепую.
 6. **Physical acceptance.** Наушники, затем JBL-динамики: 20–30 ходов, паузы 1–2 секунды, произвольный barge-in, отсутствие self-interrupt, `interrupt_detected → audio_actually_stopped`, корректный spoken prefix.
 
-`live.enabled` остаётся `false` по умолчанию, пока пункты 2–6 не приняты на реальном устройстве. Установка DSP-библиотеки сама по себе не считается готовым AEC.
+`live.enabled` остаётся `false` по умолчанию, пока пункты 3–6 не приняты на реальном устройстве. Установка DSP-библиотеки сама по себе не считается готовым AEC.

@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import json
+import socket
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable
+
+
+TOKEN_ENVIRONMENT_KEY = "KSENIA_AUDIO_CAPTURE_TOKEN"
 
 
 @dataclass
@@ -19,6 +25,61 @@ class OpenedInput:
             self.stream.stop()
         finally:
             self.stream.close()
+
+
+class RemoteInputStream:
+    """PortAudio-compatible reader for the authenticated local capture worker."""
+
+    def __init__(
+        self,
+        connection: socket.socket,
+        callback: Callable[..., None],
+        frame_bytes: int,
+    ) -> None:
+        self._connection = connection
+        self._callback = callback
+        self._frame_bytes = frame_bytes
+        self._stopped = threading.Event()
+        self.ended = threading.Event()
+        self._thread = threading.Thread(target=self._read_frames, daemon=True)
+        self._thread.start()
+
+    def _read_exact(self, size: int) -> bytes:
+        chunks = bytearray()
+        while len(chunks) < size and not self._stopped.is_set():
+            try:
+                chunk = self._connection.recv(size - len(chunks))
+            except OSError:
+                break
+            if not chunk:
+                break
+            chunks.extend(chunk)
+        return bytes(chunks)
+
+    def _read_frames(self) -> None:
+        try:
+            while not self._stopped.is_set():
+                data = self._read_exact(self._frame_bytes)
+                if len(data) != self._frame_bytes:
+                    return
+                self._callback(data, len(data) // 2, None, None)
+        finally:
+            self.ended.set()
+
+    def stop(self) -> None:
+        if self._stopped.is_set():
+            return
+        self._stopped.set()
+        try:
+            self._connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self._connection.close()
+        if self._thread is not threading.current_thread():
+            self._thread.join(timeout=2)
+
+    def close(self) -> None:
+        self.stop()
 
 
 def _host_api_name(sd, info: dict[str, Any]) -> str:
@@ -159,3 +220,81 @@ def open_best_input_stream(
 
     detail = "; ".join(attempts[-8:])
     raise RuntimeError(f"Не удалось открыть микрофон. Проверенные режимы: {detail}")
+
+
+def open_remote_input_stream(
+    host: str,
+    port: int,
+    token: str,
+    callback: Callable[..., None],
+    *,
+    timeout: float = 5.0,
+) -> OpenedInput:
+    """Subscribe to PCM from the single local microphone owner."""
+    if host not in {"127.0.0.1", "::1", "localhost"}:
+        raise RuntimeError("Удалённый аудиозахват разрешён только через loopback.")
+    if not token or len(token) < 32:
+        raise RuntimeError("Отсутствует ключ локального аудиозахвата.")
+    connection = socket.create_connection((host, int(port)), timeout=timeout)
+    try:
+        connection.sendall(token.encode("ascii") + b"\n")
+        header = bytearray()
+        while len(header) <= 8192:
+            chunk = connection.recv(1)
+            if not chunk or chunk == b"\n":
+                break
+            header.extend(chunk)
+        header_line = bytes(header)
+        if not header_line or len(header_line) > 8192:
+            raise RuntimeError("Сервис аудиозахвата не вернул корректный заголовок.")
+        header = json.loads(header_line.decode("utf-8"))
+        if header.get("event") != "subscribed":
+            raise RuntimeError(str(header.get("error", "Подписка на микрофон отклонена.")))
+        frame_bytes = int(header.get("frame_bytes", 0))
+        sample_rate = int(header.get("sample_rate", 0))
+        if frame_bytes <= 0 or sample_rate <= 0:
+            raise RuntimeError("Сервис аудиозахвата вернул повреждённый формат PCM.")
+        connection.settimeout(None)
+        stream = RemoteInputStream(connection, callback, frame_bytes)
+        return OpenedInput(
+            stream=stream,
+            device_index=int(header.get("device_index", -1)),
+            device_name=str(header.get("device_name", "AudioCaptureService")),
+            host_api=str(header.get("host_api", "local capture service")),
+            sample_rate=sample_rate,
+            failed_attempts=tuple(header.get("failed_attempts", [])),
+            candidate_count=int(header.get("candidate_count", 1)),
+        )
+    except Exception:
+        connection.close()
+        raise
+
+
+def open_configured_input_stream(
+    sd,
+    selector: str,
+    callback: Callable[..., None],
+    *,
+    target_rate: int = 16000,
+    capture_host: str = "",
+    capture_port: int = 0,
+    capture_token: str = "",
+) -> OpenedInput:
+    if capture_port:
+        return open_remote_input_stream(
+            capture_host or "127.0.0.1",
+            capture_port,
+            capture_token,
+            callback,
+        )
+    return open_best_input_stream(
+        sd,
+        selector,
+        callback,
+        target_rate=target_rate,
+    )
+
+
+def input_stream_ended(opened: OpenedInput) -> bool:
+    ended = getattr(opened.stream, "ended", None)
+    return bool(ended is not None and ended.is_set())

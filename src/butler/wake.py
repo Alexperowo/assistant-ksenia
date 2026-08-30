@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from collections.abc import Iterator
 
+from butler.audio_capture import CaptureEndpoint
 from butler.config import Settings
 from butler.diagnostics import event as diagnostic_event
 from butler.diagnostics import exception as diagnostic_exception
@@ -88,7 +89,11 @@ class MicrophoneCaptureGate:
 
 
 class WakeListener:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        capture_endpoint: CaptureEndpoint | None = None,
+    ) -> None:
         self.settings = settings
         voice = settings.raw.get("voice", {})
         self.root = settings.root
@@ -99,6 +104,7 @@ class WakeListener:
         self.phrase = str(voice.get("wake_word", "Ксения слушай"))
         self.sample_rate = int(voice.get("wake_sample_rate", 16000))
         self.device = str(voice.get("wake_device", ""))
+        self.capture_endpoint = capture_endpoint
 
     def wait_event(
         self,
@@ -125,25 +131,32 @@ class WakeListener:
             requested_device=self.device,
         )
         try:
-            worker_env = os.environ.copy()
+            worker_env = (
+                self.capture_endpoint.child_environment()
+                if self.capture_endpoint is not None
+                else os.environ.copy()
+            )
             worker_env["PYTHONIOENCODING"] = "utf-8"
             worker_env["PYTHONUTF8"] = "1"
+            command = [
+                str(self.python),
+                "-u",
+                str(self.worker),
+                "--model",
+                str(self.model),
+                "--phrase",
+                self.phrase,
+                "--sample-rate",
+                str(self.sample_rate),
+                "--device",
+                self.device,
+                "--timeout",
+                str(timeout),
+            ]
+            if self.capture_endpoint is not None:
+                command.extend(self.capture_endpoint.command_arguments())
             process = subprocess.Popen(
-                [
-                    str(self.python),
-                    "-u",
-                    str(self.worker),
-                    "--model",
-                    str(self.model),
-                    "--phrase",
-                    self.phrase,
-                    "--sample-rate",
-                    str(self.sample_rate),
-                    "--device",
-                    self.device,
-                    "--timeout",
-                    str(timeout),
-                ],
+                command,
                 cwd=str(self.root),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

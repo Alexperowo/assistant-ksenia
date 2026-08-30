@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from butler.audio_capture import CaptureEndpoint
 from butler.config import Settings
 from butler.diagnostics import current_trace_fields
 from butler.diagnostics import event as diagnostic_event
@@ -51,7 +52,11 @@ def _audio_telemetry(event: dict[str, object]) -> dict[str, object]:
 
 
 class SpeechRecognizer:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        capture_endpoint: CaptureEndpoint | None = None,
+    ) -> None:
         self.settings = settings
         voice = settings.raw.get("voice", {})
         self.root = settings.root
@@ -101,6 +106,7 @@ class SpeechRecognizer:
         self._request_trace_lock = threading.Lock()
         self._request_trace_fields: dict[str, dict[str, str]] = {}
         self._partial_milestones: set[str] = set()
+        self.capture_endpoint = capture_endpoint
         atexit.register(self.close)
 
     def _read_service(self, process: subprocess.Popen[str]) -> None:
@@ -239,6 +245,8 @@ class SpeechRecognizer:
                     str(self.turn_incomplete_silence_seconds),
                 ]
             )
+        if self.capture_endpoint is not None:
+            command.extend(self.capture_endpoint.command_arguments())
         return command
 
     def _start_service(self) -> bool:
@@ -263,6 +271,14 @@ class SpeechRecognizer:
                     self._events.get_nowait()
                 except queue.Empty:
                     break
+            worker_env = (
+                self.capture_endpoint.child_environment()
+                if self.capture_endpoint is not None
+                else os.environ.copy()
+            )
+            worker_env.update(
+                {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+            )
             self._service = subprocess.Popen(
                 self._service_command(),
                 cwd=str(self.root),
@@ -272,7 +288,7 @@ class SpeechRecognizer:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                env={**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"},
+                env=worker_env,
                 bufsize=1,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
@@ -534,25 +550,30 @@ class SpeechRecognizer:
             max_seconds=max_seconds,
         )
         try:
+            worker_command = [
+                str(self.python),
+                "-u",
+                str(self.worker),
+                "--model",
+                str(self.model),
+                "--sample-rate",
+                str(self.sample_rate),
+                "--device",
+                self.device,
+                "--max-seconds",
+                str(max_seconds),
+                "--no-speech-timeout-seconds",
+                str(self.no_speech_timeout_seconds),
+            ]
             worker_env = os.environ.copy()
-            worker_env["PYTHONIOENCODING"] = "utf-8"
-            worker_env["PYTHONUTF8"] = "1"
+            if self.capture_endpoint is not None:
+                worker_command.extend(self.capture_endpoint.command_arguments())
+                worker_env = self.capture_endpoint.child_environment()
+            worker_env.update(
+                {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+            )
             result = subprocess.run(
-                [
-                    str(self.python),
-                    "-u",
-                    str(self.worker),
-                    "--model",
-                    str(self.model),
-                    "--sample-rate",
-                    str(self.sample_rate),
-                    "--device",
-                    self.device,
-                    "--max-seconds",
-                    str(max_seconds),
-                    "--no-speech-timeout-seconds",
-                    str(self.no_speech_timeout_seconds),
-                ],
+                worker_command,
                 cwd=str(self.root),
                 capture_output=True,
                 text=True,

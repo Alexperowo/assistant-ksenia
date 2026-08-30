@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import sys
 import time
 from pathlib import Path
 
-from audio_input import open_best_input_stream
+from audio_input import (
+    TOKEN_ENVIRONMENT_KEY,
+    input_stream_ended,
+    open_configured_input_stream,
+)
 from pcm_audio import ratecv, rms
 
 
@@ -16,6 +21,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--sample-rate", type=int, default=16000)
     parser.add_argument("--device", default="")
+    parser.add_argument("--capture-host", default="")
+    parser.add_argument("--capture-port", type=int, default=0)
     parser.add_argument("--max-seconds", type=int, default=25)
     parser.add_argument("--no-speech-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--silence-seconds", type=float, default=1.3)
@@ -41,11 +48,14 @@ def main() -> int:
             if len(indata):
                 audio_queue.put(bytes(indata))
 
-        opened = open_best_input_stream(
+        opened = open_configured_input_stream(
             sd,
             args.device,
             callback,
             target_rate=args.sample_rate,
+            capture_host=args.capture_host,
+            capture_port=args.capture_port,
+            capture_token=os.environ.get(TOKEN_ENVIRONMENT_KEY, ""),
         )
         recognizer = KaldiRecognizer(Model(str(args.model)), args.sample_rate)
         capture_started_at = time.monotonic()
@@ -72,6 +82,8 @@ def main() -> int:
             try:
                 data = audio_queue.get(timeout=0.5)
             except queue.Empty:
+                if input_stream_ended(opened):
+                    raise RuntimeError("Связь с сервисом микрофона потеряна.")
                 continue
             if opened.sample_rate != args.sample_rate:
                 data, resample_state = ratecv(
