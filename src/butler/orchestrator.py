@@ -23,7 +23,11 @@ from butler.diagnostics import new_trace_id, trace_scope
 from butler.fast_intents import fast_intent_reply
 from butler.handoff import RoleHandoffStore
 from butler.instance_lock import SingleInstance
-from butler.model_manager import ModelManager, ModelManagerError
+from butler.model_manager import (
+    ModelManager,
+    ModelManagerError,
+    ModelResidencyCoordinator,
+)
 from butler.research import ResearchCoordinator, is_web_research_request
 from butler.tasking import TaskCancelled, TaskControl
 from butler.tools import ToolResult, tool_schemas
@@ -172,7 +176,8 @@ class RoutedAgentSession:
         self.settings = settings
         self.manager = ModelManager(settings)
         self.session = AgentSession(settings)
-        self.research = ResearchCoordinator(settings)
+        self.residency = ModelResidencyCoordinator(settings)
+        self.research = ResearchCoordinator(settings, self._research_model())
         self.handoffs = RoleHandoffStore(settings.runtime_dir)
         self.trusted_tasks = TrustedTaskStore(settings)
         diagnostic_event(self.settings, "orchestrator", "session_ready")
@@ -645,104 +650,28 @@ class RoutedAgentSession:
                     )
                     emit_trusted_status(TRUSTED_TASK_FINISHED)
 
-    def _ask_exclusive(
+    def _run_primary_route(
         self,
         text: str,
         *,
-        confirmed: bool = False,
-        max_steps: int = 8,
-        on_status: StatusCallback | None = None,
-        on_confirmation: ConfirmationCallback | None = None,
-        control: TaskControl | None = None,
-        on_final_delta: FinalDeltaCallback | None = None,
+        confirmed: bool,
+        max_steps: int,
+        on_status: StatusCallback | None,
+        on_confirmation: ConfirmationCallback | None,
+        control: TaskControl | None,
+        on_final_delta: FinalDeltaCallback | None,
+        task_id: str | None,
+        request_started: float,
+        planner_available: bool,
+        needs_plan: bool,
+        direct_conversation: bool,
+        assistant_model: str,
+        execution_model: str,
+        planning_model: str,
     ) -> AgentReply:
-        request_started = time.monotonic()
-        self.session.tools.begin_task()
-        task_id = control.task_id if control is not None else None
-        if task_id:
-            self.handoffs.append(
-                task_id,
-                "assistant",
-                "request",
-                text,
-                metadata={"durable_task": True},
-            )
+        """Run one primary-service route while the caller owns the residency window."""
+
         plan = ""
-        fast_reply = fast_intent_reply(text)
-        web_research = is_web_research_request(text)
-        planner_available = self._planner_available()
-        needs_plan = self._needs_plan(text)
-        direct_conversation = self._is_direct_conversation(text)
-        assistant_model = self._assistant_model()
-        research_model = self._research_model()
-        execution_model = self._execution_model()
-        planning_model = self._planning_model()
-        diagnostic_event(
-            self.settings,
-            "orchestrator",
-            "route_selected",
-            request=text,
-            planner_available=planner_available,
-            needs_plan=needs_plan,
-            direct_conversation=direct_conversation,
-            fast_intent=fast_reply is not None,
-            web_research=web_research,
-            assistant_model=assistant_model,
-            research_model=research_model,
-            execution_model=execution_model,
-            planning_model=planning_model,
-            max_steps=max_steps,
-        )
-        if fast_reply is not None:
-            self.session.record_exchange(text, fast_reply)
-            if on_final_delta is not None:
-                on_final_delta(fast_reply)
-            if task_id:
-                self.handoffs.append(task_id, "assistant", "result", fast_reply)
-            diagnostic_event(
-                self.settings,
-                "orchestrator",
-                "fast_intent_completed",
-                duration_ms=round((time.monotonic() - request_started) * 1000),
-                answer=fast_reply,
-            )
-            return AgentReply(fast_reply, ())
-        if web_research:
-            if not self.manager.is_current(research_model):
-                if on_status:
-                    on_status("Запускаю модель-исследователя")
-                self.manager.start(research_model)
-            try:
-                reply = self.research.run(
-                    text,
-                    self.session,
-                    confirmed=confirmed,
-                    on_status=on_status,
-                    control=control,
-                )
-                if on_final_delta is not None:
-                    on_final_delta(reply.text)
-                if task_id:
-                    self.handoffs.append(
-                        task_id,
-                        "researcher",
-                        "result",
-                        reply.text,
-                        metadata={
-                            "model_role": research_model,
-                            "tool_event_count": len(reply.tool_events),
-                        },
-                    )
-                return reply
-            except Exception as exc:
-                diagnostic_exception(
-                    self.settings,
-                    "orchestrator",
-                    "research_failed",
-                    exc,
-                    duration_ms=round((time.monotonic() - request_started) * 1000),
-                )
-                raise
         if planner_available and needs_plan:
             try:
                 plan = self._make_plan(
@@ -819,7 +748,11 @@ class RoutedAgentSession:
                     "result",
                     reply.text,
                     metadata={
-                        "model_role": execution_model if not direct_conversation or plan else assistant_model,
+                        "model_role": (
+                            execution_model
+                            if not direct_conversation or plan
+                            else assistant_model
+                        ),
                         "plan_used": bool(plan),
                         "tool_event_count": len(reply.tool_events),
                     },
@@ -844,3 +777,128 @@ class RoutedAgentSession:
             tool_event_count=len(reply.tool_events),
         )
         return reply
+
+    def _ask_exclusive(
+        self,
+        text: str,
+        *,
+        confirmed: bool = False,
+        max_steps: int = 8,
+        on_status: StatusCallback | None = None,
+        on_confirmation: ConfirmationCallback | None = None,
+        control: TaskControl | None = None,
+        on_final_delta: FinalDeltaCallback | None = None,
+    ) -> AgentReply:
+        request_started = time.monotonic()
+        self.session.tools.begin_task()
+        task_id = control.task_id if control is not None else None
+        if task_id:
+            self.handoffs.append(
+                task_id,
+                "assistant",
+                "request",
+                text,
+                metadata={"durable_task": True},
+            )
+        fast_reply = fast_intent_reply(text)
+        web_research = is_web_research_request(text)
+        planner_available = self._planner_available()
+        needs_plan = self._needs_plan(text)
+        direct_conversation = self._is_direct_conversation(text)
+        assistant_model = self._assistant_model()
+        research_model = self._research_model()
+        execution_model = self._execution_model()
+        planning_model = self._planning_model()
+        diagnostic_event(
+            self.settings,
+            "orchestrator",
+            "route_selected",
+            request=text,
+            planner_available=planner_available,
+            needs_plan=needs_plan,
+            direct_conversation=direct_conversation,
+            fast_intent=fast_reply is not None,
+            web_research=web_research,
+            assistant_model=assistant_model,
+            research_model=research_model,
+            execution_model=execution_model,
+            planning_model=planning_model,
+            max_steps=max_steps,
+        )
+        if fast_reply is not None:
+            self.session.record_exchange(text, fast_reply)
+            if on_final_delta is not None:
+                on_final_delta(fast_reply)
+            if task_id:
+                self.handoffs.append(task_id, "assistant", "result", fast_reply)
+            diagnostic_event(
+                self.settings,
+                "orchestrator",
+                "fast_intent_completed",
+                duration_ms=round((time.monotonic() - request_started) * 1000),
+                answer=fast_reply,
+            )
+            return AgentReply(fast_reply, ())
+        if web_research:
+            research_manager = ModelManager.for_role(self.settings, research_model)
+            primary_lease = None
+            try:
+                if research_model in self.settings.resident_model_roles():
+                    self.residency.activate_residents()
+                else:
+                    primary_lease = self.residency.suspend_residents_for_primary()
+                if not research_manager.is_current(research_model):
+                    if on_status:
+                        on_status("Запускаю модель-исследователя")
+                    research_manager.start(research_model)
+                reply = self.research.run(
+                    text,
+                    self.session,
+                    confirmed=confirmed,
+                    on_status=on_status,
+                    control=control,
+                )
+                if on_final_delta is not None:
+                    on_final_delta(reply.text)
+                if task_id:
+                    self.handoffs.append(
+                        task_id,
+                        "researcher",
+                        "result",
+                        reply.text,
+                        metadata={
+                            "model_role": research_model,
+                            "tool_event_count": len(reply.tool_events),
+                        },
+                    )
+                return reply
+            except Exception as exc:
+                diagnostic_exception(
+                    self.settings,
+                    "orchestrator",
+                    "research_failed",
+                    exc,
+                    duration_ms=round((time.monotonic() - request_started) * 1000),
+                )
+                raise
+            finally:
+                if primary_lease is not None:
+                    self.residency.restore_after_primary(primary_lease)
+        with self.residency.primary_window():
+            return self._run_primary_route(
+                text,
+                confirmed=confirmed,
+                max_steps=max_steps,
+                on_status=on_status,
+                on_confirmation=on_confirmation,
+                control=control,
+                on_final_delta=on_final_delta,
+                task_id=task_id,
+                request_started=request_started,
+                planner_available=planner_available,
+                needs_plan=needs_plan,
+                direct_conversation=direct_conversation,
+                assistant_model=assistant_model,
+                execution_model=execution_model,
+                planning_model=planning_model,
+            )

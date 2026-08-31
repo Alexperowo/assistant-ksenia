@@ -14,10 +14,22 @@ from butler.research import (
     is_web_research_request,
     select_research_mode,
 )
+from butler.config import load_settings
 from butler.tools import ToolResult
 
 
 class ResearchTests(unittest.TestCase):
+    def test_fast_research_profile_resolves_stage_service_and_reasoning_mode(self):
+        coordinator = ResearchCoordinator(load_settings(), "research_fast")
+
+        query = coordinator._model_kwargs("query")
+        synthesis = coordinator._model_kwargs("synthesis_normal")
+
+        self.assertEqual(query["service"].port, 18083)
+        self.assertEqual(query["request_mode"].name, "fast")
+        self.assertFalse(query["request_mode"].enable_thinking)
+        self.assertEqual(synthesis["request_mode"].name, "deliberate")
+        self.assertTrue(synthesis["request_mode"].enable_thinking)
     def test_explicit_official_site_request_uses_research_route(self):
         self.assertTrue(
             is_web_research_request(

@@ -159,6 +159,15 @@
       "review_mode": "deliberate",
       "max_revisions": 1,
       "review_max_tokens": 512
+    },
+    "research_request_modes": {
+      "research_fast": {
+        "query": "fast",
+        "synthesis_fast": "fast",
+        "synthesis_normal": "deliberate",
+        "synthesis_deep": "deliberate",
+        "verification": "deliberate"
+      }
     }
   },
   "generation": {
@@ -198,7 +207,7 @@
     "researcher": {
       "label": "Исследователь",
       "purpose": "Поиск в интернете, проверка источников, сравнение товаров, цен и фактов.",
-      "primary_model": "generalist",
+      "primary_model": "research_fast",
       "candidate_model": null,
       "enabled": true
     },

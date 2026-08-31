@@ -4,11 +4,12 @@
 
 ## Не выпущено — 31 августа 2026
 
-- Added: UI-Mate 9B Q4_K_M + projector и Agents-A1 4B Q4_K_M закреплены как экспериментальная быстрая пара на независимых защищённых model services 18082/18083; основные функциональные роли пока не переключены.
+- Added: UI-Mate 9B Q4_K_M + projector и Agents-A1 4B Q4_K_M закреплены как экспериментальная быстрая пара на независимых защищённых model services 18082/18083; роль web-researcher переключена на Agents-A1 после живой проверки.
 - Added: `ResidentModelPool` управляет разными PID/state, откатывает частичный запуск и не завершает неизвестного владельца порта. Живой dual-start подтвердил два фактических контекста 16K и штатное освобождение обоих процессов.
 - Added: декларативные FAST/DELIBERATE request modes. Agents-A1 deliberate использует измеренный budget 256; UI deliberate — независимый cross-review с максимум одной коррекцией вместо нестабильного native thinking.
 - Security: UI-Mate возвращает только типизированный read-only `ActionProposal`; строгий XML/JSON parser блокирует неизвестный tool, лишние действия, повреждённые параметры и координаты вне 0–999. Reviewer не заменяет Permission Broker, физическое исполнение не подключено.
-- Tests: быстрый слой содержит 384 уникальных теста без warnings; добавлены service/state isolation, pool rollback, endpoint/request payload, UI protocol и deliberation regressions.
+- Added: `ModelResidencyCoordinator` взаимоисключает малую пару и primary-модель, восстанавливает точный прежний набор и откатывает частичный сбой. Этапы web research выбирают FAST/DELIBERATE декларативно.
+- Tests: быстрый слой содержит 393 уникальных теста без warnings; добавлены service/state isolation, pool/coordinator rollback, endpoint/request payload, research routing, UI protocol и deliberation regressions.
 
 - Added: выключенные `heavy_candidate` Laguna S 2.1 и `quality_candidate` Ornith Quality Q6_K закреплены точными source commit/size/SHA-256; функциональные роли не менялись.
 - Benchmark: одинаковый семисценарный A/B сравнил Laguna S DFlash off/Q4/BF16, conFIGur8tor Ornith MTP off/n=1/n=2/n=4, Qwen MTP off/n=2 и Ornith Quality. Qwen n=2 сохранил 72,12% acceptance и небольшой выигрыш; Laguna S DFlash и conFIGur8tor MTP замедлили ответы, поэтому кандидаты по умолчанию запускаются без speculative acceleration.

@@ -3,18 +3,172 @@ import hashlib
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from butler.config import load_settings, reasoning_arguments
 from butler.model_manager import (
     ModelManager,
     ModelManagerError,
+    ModelResidencyCoordinator,
     ResidentModelPool,
+    ResidencyLease,
     RuntimeState,
 )
 
 
 class ModelManagerTests(unittest.TestCase):
+    def test_residency_coordinator_stops_primary_before_starting_fast_pool(self):
+        coordinator = ModelResidencyCoordinator(load_settings())
+        primary_state = RuntimeState(
+            pid=20,
+            role="generalist",
+            executable="llama-server.exe",
+            model="main.gguf",
+            started_at="2026-08-31T00:00:00+00:00",
+        )
+        resident_states = {"ui_butler": object(), "research_fast": object()}
+        call_order = []
+        with (
+            patch.object(
+                coordinator.primary, "running_state", return_value=primary_state
+            ),
+            patch.object(
+                coordinator.primary,
+                "stop",
+                side_effect=lambda: call_order.append("primary_stop") or True,
+            ),
+            patch.object(coordinator.primary, "_port_open", return_value=False),
+            patch.object(
+                coordinator.residents,
+                "start_all",
+                side_effect=lambda: call_order.append("residents_start")
+                or resident_states,
+            ),
+        ):
+            self.assertEqual(coordinator.activate_residents(), resident_states)
+
+        self.assertEqual(call_order, ["primary_stop", "residents_start"])
+
+    def test_residency_coordinator_restores_primary_if_fast_pool_fails(self):
+        settings = load_settings()
+        coordinator = ModelResidencyCoordinator(settings)
+        primary_state = RuntimeState(
+            pid=20,
+            role="generalist",
+            executable="llama-server.exe",
+            model="main.gguf",
+            started_at="2026-08-31T00:00:00+00:00",
+        )
+        with (
+            patch.object(coordinator.primary, "running_state", return_value=primary_state),
+            patch.object(coordinator.primary, "stop", return_value=True),
+            patch.object(coordinator.primary, "_port_open", return_value=False),
+            patch.object(coordinator.primary, "start") as restart,
+            patch.object(
+                coordinator.residents,
+                "start_all",
+                side_effect=ModelManagerError("resident start failed"),
+            ),
+        ):
+            with self.assertRaisesRegex(ModelManagerError, "resident start failed"):
+                coordinator.activate_residents()
+
+        restart.assert_called_once_with("generalist")
+
+    def test_residency_coordinator_rolls_back_partial_suspend(self):
+        settings = load_settings()
+        coordinator = ModelResidencyCoordinator(settings)
+        ui_manager = Mock()
+        ui_manager.running_state.return_value = object()
+        ui_manager.stop.return_value = True
+        ui_manager._port_open.return_value = False
+        research_manager = Mock()
+        research_manager.running_state.return_value = object()
+        research_manager.stop.return_value = True
+        research_manager._port_open.return_value = True
+        managers = {"ui_butler": ui_manager, "research_fast": research_manager}
+        with (
+            patch.object(
+                coordinator.residents,
+                "running_states",
+                return_value={"ui_butler": object(), "research_fast": object()},
+            ),
+            patch.object(
+                coordinator.residents,
+                "manager",
+                side_effect=lambda role: managers[role],
+            ),
+        ):
+            with self.assertRaisesRegex(ModelManagerError, "не освободил локальный порт"):
+                coordinator.suspend_residents_for_primary()
+
+        ui_manager.start.assert_not_called()
+        research_manager.start.assert_called_once_with("research_fast")
+
+    def test_primary_window_restores_exact_previous_resident_set(self):
+        coordinator = ModelResidencyCoordinator(load_settings())
+        lease = ResidencyLease(("research_fast",))
+        with (
+            patch.object(
+                coordinator, "suspend_residents_for_primary", return_value=lease
+            ) as suspend,
+            patch.object(coordinator, "restore_after_primary", return_value={}) as restore,
+        ):
+            with coordinator.primary_window() as active:
+                self.assertEqual(active, lease)
+
+        suspend.assert_called_once_with()
+        restore.assert_called_once_with(lease)
+
+    def test_restore_after_primary_stops_primary_before_exact_resident_set(self):
+        coordinator = ModelResidencyCoordinator(load_settings())
+        lease = ResidencyLease(("research_fast",))
+        primary_state = RuntimeState(
+            pid=21,
+            role="reasoning",
+            executable="llama-server.exe",
+            model="heavy.gguf",
+            started_at="2026-08-31T00:00:00+00:00",
+        )
+        research_manager = Mock()
+        research_state = object()
+        research_manager.start.return_value = research_state
+        call_order = []
+        with (
+            patch.object(
+                coordinator.primary, "running_state", return_value=primary_state
+            ),
+            patch.object(
+                coordinator.primary,
+                "stop",
+                side_effect=lambda: call_order.append("primary_stop") or True,
+            ),
+            patch.object(coordinator.primary, "_port_open", return_value=False),
+            patch.object(
+                coordinator.residents,
+                "manager",
+                side_effect=lambda role: call_order.append(f"start_{role}")
+                or research_manager,
+            ),
+        ):
+            restored = coordinator.restore_after_primary(lease)
+
+        self.assertEqual(restored, {"research_fast": research_state})
+        self.assertEqual(call_order, ["primary_stop", "start_research_fast"])
+        research_manager.start.assert_called_once_with("research_fast")
+
+    def test_activate_residents_fails_closed_for_unknown_primary_port_owner(self):
+        coordinator = ModelResidencyCoordinator(load_settings())
+        with (
+            patch.object(coordinator.primary, "running_state", return_value=None),
+            patch.object(coordinator.primary, "_port_open", return_value=True),
+            patch.object(coordinator.residents, "start_all") as start_all,
+        ):
+            with self.assertRaisesRegex(ModelManagerError, "не освободил локальный порт"):
+                coordinator.activate_residents()
+
+        start_all.assert_not_called()
+
     def test_role_factory_uses_its_declared_service_endpoint_and_state_file(self):
         settings = load_settings()
         manager = ModelManager.for_role(settings, "ui_butler")

@@ -25,7 +25,7 @@
 | `browser` | Chromium и постоянный профиль |
 | `models` | конкретные GGUF-профили и аргументы `llama.cpp` |
 | `model_services` | независимые loopback endpoint и state-файлы процессов моделей |
-| `runtime_routing` | резидентная малая пара и декларативный UI review-контур |
+| `runtime_routing` | резидентная малая пара, research stage modes и декларативный UI review-контур |
 | `capability_roles` | соответствие функций профилям моделей |
 | `agent` | пределы шагов, инструментов, подтверждений и голосовых статусов |
 | `generation`, `routing` | лимиты ответа, плана и исследования |
@@ -103,7 +103,7 @@ PoolSide не притворяется официальной сборкой. Е
 
 Поддерживаются уровни `off`, `brief`, `normal`, `deep`. Они меняют режим и ограниченный reasoning budget, но не дают модели бесконечно размышлять. Пользовательский предел ответа — 1024, 4096 или 8192 токенов; маршрутизатор отдельно ограничивает план и каждый этап исследования.
 
-Экспериментальные малые профили дополнительно содержат `request_modes`. Это перезапросная политика, а не новая модель: `enable_thinking`, `max_tokens`, `temperature` и `strategy` выбираются декларативно. У `research_fast` режим `deliberate` включает thinking при server budget 256; у `ui_butler` он использует `cross_review`, поэтому собственный thinking UI-модели остаётся выключен. `runtime_routing.ui_deliberation` задаёт proposer/reviewer, имена режимов, предел одного revision и отдельный output budget reviewer-а. Код не проверяет названия GGUF.
+Экспериментальные малые профили дополнительно содержат `request_modes`. Это перезапросная политика, а не новая модель: `enable_thinking`, `max_tokens`, `temperature` и `strategy` выбираются декларативно. У `research_fast` режим `deliberate` включает thinking при server budget 256; `runtime_routing.research_request_modes` привязывает FAST/DELIBERATE к этапам query/synthesis/verification для конкретного профиля. У `ui_butler` deliberate использует `cross_review`, поэтому собственный thinking UI-модели остаётся выключен. `runtime_routing.ui_deliberation` задаёт proposer/reviewer, имена режимов, предел одного revision и отдельный output budget reviewer-а. Код не проверяет названия GGUF.
 
 `model_services` разрешает только loopback, уникальные порты и разные относительные state-файлы внутри `runtime_dir`. Текущие 18082/18083 не заменяют основной 18080. `runtime_routing.fast_resident_models` содержит две роли на разных сервисах; `ResidentModelPool` откатывает только процессы, которые сам успел запустить, и не завершает неизвестного владельца порта.
 

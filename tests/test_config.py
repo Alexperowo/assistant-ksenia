@@ -31,7 +31,27 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(ui.request_mode("deliberate").strategy, "cross_review")
         self.assertTrue(researcher.request_mode("deliberate").enable_thinking)
         self.assertEqual(researcher.reasoning_budget_tokens, 256)
+        research_modes = settings.research_request_modes("research_fast")
+        self.assertEqual(research_modes["query"].name, "fast")
+        self.assertEqual(research_modes["synthesis_normal"].name, "deliberate")
+        self.assertEqual(settings.capability_model("researcher"), "research_fast")
         self.assertEqual(settings.ui_deliberation().max_revisions, 1)
+
+    def test_research_request_modes_reject_unknown_stage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            source = Path(__file__).resolve().parents[1] / "config" / "default.json"
+            default = json.loads(source.read_text(encoding="utf-8"))
+            default["runtime_routing"]["research_request_modes"]["research_fast"][
+                "invented_stage"
+            ] = "fast"
+            (root / "config" / "default.json").write_text(
+                json.dumps(default), encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(ConfigError, "неизвестные этапы"):
+                load_settings(root)
 
     def test_model_services_fail_closed_on_duplicate_endpoint(self):
         with tempfile.TemporaryDirectory() as directory:

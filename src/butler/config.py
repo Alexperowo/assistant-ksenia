@@ -669,6 +669,51 @@ class Settings:
             services.add(profile.service_name)
         return normalized
 
+    def research_request_modes(
+        self, model_role: str
+    ) -> dict[str, ModelRequestMode]:
+        """Resolve stage-specific research modes declared for one model profile."""
+
+        runtime_routing = self.raw.get("runtime_routing", {})
+        if not isinstance(runtime_routing, Mapping):
+            raise ConfigError("Раздел runtime_routing должен быть объектом.")
+        configured = runtime_routing.get("research_request_modes", {})
+        if not isinstance(configured, Mapping):
+            raise ConfigError(
+                "runtime_routing.research_request_modes должен быть объектом."
+            )
+        raw_modes = configured.get(model_role)
+        if raw_modes is None:
+            return {}
+        if not isinstance(raw_modes, Mapping):
+            raise ConfigError(
+                f"research_request_modes.{model_role} должен быть объектом."
+            )
+        allowed_stages = {
+            "query",
+            "synthesis_fast",
+            "synthesis_normal",
+            "synthesis_deep",
+            "verification",
+        }
+        unknown_stages = sorted(set(map(str, raw_modes)) - allowed_stages)
+        if unknown_stages:
+            raise ConfigError(
+                f"research_request_modes.{model_role} содержит неизвестные этапы: "
+                + ", ".join(unknown_stages)
+            )
+        profile = self.model(model_role)
+        resolved: dict[str, ModelRequestMode] = {}
+        for stage, mode_name in raw_modes.items():
+            normalized_stage = str(stage)
+            if not isinstance(mode_name, str) or not mode_name.strip():
+                raise ConfigError(
+                    f"research_request_modes.{model_role}.{normalized_stage} "
+                    "должен содержать имя режима."
+                )
+            resolved[normalized_stage] = profile.request_mode(mode_name)
+        return resolved
+
     def ui_deliberation(self) -> UIDeliberationProfile | None:
         runtime_routing = self.raw.get("runtime_routing", {})
         if not isinstance(runtime_routing, Mapping):
@@ -954,6 +999,18 @@ def load_settings(root: Path | None = None) -> Settings:
         settings.model(profile_name)
     settings.resident_model_roles()
     settings.ui_deliberation()
+    runtime_routing = settings.raw.get("runtime_routing", {})
+    configured_research_modes = (
+        runtime_routing.get("research_request_modes", {})
+        if isinstance(runtime_routing, Mapping)
+        else {}
+    )
+    if not isinstance(configured_research_modes, Mapping):
+        raise ConfigError(
+            "runtime_routing.research_request_modes должен быть объектом."
+        )
+    for model_role in configured_research_modes:
+        settings.research_request_modes(str(model_role))
     for capability_name in settings.capability_role_names():
         settings.capability_role(capability_name)
     settings.default_role

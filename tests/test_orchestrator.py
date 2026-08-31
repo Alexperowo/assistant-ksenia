@@ -1,5 +1,6 @@
 import os
 from copy import deepcopy
+from contextlib import nullcontext
 import tempfile
 import unittest
 from dataclasses import replace
@@ -109,15 +110,33 @@ class OrchestratorTests(unittest.TestCase):
         session.manager.start.assert_not_called()
         session.session.record_exchange.assert_called_once()
 
-    def test_news_request_uses_dedicated_research_route(self):
+    @patch("butler.orchestrator.ModelManager.for_role")
+    def test_news_request_uses_dedicated_research_route(self, for_role):
         session = RoutedAgentSession(load_settings())
-        session.manager.is_current = Mock(return_value=True)
+        research_manager = Mock()
+        research_manager.is_current.return_value = True
+        for_role.return_value = research_manager
+        session.residency.activate_residents = Mock(return_value={})
         session.research.run = Mock(return_value=AgentReply("Итог", ()))
 
         reply = session._ask_exclusive("Быстро найди последние новости о VR-интернете.")
 
         self.assertEqual(reply.text, "Итог")
+        for_role.assert_called_once_with(session.settings, "research_fast")
+        session.residency.activate_residents.assert_called_once_with()
+        research_manager.start.assert_not_called()
         session.research.run.assert_called_once()
+
+    def test_primary_route_is_wrapped_in_residency_window(self):
+        session = RoutedAgentSession(load_settings())
+        session.residency.primary_window = Mock(return_value=nullcontext())
+        session._run_primary_route = Mock(return_value=AgentReply("Готово", ()))
+
+        reply = session._ask_exclusive("Выполни локальную задачу")
+
+        self.assertEqual(reply.text, "Готово")
+        session.residency.primary_window.assert_called_once_with()
+        session._run_primary_route.assert_called_once()
 
     def test_planner_exposes_only_read_tools(self):
         names = {

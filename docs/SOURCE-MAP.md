@@ -18,12 +18,12 @@
 
 | Файл | Ответственность | Критические инварианты |
 |---|---|---|
-| `model_manager.py` | одна активная крупная LLM на primary service, независимые малые model services, resident pool, команда DFlash/MTP/mmproj, PID, порт и целостность всех нужных GGUF | неизвестный процесс не завершать; loopback; уникальный endpoint/state; API-key; rollback только запущенных pool-ом процессов; size + полный SHA-256 до первого Popen |
+| `model_manager.py` | одна активная крупная LLM на primary service, независимые малые model services, resident pool/coordinator, команда DFlash/MTP/mmproj, PID, порт и целостность всех нужных GGUF | неизвестный процесс не завершать; loopback; уникальный endpoint/state; API-key; primary/residents взаимоисключены; восстановить только точный прежний набор; size + полный SHA-256 до первого Popen |
 | `chat.py` | OpenAI-совместимый HTTP, явный model service/request mode, stream, tokenizer, system normalization и отменяемое чтение ответа | один первый system; timeout; локальный ключ; request policy из конфигурации; checkpoint даже при зависшем socket read |
 | `ui_mate.py` | screenshot → строго типизированное предложение одного GUI-действия без исполнения | разрешённый XML protocol; один tool; coordinate 0–999; неизвестные/лишние параметры fail-closed; не генерировать Python-код |
 | `ui_deliberation.py` | независимая policy-проверка UI-действия второй резидентной моделью и максимум одна коррекция | reviewer ничего не исполняет; битый JSON блокирует действие; approval не заменяет Permission Broker и не подтверждает координаты |
 | `agent.py` | цикл tool calling одной модели | общий лимит шагов/инструментов/вопросов подтверждения, checkpoint отмены |
-| `orchestrator.py` | выбор роли, планирование и исполнение разными моделями | планировщик только читает; handoff сохраняется |
+| `orchestrator.py` | выбор роли, residency window, планирование и исполнение разными моделями | планировщик только читает; web research использует service своей роли; primary/residents не пересекаются; handoff сохраняется |
 | `model_catalog.py` | безопасное перечисление GGUF | только `models_dir` и `model_search_dirs`, относительные пути от корня проекта |
 | `model_assets.py` | закреплённое происхождение, загрузка и SHA-256 GGUF | полный commit; безопасное имя; без ambient token |
 | `model_evaluation.py` | русский A/B и критерии кандидата | детерминированные проверки, недоверенные данные |
@@ -48,7 +48,7 @@
 | Файл | Ответственность |
 |---|---|
 | `browser.py` | родительский безопасный API дочернего Chromium |
-| `research.py` | запрос, выбор источников, параллельное чтение в стабильном порядке и синтез |
+| `research.py` | запрос, выбор источников, параллельное чтение в стабильном порядке и синтез через stage-specific request modes |
 | `windows_automation.py` | UI Automation высокого уровня |
 | `windows_bridge.py` | окна, клавиатура, указатель и низкоуровневый Win32 |
 | `scripts/browser_worker.py` | Chromium, поиск и SSRF/redirect guard в отдельном процессе |

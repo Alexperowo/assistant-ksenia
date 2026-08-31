@@ -408,8 +408,25 @@ def _bounded_evidence_packet(
 
 
 class ResearchCoordinator:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, model_role: str | None = None) -> None:
         self.settings = settings
+        self.model_role = model_role
+
+    def _model_kwargs(self, stage: str) -> dict[str, Any]:
+        if self.model_role is None:
+            return {}
+        model_factory = getattr(self.settings, "model", None)
+        service_factory = getattr(self.settings, "model_service", None)
+        mode_factory = getattr(self.settings, "research_request_modes", None)
+        if not all(callable(factory) for factory in (model_factory, service_factory, mode_factory)):
+            return {}
+        profile = model_factory(self.model_role)
+        modes = mode_factory(self.model_role)
+        request_mode = modes.get(stage)
+        return {
+            "service": service_factory(profile.service_name),
+            "request_mode": request_mode,
+        }
 
     def _queries(self, request: str, mode: ResearchMode, control: TaskControl | None) -> list[str]:
         deterministic = _deterministic_query(request)
@@ -438,6 +455,7 @@ class ResearchCoordinator:
                 temperature=0.1,
                 max_tokens=256,
                 checkpoint=control.checkpoint if control is not None else None,
+                **self._model_kwargs("query"),
             )
             content = str(response["choices"][0].get("message", {}).get("content") or "")
             parsed = _extract_json_object(content)
@@ -631,6 +649,7 @@ class ResearchCoordinator:
                 temperature=0.15,
                 max_tokens=mode.final_max_tokens,
                 checkpoint=control.checkpoint if control is not None else None,
+                **self._model_kwargs(f"synthesis_{mode.name}"),
             )
             answer = str(response["choices"][0].get("message", {}).get("content") or "").strip()
             if not answer:
@@ -658,6 +677,7 @@ class ResearchCoordinator:
                     temperature=0.1,
                     max_tokens=mode.final_max_tokens,
                     checkpoint=control.checkpoint if control is not None else None,
+                    **self._model_kwargs("verification"),
                 )
                 verified = str(
                     verification["choices"][0].get("message", {}).get("content") or ""

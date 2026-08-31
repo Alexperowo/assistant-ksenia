@@ -712,3 +712,109 @@ class ResidentModelPool:
                 "pool_restored",
                 roles=restored,
             )
+
+
+@dataclass(frozen=True)
+class ResidencyLease:
+    active_resident_roles: tuple[str, ...]
+
+
+class ModelResidencyCoordinator:
+    """Keep small residents and the primary large-model service VRAM-exclusive."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.primary = ModelManager(settings, "primary")
+        self.residents = ResidentModelPool(settings)
+
+    @staticmethod
+    def _require_closed(manager: ModelManager, label: str) -> None:
+        if manager._port_open():
+            raise ModelManagerError(
+                f"Сервис {label} не освободил локальный порт; смена residency отменена."
+            )
+
+    def activate_residents(self) -> dict[str, RuntimeState]:
+        primary_state = self.primary.running_state()
+        stopped_primary_role = primary_state.role if primary_state is not None else ""
+        if primary_state is not None:
+            if not self.primary.stop():
+                raise ModelManagerError(
+                    "Не удалось безопасно остановить primary-модель перед быстрым уровнем."
+                )
+        try:
+            self._require_closed(self.primary, "primary")
+            states = self.residents.start_all()
+        except Exception:
+            if stopped_primary_role:
+                self.primary.start(stopped_primary_role)
+            raise
+        diagnostic_event(
+            self.settings,
+            "model_residency",
+            "residents_activated",
+            roles=list(states),
+        )
+        return states
+
+    def suspend_residents_for_primary(self) -> ResidencyLease:
+        active_roles = tuple(self.residents.running_states())
+        stopped_roles: list[str] = []
+        try:
+            for role in reversed(self.residents.roles):
+                manager = self.residents.manager(role)
+                state = manager.running_state()
+                if state is not None:
+                    if not manager.stop():
+                        raise ModelManagerError(
+                            f"Не удалось безопасно остановить резидентную модель {role}."
+                        )
+                    if role in active_roles:
+                        stopped_roles.append(role)
+                self._require_closed(manager, role)
+        except Exception:
+            for role in reversed(stopped_roles):
+                self.residents.manager(role).start(role)
+            raise
+        lease = ResidencyLease(active_roles)
+        diagnostic_event(
+            self.settings,
+            "model_residency",
+            "primary_window_opened",
+            suspended_roles=list(active_roles),
+        )
+        return lease
+
+    def restore_after_primary(self, lease: ResidencyLease) -> dict[str, RuntimeState]:
+        if not lease.active_resident_roles:
+            return {}
+        primary_state = self.primary.running_state()
+        if primary_state is not None:
+            if not self.primary.stop():
+                raise ModelManagerError(
+                    "Не удалось безопасно остановить primary-модель перед восстановлением."
+                )
+        self._require_closed(self.primary, "primary")
+        restored: dict[str, RuntimeState] = {}
+        try:
+            for role in lease.active_resident_roles:
+                restored[role] = self.residents.manager(role).start(role)
+        except Exception:
+            for role in reversed(tuple(restored)):
+                self.residents.manager(role).stop()
+            raise
+        diagnostic_event(
+            self.settings,
+            "model_residency",
+            "residents_restored",
+            roles=list(restored),
+        )
+        return restored
+
+    @contextmanager
+    def primary_window(self) -> Iterator[ResidencyLease]:
+        lease = self.suspend_residents_for_primary()
+        try:
+            yield lease
+        finally:
+            self.restore_after_primary(lease)
