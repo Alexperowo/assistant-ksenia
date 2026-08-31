@@ -9,9 +9,10 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Iterator
+from pathlib import Path
 from typing import Any
 
-from butler.config import Settings
+from butler.config import ModelRequestMode, ModelService, Settings
 from butler.diagnostics import current_trace_fields
 from butler.diagnostics import event as diagnostic_event
 from butler.diagnostics import milestone as diagnostic_milestone
@@ -21,6 +22,22 @@ from butler.local_auth import local_api_key
 
 class ChatError(RuntimeError):
     pass
+
+
+def _selected_service(settings: object, service: ModelService | None) -> ModelService:
+    if service is not None:
+        return service
+    factory = getattr(settings, "model_service", None)
+    if callable(factory):
+        return factory("primary")
+    # Lightweight transport tests and embedding clients may provide only the
+    # long-standing host/port contract.  Keep that protocol compatible.
+    return ModelService(
+        name="primary",
+        host=str(getattr(settings, "host")),
+        port=int(getattr(settings, "port")),
+        state_file=Path("state.json"),
+    )
 
 
 _READER_LOCK = threading.Lock()
@@ -448,24 +465,38 @@ def stream_chat(
     settings: Settings,
     messages: Iterable[dict[str, Any]],
     *,
-    temperature: float = 0.3,
+    temperature: float | None = None,
     max_tokens: int | None = None,
     checkpoint: Callable[[], None] | None = None,
+    service: ModelService | None = None,
+    request_mode: ModelRequestMode | None = None,
 ) -> Iterator[str]:
     message_list = normalize_system_messages(messages)
-    selected_max_tokens = default_max_tokens(settings) if max_tokens is None else max_tokens
-    url = f"http://{settings.host}:{settings.port}/v1/chat/completions"
-    body = json.dumps(
-        {
-            "messages": message_list,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-            "cache_prompt": True,
-            "temperature": temperature,
-            "max_tokens": selected_max_tokens,
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")
+    selected_max_tokens = (
+        request_mode.max_tokens
+        if max_tokens is None and request_mode is not None
+        else default_max_tokens(settings) if max_tokens is None else max_tokens
+    )
+    selected_temperature = (
+        request_mode.temperature
+        if temperature is None and request_mode is not None
+        else 0.3 if temperature is None else temperature
+    )
+    endpoint = _selected_service(settings, service)
+    url = f"http://{endpoint.host}:{endpoint.port}/v1/chat/completions"
+    payload: dict[str, Any] = {
+        "messages": message_list,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        "cache_prompt": True,
+        "temperature": selected_temperature,
+        "max_tokens": selected_max_tokens,
+    }
+    if request_mode is not None:
+        payload["chat_template_kwargs"] = {
+            "enable_thinking": request_mode.enable_thinking
+        }
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
         url,
         data=body,
@@ -484,7 +515,9 @@ def stream_chat(
         "stream_started",
         request_id=request_id,
         max_tokens=selected_max_tokens,
-        temperature=temperature,
+        temperature=selected_temperature,
+        service=endpoint.name,
+        request_mode=request_mode.name if request_mode is not None else "default",
         **_message_metrics(message_list),
     )
     diagnostic_milestone(
@@ -609,21 +642,33 @@ def complete_chat(
     messages: Iterable[dict[str, Any]],
     *,
     tools: list[dict[str, Any]] | None = None,
-    temperature: float = 0.2,
+    temperature: float | None = None,
     max_tokens: int | None = None,
     checkpoint: Callable[[], None] | None = None,
     on_content_delta: Callable[[str], None] | None = None,
+    service: ModelService | None = None,
+    request_mode: ModelRequestMode | None = None,
 ) -> dict[str, Any]:
     """Request one complete response, optionally exposing safe tools to the model."""
-    url = f"http://{settings.host}:{settings.port}/v1/chat/completions"
+    endpoint = _selected_service(settings, service)
+    url = f"http://{endpoint.host}:{endpoint.port}/v1/chat/completions"
     message_list = normalize_system_messages(messages)
-    selected_max_tokens = default_max_tokens(settings) if max_tokens is None else max_tokens
+    selected_max_tokens = (
+        request_mode.max_tokens
+        if max_tokens is None and request_mode is not None
+        else default_max_tokens(settings) if max_tokens is None else max_tokens
+    )
+    selected_temperature = (
+        request_mode.temperature
+        if temperature is None and request_mode is not None
+        else 0.2 if temperature is None else temperature
+    )
     streaming = checkpoint is not None or on_content_delta is not None
     payload: dict[str, Any] = {
         "messages": message_list,
         "stream": streaming,
         "cache_prompt": True,
-        "temperature": temperature,
+        "temperature": selected_temperature,
         "max_tokens": selected_max_tokens,
     }
     if streaming:
@@ -631,6 +676,10 @@ def complete_chat(
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    if request_mode is not None:
+        payload["chat_template_kwargs"] = {
+            "enable_thinking": request_mode.enable_thinking
+        }
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -647,7 +696,9 @@ def complete_chat(
         "completion_started",
         request_id=request_id,
         max_tokens=selected_max_tokens,
-        temperature=temperature,
+        temperature=selected_temperature,
+        service=endpoint.name,
+        request_mode=request_mode.name if request_mode is not None else "default",
         streaming=streaming,
         tool_count=len(tools or []),
         **_message_metrics(message_list),

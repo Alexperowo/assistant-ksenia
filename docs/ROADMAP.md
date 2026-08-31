@@ -6,6 +6,7 @@
 - [x] Четыре функциональные роли: дворецкий, исследователь, разработчик и тяжёлый мозг.
 - [x] Семантические профили без ветвлений по семействам: Laguna XS+DFlash как `generalist`, Qwen 3.8 Opus Distill v2 + MTP/mmproj как `reasoning`; Laguna S и два Ornith хранятся отдельными выключенными кандидатами без назначения ролей.
 - [x] Декларативные LLM backend-ы: PoolSide для Laguna/DFlash и официальный b10621 для Qwen/Ornith; профиль выбирает runtime без семейных условий в коде.
+- [x] Экспериментальная резидентная пара UI-Mate 9B + Agents-A1 4B: разные защищённые сервисы/state, совместный 16K запуск, FAST/DELIBERATE request modes, строгий read-only UI proposal и независимый policy review с одной коррекцией.
 - [x] Переносимый каталог всех model/draft/projector-артефактов с полным commit, размером, SHA-256 и поиском по настраиваемым корням.
 - [x] Рабочая конфигурация 96K и KV `Q8_0/Q4_0`; кандидат ограничен 16K до отдельного допуска.
 - [x] Новый Ornith APEX MTP Fixed закреплён точным commit/size/SHA-256 как выключенный 16K `candidate`; исторический A/B другого SC117-файла отделён и не переносится на него.
@@ -36,7 +37,7 @@
 - [x] Полный комплект передачи проекта человеку или другой нейросети: `AGENTS.md`, архитектура, карта кода, конфигурация, данные, безопасность, тестирование, решения и журнал изменений.
 - [x] Машинные lock-файлы Python/`llama.cpp`, аппаратные профили, проверка состояния без изменений и отчёт по реальному VRAM.
 - [x] Чистый online-архив без LLM и личных данных, стадийное обновление `llama.cpp`, резервная копия и проверенный откат.
-- [x] 368 автоматических тестов, контроль количества и предупреждений, три случайных порядка, полный контракт ярлыков, performance tracing, tool lifecycle/cancellation, доступный атомарный выбор микрофона, единый near-end capture worker, runtime cache/profiles и регрессии запрета модельного/машинного хардкода.
+- [x] 384 автоматических теста, контроль количества и предупреждений, три случайных порядка, полный контракт ярлыков, performance tracing, tool lifecycle/cancellation, fast resident tier, доступный атомарный выбор микрофона, единый near-end capture worker, runtime cache/profiles и регрессии запрета модельного/машинного хардкода.
 
 ## Пользовательская приёмка Александра
 
@@ -61,6 +62,7 @@
 - [x] Через штатный `ModelManager` принять базовую совместимость обоих рабочих runtime: Laguna + DFlash на PoolSide и Qwen + MTP + mmproj на официальном b10621, оба при фактических 96K, с русским ответом и корректным освобождением порта.
 - [x] Выполнить полный `check.ps1` после единого near-end worker: 368 тестов, три перемешанных порядка, Doctor, LAN и Silero→Whisper CUDA зелёные. Активная LLM корректно пропущена, потому что сервер не был запущен; отдельный streaming-gate Laguna/PoolSide 96K ранее собрал полную LLM-трассу и штатно остановил сервер. RAG пропущен, потому что выключен конфигурацией.
 - [ ] Дополнить live-gate инструментами, длинным benchmark/VRAM для Laguna и настоящим image-input/plan/tool-schema для Qwen; отдельно проверить RAG при его включении.
+- [ ] Завершить fast-tier integration: residency coordinator с выгрузкой/восстановлением малой пары вокруг Laguna/Qwen; ScreenCaptureService с virtual-desktop bounds/DPI; 20–30 read-only UI шагов; затем один подтверждённый action только через существующие `windows_*` tools и Permission Broker. Baseline: `docs/FAST-RESIDENT-MODELS-BASELINE-2026-08-31.md`.
 - [x] Измерить RuntimeProfile 16K/32K/48K/96K на обеих рабочих моделях: меньший context экономит память, но не TTFT; автоматическое переключение отклонено из-за reload/cache penalty. Явный `cache_prompt`, cache hit telemetry и стабильный snapshot `AGENT_FULL` внедрены. Детали: `docs/RUNTIME-OPTIMIZATION-BASELINE.md`.
 - [ ] Production Sandbox Worker — **BLOCKED внешним prerequisite**: аудит подтвердил `VirtualizationFirmwareEnabled=False`, отсутствие WSL/container runtime и неактивный hypervisor. До включения AMD-V/SVM команды остаются выключенными. Затем живым fault-injection набором сравнить Windows Sandbox/Hyper-V worker и нативный AppContainer + Job Object; experimental `CreateProcessInSandbox` и MXC 0.8.0 не считать production boundary. Контракт и доказательства: `docs/SANDBOX-AUDIT.md`.
 - [ ] AEC/full-duplex — **PARTIAL**: единый near-end 10-мс worker готов и проверен desktop START/STOP; supply-chain и CPU-spike `pywebrtc-audio` 0.1.0 завершены, 129 upstream-тестов зелёные, AEC+NS+AGC работает около 96× realtime. Далее: фактический render PCM из playback, Windows APO probe, synthetic A/B и реальные динамики/JBL. Production DSP dependency не добавлять до far-reference и измеримого выигрыша. Лишь живые echo/barge-in тесты разрешают `live.enabled` по умолчанию.

@@ -9,12 +9,14 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterator
 
 from butler.atomic_io import atomic_write_text, exclusive_file_lock
-from butler.config import ModelProfile, Settings, reasoning_arguments
+from butler.config import ModelProfile, ModelService, Settings, reasoning_arguments
 from butler.diagnostics import event as diagnostic_event
 from butler.local_auth import api_key_file, local_api_key
 from butler.processes import process_image_path, terminate_verified_process
@@ -53,6 +55,7 @@ MANAGED_SERVER_OPTIONS = frozenset(
         "--gpu-layers-draft",
         "--reasoning",
         "--reasoning-budget",
+        "--reasoning-budget-message",
     }
 )
 
@@ -71,8 +74,20 @@ class RuntimeState:
 
 
 class ModelManager:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, service_name: str = "primary") -> None:
         self.settings = settings
+        self.service = settings.model_service(service_name)
+
+    @classmethod
+    def for_role(cls, settings: Settings, role: str) -> "ModelManager":
+        return cls(settings, settings.model(role).service_name)
+
+    def _require_service(self, profile: ModelProfile) -> None:
+        if profile.service_name != self.service.name:
+            raise ModelManagerError(
+                f"Профиль {profile.role} назначен сервису {profile.service_name}, "
+                f"а менеджер управляет сервисом {self.service.name}."
+            )
 
     def _server_for(self, profile: ModelProfile) -> Path:
         if profile.backend is None:
@@ -146,6 +161,7 @@ class ModelManager:
             )
 
     def build_command(self, profile: ModelProfile) -> list[str]:
+        self._require_service(profile)
         for argument in profile.extra_args:
             option = argument.split("=", 1)[0].casefold()
             if option in MANAGED_SERVER_OPTIONS:
@@ -169,9 +185,9 @@ class ModelManager:
         command.extend(
             [
             "--host",
-            self.settings.host,
+            self.service.host,
             "--port",
-            str(self.settings.port),
+            str(self.service.port),
             "--ctx-size",
             str(profile.context_size),
             "--n-gpu-layers",
@@ -195,7 +211,13 @@ class ModelManager:
                 ["--gpu-layers-draft", str(profile.draft_gpu_layers)]
             )
         command.extend(profile.extra_args)
-        command.extend(reasoning_arguments(profile.reasoning))
+        command.extend(
+            reasoning_arguments(
+                profile.reasoning,
+                budget_tokens=profile.reasoning_budget_tokens,
+                budget_message=profile.reasoning_budget_message,
+            )
+        )
         return command
 
     def launch_signature(self, profile: ModelProfile) -> str:
@@ -204,24 +226,24 @@ class ModelManager:
 
     def _read_state(self) -> RuntimeState | None:
         try:
-            raw = json.loads(self.settings.state_file.read_text(encoding="utf-8"))
+            raw = json.loads(self.service.state_file.read_text(encoding="utf-8"))
             return RuntimeState(**raw)
         except (FileNotFoundError, json.JSONDecodeError, TypeError):
             return None
 
     def _write_state(self, state: RuntimeState) -> None:
-        with exclusive_file_lock(self.settings.state_file):
+        with exclusive_file_lock(self.service.state_file):
             atomic_write_text(
-                self.settings.state_file,
+                self.service.state_file,
                 json.dumps(asdict(state), ensure_ascii=False, indent=2),
             )
 
     def _remove_state_if_unchanged(self, stale: RuntimeState) -> bool:
-        with exclusive_file_lock(self.settings.state_file):
+        with exclusive_file_lock(self.service.state_file):
             if self._read_state() != stale:
                 return False
             try:
-                self.settings.state_file.unlink()
+                self.service.state_file.unlink()
                 return True
             except FileNotFoundError:
                 return True
@@ -276,7 +298,7 @@ class ModelManager:
         return state
 
     def api_ready(self, timeout: float = 1.0) -> bool:
-        url = f"http://{self.settings.host}:{self.settings.port}/health"
+        url = f"http://{self.service.host}:{self.service.port}/health"
         try:
             request = urllib.request.Request(
                 url, headers={"Authorization": f"Bearer {local_api_key(self.settings)}"}
@@ -287,11 +309,11 @@ class ModelManager:
             return False
 
     def _port_open(self, timeout: float = 0.5) -> bool:
-        host = self.settings.host
+        host = self.service.host
         if host in {"0.0.0.0", "::"}:
             host = "127.0.0.1"
         try:
-            with socket.create_connection((host, self.settings.port), timeout=timeout):
+            with socket.create_connection((host, self.service.port), timeout=timeout):
                 return True
         except OSError:
             return False
@@ -305,7 +327,7 @@ class ModelManager:
         return True
 
     def model_metadata(self, timeout: float = 2.0) -> dict:
-        url = f"http://{self.settings.host}:{self.settings.port}/v1/models"
+        url = f"http://{self.service.host}:{self.service.port}/v1/models"
         try:
             request = urllib.request.Request(
                 url, headers={"Authorization": f"Bearer {local_api_key(self.settings)}"}
@@ -332,6 +354,7 @@ class ModelManager:
 
     def start(self, role: str, wait: bool = True) -> RuntimeState:
         profile = self.settings.model(role)
+        self._require_service(profile)
         server = self._server_for(profile)
         started = time.monotonic()
         diagnostic_event(
@@ -443,12 +466,12 @@ class ModelManager:
                 "model_manager",
                 "unknown_port_owner",
                 level="error",
-                host=self.settings.host,
-                port=self.settings.port,
+                host=self.service.host,
+                port=self.service.port,
                 role=role,
             )
             raise ModelManagerError(
-                f"Порт локальной модели {self.settings.host}:{self.settings.port} уже занят "
+                f"Порт локальной модели {self.service.host}:{self.service.port} уже занят "
                 "неизвестным процессом. Ксения не будет его останавливать."
             )
 
@@ -499,7 +522,7 @@ class ModelManager:
             while time.monotonic() < deadline:
                 if process.poll() is not None:
                     try:
-                        self.settings.state_file.unlink()
+                        self.service.state_file.unlink()
                     except FileNotFoundError:
                         pass
                     diagnostic_event(
@@ -540,7 +563,7 @@ class ModelManager:
                 time.sleep(0.5)
             terminate_verified_process(process.pid, server)
             try:
-                self.settings.state_file.unlink()
+                self.service.state_file.unlink()
             except FileNotFoundError:
                 pass
             diagnostic_event(
@@ -582,7 +605,7 @@ class ModelManager:
         stopped = terminate_verified_process(state.pid, Path(state.executable))
         if stopped:
             try:
-                self.settings.state_file.unlink()
+                self.service.state_file.unlink()
             except FileNotFoundError:
                 pass
         diagnostic_event(
@@ -600,3 +623,92 @@ class ModelManager:
         diagnostic_event(self.settings, "model_manager", "switch_requested", role=role)
         self.stop()
         return self.start(role)
+
+
+class ResidentModelPool:
+    """Manage the configured small-model pair without weakening PID ownership checks."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.roles = settings.resident_model_roles()
+
+    def manager(self, role: str) -> ModelManager:
+        if role not in self.roles:
+            raise ModelManagerError(f"Профиль {role} не входит в fast_resident_models.")
+        return ModelManager.for_role(self.settings, role)
+
+    def running_states(self) -> dict[str, RuntimeState]:
+        states: dict[str, RuntimeState] = {}
+        for role in self.roles:
+            manager = self.manager(role)
+            if manager.is_current(role):
+                state = manager.running_state()
+                if state is not None:
+                    states[role] = state
+        return states
+
+    def start_all(self, *, wait: bool = True) -> dict[str, RuntimeState]:
+        states: dict[str, RuntimeState] = {}
+        started_here: list[str] = []
+        try:
+            for role in self.roles:
+                manager = self.manager(role)
+                was_current = manager.is_current(role)
+                states[role] = manager.start(role, wait=wait)
+                if not was_current:
+                    started_here.append(role)
+        except Exception:
+            for started_role in reversed(started_here):
+                self.manager(started_role).stop()
+            raise
+        diagnostic_event(
+            self.settings,
+            "resident_models",
+            "pool_started",
+            roles=list(states),
+            process_count=len(states),
+        )
+        return states
+
+    def stop_all(self) -> dict[str, bool]:
+        results: dict[str, bool] = {}
+        for role in reversed(self.roles):
+            results[role] = self.manager(role).stop()
+        diagnostic_event(
+            self.settings,
+            "resident_models",
+            "pool_stopped",
+            roles=list(self.roles),
+            stopped_count=sum(1 for stopped in results.values() if stopped),
+        )
+        return results
+
+    @contextmanager
+    def suspended(self) -> Iterator[tuple[str, ...]]:
+        """Temporarily stop only residents that this project can prove it owns."""
+
+        active_roles = tuple(self.running_states())
+        for role in reversed(active_roles):
+            if not self.manager(role).stop():
+                raise ModelManagerError(
+                    f"Не удалось безопасно приостановить резидентную модель {role}."
+                )
+        diagnostic_event(
+            self.settings,
+            "resident_models",
+            "pool_suspended",
+            roles=list(active_roles),
+        )
+        try:
+            yield active_roles
+        finally:
+            restored: list[str] = []
+            for role in active_roles:
+                self.manager(role).start(role)
+                restored.append(role)
+            diagnostic_event(
+                self.settings,
+                "resident_models",
+                "pool_restored",
+                roles=restored,
+            )

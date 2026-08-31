@@ -18,8 +18,10 @@
 
 | Файл | Ответственность | Критические инварианты |
 |---|---|---|
-| `model_manager.py` | одна активная LLM, декларативный выбор backend-а, команда DFlash/MTP/mmproj, PID, порт и целостность всех нужных GGUF | неизвестный процесс не завершать; loopback; API-key; bounded wait; size + полный SHA-256 до первого Popen; cache только для неизменной file identity |
-| `chat.py` | OpenAI-совместимый HTTP, stream, tokenizer, system normalization и отменяемое чтение ответа | один первый system; timeout; локальный ключ; checkpoint даже при зависшем socket read |
+| `model_manager.py` | одна активная крупная LLM на primary service, независимые малые model services, resident pool, команда DFlash/MTP/mmproj, PID, порт и целостность всех нужных GGUF | неизвестный процесс не завершать; loopback; уникальный endpoint/state; API-key; rollback только запущенных pool-ом процессов; size + полный SHA-256 до первого Popen |
+| `chat.py` | OpenAI-совместимый HTTP, явный model service/request mode, stream, tokenizer, system normalization и отменяемое чтение ответа | один первый system; timeout; локальный ключ; request policy из конфигурации; checkpoint даже при зависшем socket read |
+| `ui_mate.py` | screenshot → строго типизированное предложение одного GUI-действия без исполнения | разрешённый XML protocol; один tool; coordinate 0–999; неизвестные/лишние параметры fail-closed; не генерировать Python-код |
+| `ui_deliberation.py` | независимая policy-проверка UI-действия второй резидентной моделью и максимум одна коррекция | reviewer ничего не исполняет; битый JSON блокирует действие; approval не заменяет Permission Broker и не подтверждает координаты |
 | `agent.py` | цикл tool calling одной модели | общий лимит шагов/инструментов/вопросов подтверждения, checkpoint отмены |
 | `orchestrator.py` | выбор роли, планирование и исполнение разными моделями | планировщик только читает; handoff сохраняется |
 | `model_catalog.py` | безопасное перечисление GGUF | только `models_dir` и `model_search_dirs`, относительные пути от корня проекта |

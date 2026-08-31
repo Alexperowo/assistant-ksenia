@@ -16,6 +16,23 @@
     "port": 18080,
     "startup_timeout_seconds": 120
   },
+  "model_services": {
+    "primary": {
+      "host": "127.0.0.1",
+      "port": 18080,
+      "state_file": "state.json"
+    },
+    "ui_fast": {
+      "host": "127.0.0.1",
+      "port": 18082,
+      "state_file": "state-ui-fast.json"
+    },
+    "research_fast": {
+      "host": "127.0.0.1",
+      "port": 18083,
+      "state_file": "state-research-fast.json"
+    }
+  },
   "engine_backends": {
     "official": {
       "executable": "tools/llama.cpp/llama-server.exe",
@@ -130,6 +147,20 @@
     "research_default_mode": "normal",
     "research_evidence_max_chars": 20000
   },
+  "runtime_routing": {
+    "fast_resident_models": [
+      "ui_butler",
+      "research_fast"
+    ],
+    "ui_deliberation": {
+      "proposer_model": "ui_butler",
+      "reviewer_model": "research_fast",
+      "proposal_mode": "deliberate",
+      "review_mode": "deliberate",
+      "max_revisions": 1,
+      "review_max_tokens": 512
+    }
+  },
   "generation": {
     "max_tokens": 4096
   },
@@ -198,6 +229,127 @@
     "test_command": ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
   },
   "models": {
+    "ui_butler": {
+      "label": "UI-Mate 9B — быстрый дворецкий",
+      "backend": "official",
+      "service": "ui_fast",
+      "artifacts": {
+        "model": {
+          "filename": "tencent_UI-Mate-9B-Q4_K_M.gguf",
+          "source_repo": "bartowski/tencent_UI-Mate-9B-GGUF",
+          "source_revision": "695da95fcfcb1fed85e9b4dd6d698e3575f09288",
+          "source_filename": "tencent_UI-Mate-9B-Q4_K_M.gguf",
+          "expected_size_bytes": 5910783104,
+          "sha256": "a54257eb4caa664dc1d2654b1aaed31767e3e6b01b4c7ecce9f239c00af23e2c"
+        },
+        "projector": {
+          "filename": "mmproj-tencent_UI-Mate-9B-f16.gguf",
+          "source_repo": "bartowski/tencent_UI-Mate-9B-GGUF",
+          "source_revision": "695da95fcfcb1fed85e9b4dd6d698e3575f09288",
+          "source_filename": "mmproj-tencent_UI-Mate-9B-f16.gguf",
+          "expected_size_bytes": 918166016,
+          "sha256": "5a8380c4637dddceed9dbc28fffcdfa8601909c0ece9fe218fbd6888ec5d2c16"
+        }
+      },
+      "context_size": 16384,
+      "gpu_layers": 999,
+      "enabled": true,
+      "experimental": true,
+      "reasoning": "brief",
+      "reasoning_budget_tokens": 256,
+      "request_modes": {
+        "fast": {
+          "enable_thinking": false,
+          "max_tokens": 512,
+          "temperature": 0.1,
+          "strategy": "direct"
+        },
+        "deliberate": {
+          "enable_thinking": false,
+          "max_tokens": 512,
+          "temperature": 0.1,
+          "strategy": "cross_review"
+        }
+      },
+      "acceleration": {
+        "type": "none",
+        "max_tokens": 0
+      },
+      "extra_args": [
+        "--jinja",
+        "--flash-attn",
+        "on",
+        "--parallel",
+        "1",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q5_0",
+        "--fit",
+        "on",
+        "--fit-target",
+        "1024",
+        "--image-min-tokens",
+        "1024",
+        "--image-max-tokens",
+        "1024"
+      ]
+    },
+    "research_fast": {
+      "label": "Agents-A1 4B — быстрый исследователь",
+      "backend": "official",
+      "service": "research_fast",
+      "artifacts": {
+        "model": {
+          "filename": "InternScience_Agents-A1-4B-Q4_K_M.gguf",
+          "source_repo": "bartowski/InternScience_Agents-A1-4B-GGUF",
+          "source_revision": "41e8e3a6b8406cfbffb7d11165c6e49057abf79d",
+          "source_filename": "InternScience_Agents-A1-4B-Q4_K_M.gguf",
+          "expected_size_bytes": 2884851648,
+          "sha256": "3712f3ad77322427f0f0dc081301339d2c6148c8d5f927fc0ef600ae368d90e7"
+        }
+      },
+      "context_size": 16384,
+      "gpu_layers": 999,
+      "enabled": true,
+      "experimental": true,
+      "reasoning": "brief",
+      "reasoning_budget_tokens": 256,
+      "reasoning_budget_message": "Now provide the concise final answer in the requested format.",
+      "request_modes": {
+        "fast": {
+          "enable_thinking": false,
+          "max_tokens": 800,
+          "temperature": 0.1,
+          "strategy": "direct"
+        },
+        "deliberate": {
+          "enable_thinking": true,
+          "max_tokens": 1536,
+          "temperature": 0.1,
+          "strategy": "direct"
+        }
+      },
+      "acceleration": {
+        "type": "none",
+        "max_tokens": 0
+      },
+      "extra_args": [
+        "--jinja",
+        "--flash-attn",
+        "on",
+        "--parallel",
+        "1",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q5_0",
+        "--fit",
+        "on",
+        "--fit-target",
+        "1024"
+      ]
+    },
     "generalist": {
       "label": "Laguna XS 2.1 APEX I-Quality + DFlash",
       "backend": "poolside",

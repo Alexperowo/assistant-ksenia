@@ -19,6 +19,48 @@ from butler.config import (
 
 
 class ConfigTests(unittest.TestCase):
+    def test_fast_resident_models_have_distinct_services_and_measured_request_modes(self):
+        settings = load_settings()
+
+        self.assertEqual(settings.resident_model_roles(), ("ui_butler", "research_fast"))
+        ui = settings.model("ui_butler")
+        researcher = settings.model("research_fast")
+        self.assertEqual(settings.model_service(ui.service_name).port, 18082)
+        self.assertEqual(settings.model_service(researcher.service_name).port, 18083)
+        self.assertFalse(ui.request_mode("fast").enable_thinking)
+        self.assertEqual(ui.request_mode("deliberate").strategy, "cross_review")
+        self.assertTrue(researcher.request_mode("deliberate").enable_thinking)
+        self.assertEqual(researcher.reasoning_budget_tokens, 256)
+        self.assertEqual(settings.ui_deliberation().max_revisions, 1)
+
+    def test_model_services_fail_closed_on_duplicate_endpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            source = Path(__file__).resolve().parents[1] / "config" / "default.json"
+            default = json.loads(source.read_text(encoding="utf-8"))
+            default["model_services"]["research_fast"]["port"] = 18082
+            (root / "config" / "default.json").write_text(
+                json.dumps(default), encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(ConfigError, "не должны делить endpoint"):
+                load_settings(root)
+
+    def test_model_service_state_cannot_escape_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            source = Path(__file__).resolve().parents[1] / "config" / "default.json"
+            default = json.loads(source.read_text(encoding="utf-8"))
+            default["model_services"]["ui_fast"]["state_file"] = "../outside.json"
+            (root / "config" / "default.json").write_text(
+                json.dumps(default), encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(ConfigError, "выходит за runtime_dir"):
+                load_settings(root)
+
     def test_model_api_cannot_be_exposed_by_user_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -308,6 +350,19 @@ class ConfigTests(unittest.TestCase):
                 reasoning_arguments("brief"),
                 ("--reasoning", "on", "--reasoning-budget", "256"),
             )
+            self.assertEqual(
+                reasoning_arguments(
+                    "brief", budget_tokens=64, budget_message="Finish now."
+                ),
+                (
+                    "--reasoning",
+                    "on",
+                    "--reasoning-budget",
+                    "64",
+                    "--reasoning-budget-message",
+                    "Finish now.",
+                ),
+            )
 
     def test_response_budget_updates_agent_and_planner_limits(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -429,6 +484,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(
             settings.model_roles(),
             (
+                "ui_butler",
+                "research_fast",
                 "generalist",
                 "reasoning",
                 "heavy_candidate",

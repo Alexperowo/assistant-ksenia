@@ -18,6 +18,7 @@ from butler.chat import (
     normalize_system_messages,
     stream_chat,
 )
+from butler.config import ModelRequestMode, ModelService
 from butler.tasking import TaskCancelled
 
 
@@ -247,6 +248,26 @@ class ChatTransportTests(unittest.TestCase):
         self.assertFalse(completed.kwargs["usage_available"])
         self.assertIsNone(completed.kwargs["prompt_tokens"])
         self.assertIsNone(completed.kwargs["completion_tokens"])
+
+    def test_request_mode_selects_endpoint_thinking_budget_and_temperature(self):
+        response = _FakeResponse(
+            {"choices": [{"message": {"role": "assistant", "content": "Готово."}}]}
+        )
+        service = ModelService("research_fast", "127.0.0.1", 18083, Path("state.json"))
+        mode = ModelRequestMode("deliberate", True, 1536, 0.1)
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self._settings(Path(directory))
+            with patch("butler.chat.urllib.request.urlopen", return_value=response) as urlopen:
+                complete_chat(settings, self._messages(), service=service, request_mode=mode)
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertTrue(request.full_url.startswith("http://127.0.0.1:18083/"))
+        self.assertEqual(payload["max_tokens"], 1536)
+        self.assertEqual(payload["temperature"], 0.1)
+        self.assertEqual(
+            payload["chat_template_kwargs"], {"enable_thinking": True}
+        )
 
     def test_tokenizer_transport_normalizes_the_same_messages(self):
         response = _FakeResponse({"tokens": [1, 2, 3]})

@@ -86,7 +86,7 @@ flowchart LR
 
 На текущей системе Александра с Windows 11, RTX 2080 Ti 22 ГБ и 48 ГБ ОЗУ проверены:
 
-- 368 unit/integration-тестов и три дополнительных прогона в случайном порядке;
+- 384 unit/integration-теста и три дополнительных прогона в случайном порядке;
 - официальный `llama.cpp b10621` (stable v0.3.0), CUDA 12.4, с закреплёнными SHA-256;
 - отдельный закреплённый PoolSide backend commit `06f8ceb` для Laguna/DFlash, с patch provenance и SHA-256 runtime-файлов;
 - конфигурационно-управляемые DFlash, MTP, multimodal projector и квантованный KV;
@@ -157,6 +157,7 @@ INSTALL.cmd -InstallRoot "<каталог среды>" -ModelStorageRoot "<ка�
 | [TESTING.md](docs/TESTING.md) | Стратегия автоматических и живых проверок |
 | [PERFORMANCE.md](docs/PERFORMANCE.md) | Сквозные trace_id, milestones, p50/p95 и измерение Live-задержек |
 | [RUNTIME-OPTIMIZATION-BASELINE.md](docs/RUNTIME-OPTIMIZATION-BASELINE.md) | Реальные 16K/32K/48K/96K, KV reuse и решение по стабильным ToolProfiles |
+| [FAST-RESIDENT-MODELS-BASELINE-2026-08-31.md](docs/FAST-RESIDENT-MODELS-BASELINE-2026-08-31.md) | UI-Mate + Agents-A1, совместная резидентность и измеренные FAST/DELIBERATE режимы |
 | [AUDIO-FULL-DUPLEX-AUDIT.md](docs/AUDIO-FULL-DUPLEX-AUDIT.md) | Фактический аудиотракт, AEC-кандидаты и этапы безопасного full-duplex |
 | [SANDBOX-AUDIT.md](docs/SANDBOX-AUDIT.md) | Фактические Windows-границы, проверенные blockers и критерии Sandbox Worker |
 | [MAINTENANCE.md](docs/MAINTENANCE.md) | Обновление и откат |

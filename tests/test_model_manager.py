@@ -6,10 +6,57 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from butler.config import load_settings, reasoning_arguments
-from butler.model_manager import ModelManager, ModelManagerError, RuntimeState
+from butler.model_manager import (
+    ModelManager,
+    ModelManagerError,
+    ResidentModelPool,
+    RuntimeState,
+)
 
 
 class ModelManagerTests(unittest.TestCase):
+    def test_role_factory_uses_its_declared_service_endpoint_and_state_file(self):
+        settings = load_settings()
+        manager = ModelManager.for_role(settings, "ui_butler")
+        profile = settings.model("ui_butler")
+        command = manager.build_command(profile)
+
+        self.assertEqual(manager.service.name, "ui_fast")
+        self.assertEqual(command[command.index("--port") + 1], "18082")
+        self.assertEqual(manager.service.state_file.name, "state-ui-fast.json")
+        self.assertIn("--reasoning-budget-message", ModelManager.for_role(settings, "research_fast").build_command(settings.model("research_fast")))
+
+    def test_manager_rejects_profile_assigned_to_another_service(self):
+        settings = load_settings()
+        with self.assertRaisesRegex(ModelManagerError, "назначен сервису ui_fast"):
+            ModelManager(settings).build_command(settings.model("ui_butler"))
+
+    def test_resident_pool_rolls_back_only_models_started_in_failed_attempt(self):
+        settings = load_settings()
+        pool = ResidentModelPool(settings)
+        first = pool.manager("ui_butler")
+        second = pool.manager("research_fast")
+        state = RuntimeState(
+            pid=10,
+            role="ui_butler",
+            executable="llama-server.exe",
+            model="ui.gguf",
+            started_at="2026-08-31T00:00:00+00:00",
+        )
+
+        with (
+            patch.object(pool, "manager", side_effect=lambda role: first if role == "ui_butler" else second),
+            patch.object(first, "is_current", return_value=False),
+            patch.object(first, "start", return_value=state),
+            patch.object(first, "stop", return_value=True) as stop_first,
+            patch.object(second, "is_current", return_value=False),
+            patch.object(second, "start", side_effect=ModelManagerError("boom")),
+        ):
+            with self.assertRaisesRegex(ModelManagerError, "boom"):
+                pool.start_all()
+
+        stop_first.assert_called_once_with()
+
     def test_command_binds_to_loopback_and_profile(self):
         settings = load_settings()
         manager = ModelManager(settings)

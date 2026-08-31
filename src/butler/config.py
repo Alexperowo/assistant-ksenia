@@ -28,15 +28,25 @@ RESPONSE_BUDGETS = {
 }
 
 
-def reasoning_arguments(level: str) -> tuple[str, ...]:
+def reasoning_arguments(
+    level: str,
+    *,
+    budget_tokens: int | None = None,
+    budget_message: str = "",
+) -> tuple[str, ...]:
     try:
         _label, mode, budget = REASONING_LEVELS[level]
     except KeyError as exc:
         available = ", ".join(REASONING_LEVELS)
         raise ConfigError(f"Неизвестный уровень рассуждений: {level}. Доступно: {available}.") from exc
+    selected_budget = budget if budget_tokens is None else int(budget_tokens)
+    if mode == "off" and (budget_tokens is not None or budget_message):
+        raise ConfigError("Выключенные рассуждения не могут задавать budget или budget_message.")
     result = ["--reasoning", mode]
-    if budget is not None:
-        result.extend(["--reasoning-budget", str(budget)])
+    if selected_budget is not None:
+        result.extend(["--reasoning-budget", str(selected_budget)])
+    if budget_message:
+        result.extend(["--reasoning-budget-message", budget_message])
     return tuple(result)
 
 
@@ -113,6 +123,27 @@ class EngineBackend:
 
 
 @dataclass(frozen=True)
+class ModelService:
+    """One independently managed loopback llama.cpp process."""
+
+    name: str
+    host: str
+    port: int
+    state_file: Path
+
+
+@dataclass(frozen=True)
+class ModelRequestMode:
+    """Per-request generation policy, independent from model identity."""
+
+    name: str
+    enable_thinking: bool
+    max_tokens: int
+    temperature: float
+    strategy: str = "direct"
+
+
+@dataclass(frozen=True)
 class ModelProfile:
     role: str
     label: str
@@ -123,6 +154,8 @@ class ModelProfile:
     experimental: bool
     extra_args: tuple[str, ...]
     reasoning: str
+    reasoning_budget_tokens: int | None = None
+    reasoning_budget_message: str = ""
     expected_size_bytes: int = 0
     sha256: str = ""
     draft_model_path: Path | None = None
@@ -135,6 +168,18 @@ class ModelProfile:
     acceleration_max_tokens: int = 0
     draft_gpu_layers: int | str = 0
     backend: EngineBackend | None = None
+    service_name: str = "primary"
+    request_modes: tuple[ModelRequestMode, ...] = ()
+
+    def request_mode(self, name: str) -> ModelRequestMode:
+        normalized = str(name).strip().casefold()
+        for mode in self.request_modes:
+            if mode.name == normalized:
+                return mode
+        available = ", ".join(mode.name for mode in self.request_modes) or "нет"
+        raise ConfigError(
+            f"Профиль {self.role} не содержит режим запроса {name}. Доступно: {available}."
+        )
 
 
 @dataclass(frozen=True)
@@ -145,6 +190,16 @@ class CapabilityRole:
     primary_model: str | None
     candidate_model: str | None
     enabled: bool
+
+
+@dataclass(frozen=True)
+class UIDeliberationProfile:
+    proposer_model: str
+    reviewer_model: str
+    proposal_mode: str
+    review_mode: str
+    max_revisions: int
+    review_max_tokens: int
 
 
 @dataclass(frozen=True)
@@ -187,6 +242,69 @@ class Settings:
     @property
     def state_file(self) -> Path:
         return self.runtime_dir / "state.json"
+
+    def model_service(self, name: str = "primary") -> ModelService:
+        normalized = str(name).strip().casefold()
+        configured = self.raw.get("model_services")
+        if configured is None:
+            if normalized != "primary":
+                raise ConfigError(f"Неизвестный сервис модели: {name}")
+            return ModelService(
+                name="primary",
+                host=self.host,
+                port=self.port,
+                state_file=self.state_file,
+            )
+        if not isinstance(configured, Mapping):
+            raise ConfigError("Раздел model_services должен быть объектом.")
+        try:
+            item = configured[normalized]
+        except KeyError as exc:
+            raise ConfigError(f"Неизвестный сервис модели: {name}") from exc
+        if not isinstance(item, Mapping):
+            raise ConfigError(f"Сервис модели {normalized} повреждён.")
+        host = str(item.get("host", self.host)).strip().casefold()
+        if host not in {"127.0.0.1", "localhost", "::1"}:
+            raise ConfigError(
+                f"Сервис модели {normalized} разрешено привязывать только к loopback-адресу."
+            )
+        try:
+            port = int(item.get("port", self.port))
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"Порт сервиса модели {normalized} должен быть целым числом.") from exc
+        if not 1 <= port <= 65535:
+            raise ConfigError(
+                f"Порт сервиса модели {normalized} должен находиться в диапазоне 1–65535."
+            )
+        raw_state_file = str(item.get("state_file", "")).strip()
+        if not raw_state_file:
+            raw_state_file = "state.json" if normalized == "primary" else f"state-{normalized}.json"
+        relative_state_file = Path(raw_state_file)
+        if relative_state_file.is_absolute():
+            raise ConfigError(
+                f"model_services.{normalized}.state_file должен быть относительным путём."
+            )
+        state_file = (self.runtime_dir / relative_state_file).resolve()
+        try:
+            state_file.relative_to(self.runtime_dir.resolve())
+        except ValueError as exc:
+            raise ConfigError(
+                f"model_services.{normalized}.state_file выходит за runtime_dir."
+            ) from exc
+        return ModelService(
+            name=normalized,
+            host=host,
+            port=port,
+            state_file=state_file,
+        )
+
+    def model_service_names(self) -> tuple[str, ...]:
+        configured = self.raw.get("model_services")
+        if configured is None:
+            return ("primary",)
+        if not isinstance(configured, Mapping):
+            raise ConfigError("Раздел model_services должен быть объектом.")
+        return tuple(str(name).strip().casefold() for name in configured)
 
     def engine_backend(self, name: str) -> EngineBackend:
         backends = self.raw.get("engine_backends")
@@ -335,6 +453,10 @@ class Settings:
         if not backend_name:
             raise ConfigError(f"Профиль {role} содержит пустой backend.")
         backend = self.engine_backend(backend_name)
+        service_name = str(item.get("service", "primary")).strip().casefold()
+        if not service_name:
+            raise ConfigError(f"Профиль {role} содержит пустой service.")
+        self.model_service(service_name)
         model_path, expected_size, sha256 = self._artifact(
             role, item, "model", required=True
         )
@@ -395,6 +517,73 @@ class Settings:
             isinstance(argument, str) and argument for argument in extra_args
         ):
             raise ConfigError(f"extra_args профиля {role} должен быть списком строк.")
+        request_modes_raw = item.get("request_modes", {})
+        if not isinstance(request_modes_raw, Mapping):
+            raise ConfigError(f"request_modes профиля {role} должен быть объектом.")
+        request_modes: list[ModelRequestMode] = []
+        for mode_name, mode_raw in request_modes_raw.items():
+            normalized_mode = str(mode_name).strip().casefold()
+            if not normalized_mode or not isinstance(mode_raw, Mapping):
+                raise ConfigError(f"Режим запроса профиля {role} повреждён: {mode_name}.")
+            enable_thinking = mode_raw.get("enable_thinking", False)
+            if not isinstance(enable_thinking, bool):
+                raise ConfigError(
+                    f"models.{role}.request_modes.{normalized_mode}.enable_thinking "
+                    "должен быть логическим."
+                )
+            try:
+                mode_max_tokens = int(mode_raw.get("max_tokens", 512))
+                mode_temperature = float(mode_raw.get("temperature", 0.1))
+            except (TypeError, ValueError) as exc:
+                raise ConfigError(
+                    f"Числовые параметры режима {normalized_mode} профиля {role} повреждены."
+                ) from exc
+            if not 16 <= mode_max_tokens <= 32768:
+                raise ConfigError(
+                    f"max_tokens режима {normalized_mode} профиля {role} должен быть от 16 до 32768."
+                )
+            if not math.isfinite(mode_temperature) or not 0 <= mode_temperature <= 2:
+                raise ConfigError(
+                    f"temperature режима {normalized_mode} профиля {role} должен быть от 0 до 2."
+                )
+            strategy = str(mode_raw.get("strategy", "direct")).strip().casefold()
+            if strategy not in {"direct", "cross_review"}:
+                raise ConfigError(
+                    f"Неизвестная strategy режима {normalized_mode} профиля {role}: {strategy}."
+                )
+            request_modes.append(
+                ModelRequestMode(
+                    name=normalized_mode,
+                    enable_thinking=enable_thinking,
+                    max_tokens=mode_max_tokens,
+                    temperature=mode_temperature,
+                    strategy=strategy,
+                )
+            )
+        reasoning = str(item.get("reasoning", "off")).casefold()
+        raw_reasoning_budget = item.get("reasoning_budget_tokens")
+        try:
+            reasoning_budget_tokens = (
+                None if raw_reasoning_budget is None else int(raw_reasoning_budget)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"reasoning_budget_tokens профиля {role} повреждён.") from exc
+        if reasoning_budget_tokens is not None and not 1 <= reasoning_budget_tokens <= 32768:
+            raise ConfigError(
+                f"reasoning_budget_tokens профиля {role} должен быть от 1 до 32768."
+            )
+        reasoning_budget_message = str(item.get("reasoning_budget_message", "")).strip()
+        if len(reasoning_budget_message) > 500 or any(
+            character in reasoning_budget_message for character in ("\r", "\n", "\x00")
+        ):
+            raise ConfigError(
+                f"reasoning_budget_message профиля {role} должен быть одной строкой до 500 символов."
+            )
+        reasoning_arguments(
+            reasoning,
+            budget_tokens=reasoning_budget_tokens,
+            budget_message=reasoning_budget_message,
+        )
         return ModelProfile(
             role=role,
             label=str(item["label"]),
@@ -406,7 +595,9 @@ class Settings:
             enabled=enabled,
             experimental=experimental,
             extra_args=tuple(extra_args),
-            reasoning=str(item.get("reasoning", "off")).casefold(),
+            reasoning=reasoning,
+            reasoning_budget_tokens=reasoning_budget_tokens,
+            reasoning_budget_message=reasoning_budget_message,
             expected_size_bytes=expected_size,
             sha256=sha256,
             draft_model_path=draft_path,
@@ -419,6 +610,8 @@ class Settings:
             acceleration_max_tokens=acceleration_max_tokens,
             draft_gpu_layers=draft_gpu_layers,
             backend=backend,
+            service_name=service_name,
+            request_modes=tuple(request_modes),
         )
 
     @staticmethod
@@ -441,6 +634,88 @@ class Settings:
         if not isinstance(models, Mapping):
             raise ConfigError("Раздел models должен быть объектом.")
         return tuple(str(name) for name in models)
+
+    def resident_model_roles(self) -> tuple[str, ...]:
+        runtime_routing = self.raw.get("runtime_routing", {})
+        if not isinstance(runtime_routing, Mapping):
+            raise ConfigError("Раздел runtime_routing должен быть объектом.")
+        roles = runtime_routing.get("fast_resident_models", [])
+        if not isinstance(roles, list) or not all(
+            isinstance(role, str) and role.strip() for role in roles
+        ):
+            raise ConfigError("runtime_routing.fast_resident_models должен быть списком ролей.")
+        normalized = tuple(role.strip() for role in roles)
+        if len(set(normalized)) != len(normalized):
+            raise ConfigError("runtime_routing.fast_resident_models содержит повторяющиеся роли.")
+        known = set(self.model_roles())
+        unknown = [role for role in normalized if role not in known]
+        if unknown:
+            raise ConfigError(
+                "runtime_routing.fast_resident_models содержит неизвестные роли: "
+                + ", ".join(unknown)
+            )
+        services: set[str] = set()
+        for role in normalized:
+            profile = self.model(role)
+            if profile.service_name == "primary":
+                raise ConfigError(
+                    f"Резидентная модель {role} не должна использовать primary service."
+                )
+            if profile.service_name in services:
+                raise ConfigError(
+                    "Резидентные модели должны использовать разные сервисы; повтор: "
+                    f"{profile.service_name}."
+                )
+            services.add(profile.service_name)
+        return normalized
+
+    def ui_deliberation(self) -> UIDeliberationProfile | None:
+        runtime_routing = self.raw.get("runtime_routing", {})
+        if not isinstance(runtime_routing, Mapping):
+            raise ConfigError("Раздел runtime_routing должен быть объектом.")
+        raw = runtime_routing.get("ui_deliberation")
+        if raw is None:
+            return None
+        if not isinstance(raw, Mapping):
+            raise ConfigError("runtime_routing.ui_deliberation должен быть объектом.")
+        proposer = str(raw.get("proposer_model", "")).strip()
+        reviewer = str(raw.get("reviewer_model", "")).strip()
+        proposal_mode = str(raw.get("proposal_mode", "fast")).strip().casefold()
+        review_mode = str(raw.get("review_mode", "deliberate")).strip().casefold()
+        if not proposer or not reviewer or proposer == reviewer:
+            raise ConfigError(
+                "UI deliberation требует разные proposer_model и reviewer_model."
+            )
+        proposer_profile = self.model(proposer)
+        reviewer_profile = self.model(reviewer)
+        selected_proposal_mode = proposer_profile.request_mode(proposal_mode)
+        reviewer_profile.request_mode(review_mode)
+        if selected_proposal_mode.strategy != "cross_review":
+            raise ConfigError(
+                "Режим proposer-а для UI deliberation должен иметь strategy=cross_review."
+            )
+        try:
+            max_revisions = int(raw.get("max_revisions", 1))
+            review_max_tokens = int(raw.get("review_max_tokens", 512))
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("Числовые параметры UI deliberation повреждены.") from exc
+        if not 0 <= max_revisions <= 2:
+            raise ConfigError("ui_deliberation.max_revisions должен быть от 0 до 2.")
+        if not 64 <= review_max_tokens <= 4096:
+            raise ConfigError("ui_deliberation.review_max_tokens должен быть от 64 до 4096.")
+        residents = set(self.resident_model_roles())
+        if proposer not in residents or reviewer not in residents:
+            raise ConfigError(
+                "Обе модели UI deliberation должны входить в fast_resident_models."
+            )
+        return UIDeliberationProfile(
+            proposer_model=proposer,
+            reviewer_model=reviewer,
+            proposal_mode=proposal_mode,
+            review_mode=review_mode,
+            max_revisions=max_revisions,
+            review_max_tokens=review_max_tokens,
+        )
 
     def capability_role(self, name: str) -> CapabilityRole:
         try:
@@ -660,8 +935,25 @@ def load_settings(root: Path | None = None) -> Settings:
         port=port,
         startup_timeout_seconds=int(server.get("startup_timeout_seconds", 120)),
     )
+    service_ports: set[tuple[str, int]] = set()
+    service_states: set[Path] = set()
+    for service_name in settings.model_service_names():
+        service = settings.model_service(service_name)
+        endpoint = (service.host, service.port)
+        if endpoint in service_ports:
+            raise ConfigError(
+                f"Сервисы моделей не должны делить endpoint {service.host}:{service.port}."
+            )
+        if service.state_file in service_states:
+            raise ConfigError(
+                f"Сервисы моделей не должны делить state_file: {service.state_file}."
+            )
+        service_ports.add(endpoint)
+        service_states.add(service.state_file)
     for profile_name in settings.model_roles():
         settings.model(profile_name)
+    settings.resident_model_roles()
+    settings.ui_deliberation()
     for capability_name in settings.capability_role_names():
         settings.capability_role(capability_name)
     settings.default_role
