@@ -13,7 +13,7 @@
 ### 1. Статический и быстрый слой
 
 - синтаксис PowerShell, JSON и Python;
-- не менее 398 unit/integration-тестов;
+- не менее 403 unit/integration-тестов;
 - отсутствие неожиданных warnings и skips;
 - три полных shuffled-order запуска;
 - тайм-ауты сети/subprocess и запрет shell;
@@ -42,6 +42,14 @@
 - восстановление после отказа.
 
 Они отделены от ежедневного gate, если зависят от интернета, CAPTCHA или занимают много времени.
+
+Read-only UI-Mate corpus запускается отдельно, потому что требует двух локальных resident-моделей:
+
+```powershell
+python scripts/evaluate_ui_mate_readonly.py "<corpus>\manifest.json" --review --start-models
+```
+
+Зелёный результат обязан содержать `executed_actions: 0`. Первый seed из трёх сценариев и ограничения доказанного описаны в `docs/UI-MATE-READONLY-ACCEPTANCE-2026-08-31.md`; до физического UI gate его нужно расширить до 20–30 случаев.
 
 ### 4. Пользовательская приёмка
 

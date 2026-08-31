@@ -19,34 +19,38 @@ class UIMateProtocolError(RuntimeError):
     pass
 
 
-_ACTIONS = {
-    "left_click",
-    "right_click",
-    "middle_click",
-    "double_click",
-    "triple_click",
-    "drag",
-    "mouse_move",
-    "type",
-    "hotkey",
-    "press",
-    "key_down",
-    "key_up",
-    "scroll",
-    "wait",
-    "call_user",
-    "finished",
-}
-_COORDINATE_ACTIONS = {
-    "left_click",
-    "right_click",
-    "middle_click",
-    "double_click",
-    "triple_click",
-    "drag",
-    "mouse_move",
-}
-_KEY_ACTIONS = {"hotkey", "press", "key_down", "key_up"}
+UI_MATE_ACTIONS = frozenset(
+    {
+        "left_click",
+        "right_click",
+        "middle_click",
+        "double_click",
+        "triple_click",
+        "drag",
+        "mouse_move",
+        "type",
+        "hotkey",
+        "press",
+        "key_down",
+        "key_up",
+        "scroll",
+        "wait",
+        "call_user",
+        "finished",
+    }
+)
+UI_MATE_COORDINATE_ACTIONS = frozenset(
+    {
+        "left_click",
+        "right_click",
+        "middle_click",
+        "double_click",
+        "triple_click",
+        "drag",
+        "mouse_move",
+    }
+)
+UI_MATE_KEY_ACTIONS = frozenset({"hotkey", "press", "key_down", "key_up"})
 
 
 _SYSTEM_PROMPT = """You are a GUI proposal model for a local Windows assistant.
@@ -82,10 +86,10 @@ def _parse_parameter(value: str) -> Any:
 
 def _validated_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
     action = str(arguments.get("action", "")).strip().casefold()
-    if action not in _ACTIONS:
+    if action not in UI_MATE_ACTIONS:
         raise UIMateProtocolError(f"UI-Mate вернула неизвестное действие: {action or 'пусто'}.")
     result: dict[str, Any] = {"action": action}
-    if action in _COORDINATE_ACTIONS:
+    if action in UI_MATE_COORDINATE_ACTIONS:
         coordinate = arguments.get("coordinate")
         if not isinstance(coordinate, list) or len(coordinate) != 2:
             raise UIMateProtocolError("Координатное действие UI-Mate не содержит пару coordinate.")
@@ -101,7 +105,7 @@ def _validated_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(text, str) or not text or len(text) > 4000:
             raise UIMateProtocolError("Действие type содержит пустой или слишком длинный text.")
         result["text"] = text
-    elif action in _KEY_ACTIONS:
+    elif action in UI_MATE_KEY_ACTIONS:
         keys = arguments.get("keys")
         if isinstance(keys, str):
             keys = [part.strip() for part in keys.split("+") if part.strip()]

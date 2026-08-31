@@ -7,7 +7,7 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import BinaryIO, Iterator
 
 
 _THREAD_LOCKS: dict[str, threading.RLock] = {}
@@ -20,6 +20,27 @@ def _thread_lock(path: Path) -> threading.RLock:
         return _THREAD_LOCKS.setdefault(key, threading.RLock())
 
 
+def _open_lock_stream(lock_path: Path, target: Path, deadline: float) -> BinaryIO:
+    while True:
+        try:
+            stream = lock_path.open("a+b")
+            try:
+                stream.seek(0, os.SEEK_END)
+                if stream.tell() == 0:
+                    stream.write(b"\0")
+                    stream.flush()
+            except OSError:
+                stream.close()
+                raise
+            return stream
+        except OSError as exc:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Не удалось подготовить файл блокировки: {target}"
+                ) from exc
+            time.sleep(0.05)
+
+
 @contextmanager
 def exclusive_file_lock(target: Path, *, timeout: float = 10.0) -> Iterator[None]:
     """Serialize a file transaction across threads and local processes."""
@@ -29,12 +50,7 @@ def exclusive_file_lock(target: Path, *, timeout: float = 10.0) -> Iterator[None
     local_lock = _thread_lock(lock_path)
     deadline = time.monotonic() + max(0.1, timeout)
 
-    with local_lock, lock_path.open("a+b") as stream:
-        stream.seek(0, os.SEEK_END)
-        if stream.tell() == 0:
-            stream.write(b"\0")
-            stream.flush()
-
+    with local_lock, _open_lock_stream(lock_path, target, deadline) as stream:
         if os.name == "nt":
             import msvcrt
 

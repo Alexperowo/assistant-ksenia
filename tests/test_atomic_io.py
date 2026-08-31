@@ -30,7 +30,24 @@ class AtomicIoTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=8) as pool:
                 list(pool.map(lambda _index: worker(), range(24)))
 
+            real_open = Path.open
+            lock_path = target.with_name(f".{target.name}.lock")
+            attempts = 0
+
+            def transient_open(path: Path, *args, **kwargs):
+                nonlocal attempts
+                if path == lock_path and attempts == 0:
+                    attempts += 1
+                    raise PermissionError("transient Windows sharing denial")
+                attempts += 1
+                return real_open(path, *args, **kwargs)
+
+            with patch.object(Path, "open", new=transient_open):
+                with exclusive_file_lock(target, timeout=1.0):
+                    pass
+
         self.assertEqual(maximum_active, 1)
+        self.assertEqual(attempts, 2)
 
     def test_parallel_atomic_writes_leave_one_complete_value_and_no_temp_files(self):
         with TemporaryDirectory() as directory:

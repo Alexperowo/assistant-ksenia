@@ -23,6 +23,7 @@
 | `ui_mate.py` | screenshot → строго типизированное предложение одного GUI-действия без исполнения | разрешённый XML protocol; один tool; coordinate 0–999; неизвестные/лишние параметры fail-closed; не генерировать Python-код |
 | `ui_deliberation.py` | независимая policy-проверка UI-действия второй резидентной моделью и максимум одна коррекция | reviewer ничего не исполняет; битый JSON блокирует действие; approval не заменяет Permission Broker и не подтверждает координаты |
 | `screen_capture.py` | read-only physical virtual-desktop PNG, monitor/work/DPI snapshot и normalized→physical mapping | thread Per-Monitor-V2; image/bounds обязаны совпасть; смена layout и координата в gap дают отказ; содержимое экрана не журналируется |
+| `ui_evaluation.py` | строгий manifest и оценка read-only UI proposals по допустимым альтернативам | corpus path без traversal; action/region/keys валидируются; неизвестные поля fail-closed; никакого исполнения |
 | `agent.py` | цикл tool calling одной модели | общий лимит шагов/инструментов/вопросов подтверждения, checkpoint отмены |
 | `orchestrator.py` | выбор роли, residency window, планирование и исполнение разными моделями | планировщик только читает; web research использует service своей роли; primary/residents не пересекаются; handoff сохраняется |
 | `model_catalog.py` | безопасное перечисление GGUF | только `models_dir` и `model_search_dirs`, относительные пути от корня проекта |
