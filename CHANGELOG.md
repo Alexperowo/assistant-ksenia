@@ -14,6 +14,7 @@
 - Tests: быстрый слой содержит 403 уникальных теста без warnings; добавлены service/state isolation, pool/coordinator rollback, endpoint/request payload, research routing, DPI/multi-monitor mapping, UI protocol, deliberation и corpus regressions.
 - Verified: полный `check.ps1` прошёл 403/403, три перемешанных порядка, release/dependency/Doctor/LAN и Silero→Whisper CUDA с `landmark_recall=1.0`; LLM и RAG явно пропущены как неактивные, а не засчитаны зелёными.
 - Fixed: подготовка межпроцессного lock-файла на Windows повторяется до общего timeout при кратковременном sharing/antivirus denial; редкий `PermissionError` shuffled-gate больше не обходит механизм ожидания блокировки.
+- Audited: перед PCM/AEC переходом подтверждён отдельный output-routing prerequisite: PortAudio default ведёт на display, явного output selector нет, JBL hands-free имеет другой sample rate. SoundPlayer не заменяется до устойчивого выбора endpoint и физического A/B.
 
 - Added: выключенные `heavy_candidate` Laguna S 2.1 и `quality_candidate` Ornith Quality Q6_K закреплены точными source commit/size/SHA-256; функциональные роли не менялись.
 - Benchmark: одинаковый семисценарный A/B сравнил Laguna S DFlash off/Q4/BF16, conFIGur8tor Ornith MTP off/n=1/n=2/n=4, Qwen MTP off/n=2 и Ornith Quality. Qwen n=2 сохранил 72,12% acceptance и небольшой выигрыш; Laguna S DFlash и conFIGur8tor MTP замедлили ответы, поэтому кандидаты по умолчанию запускаются без speculative acceleration.

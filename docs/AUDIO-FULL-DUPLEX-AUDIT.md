@@ -1,6 +1,6 @@
 # Аудит AudioCaptureService, AEC и full-duplex
 
-Обновлено: 30 августа 2026 года.
+Обновлено: 31 августа 2026 года.
 
 ## Вывод
 
@@ -44,6 +44,20 @@ TTS-сервис синтезирует WAV, затем отдельный Power
 
 Настоящие desktop-ярлыки запуска и остановки также пройдены. START создал валидный state, один физический capture worker, постоянный faster-whisper CUDA service и wake subscriber на одном loopback port. STOP удалил state и весь процессный подграф без оставшегося аудиосервиса.
 
+## Подтверждённая проблема output routing
+
+Read-only инвентаризация 31 августа не открывала устройство и не останавливала голосовой сеанс. PortAudio сообщил `default_output=1`: `WCS Display`, MME, 44,1 кГц. Тот же display является default для DirectSound/WASAPI. В пользовательской конфигурации нет `voice.output_device`; текущий SoundPlayer полагается на системную multimedia routing policy.
+
+JBL Tour One M3 виден как отдельный hands-free WDM-KS output с одним каналом и 16 кГц. Некоторые другие WDM-KS имена повреждены внутри PortAudio до символов замены, поэтому надёжно восстановить их постфактум нельзя. Индексы зависят от текущего подключения и не могут сохраняться. Следовательно, наивная замена SoundPlayer на `RawOutputStream(device=None, 48 kHz)` способна направить голос на монитор или не открыть Bluetooth-режим и не принимается.
+
+Перед render reference нужен отдельный output contract:
+
+1. Перечислять выходы и Windows default без открытия stream.
+2. Сохранять только уникальный устойчивый фрагмент имени, никогда PortAudio index.
+3. При нескольких совпадениях, повреждённом имени или отсутствующем default останавливаться fail-closed.
+4. При фактическом открытии сообщать resolved name, host API, channels и sample rate без записи аудио.
+5. Не зашивать JBL, WCS, Realtek или любое другое устройство в Python/PowerShell.
+
 ## AEC-кандидаты
 
 ### Windows communications AEC
@@ -73,9 +87,10 @@ Microsoft sample требует Windows build 22540+; текущая машин�
 
 1. **Device contract — DONE для input.** Хранится не индекс, а пользовательское предпочтение и фактически открытый endpoint; неоднозначность даёт fail-closed. В журнале есть input endpoint, sample rate, frame size и startup latency без записи звука.
 2. **Единый near-end worker — DONE для `voice-agent`.** Один процесс владеет input stream и публикует 10-мс frames в ограниченные очереди. Wake, partial/final STT и stop-monitor являются потребителями. Старый путь сохранён как fallback.
-3. **Render reference.** Перевести Live playback на backend, который принимает PCM Silero и одновременно кладёт фактически отправленные render frames в тот же audio worker. Нельзя считать момент генерации WAV моментом воспроизведения.
-4. **AEC adapter.** Подключить backend через узкий интерфейс. Сначала offline synthetic corpus, затем реальный A/B Windows APO против закреплённого WebRTC wheel. NS и AGC включать отдельно и сравнивать STT, чтобы не ухудшить окончания.
-5. **Calibration profile.** Только если измерения показывают пользу: `input_endpoint`, `output_endpoint`, sample rates, estimated echo delay и AEC settings. При смене устройства профиль не переиспользовать вслепую.
-6. **Physical acceptance.** Наушники, затем JBL-динамики: 20–30 ходов, паузы 1–2 секунды, произвольный barge-in, отсутствие self-interrupt, `interrupt_detected → audio_actually_stopped`, корректный spoken prefix.
+3. **Output contract.** Добавить доступную инвентаризацию и атомарный выбор устойчивого output name fragment. Старый SoundPlayer остаётся default, пока новый backend не прошёл физический A/B.
+4. **Render reference.** Добавить opt-in PCM backend, который принимает PCM Silero и одновременно кладёт фактически принятые output buffer-ом 10-мс render frames в тот же audio worker. Нельзя считать момент генерации WAV моментом воспроизведения; потеря far publisher должна быть наблюдаема и не выдаваться за AEC.
+5. **AEC adapter.** Подключить backend через узкий интерфейс. Сначала offline synthetic corpus, затем реальный A/B Windows APO против закреплённого WebRTC wheel. NS и AGC включать отдельно и сравнивать STT, чтобы не ухудшить окончания.
+6. **Calibration profile.** Только если измерения показывают пользу: `input_endpoint`, `output_endpoint`, sample rates, estimated echo delay и AEC settings. При смене устройства профиль не переиспользовать вслепую.
+7. **Physical acceptance.** Наушники, затем JBL-динамики: 20–30 ходов, паузы 1–2 секунды, произвольный barge-in, отсутствие self-interrupt, `interrupt_detected → audio_actually_stopped`, корректный spoken prefix.
 
-`live.enabled` остаётся `false` по умолчанию, пока пункты 3–6 не приняты на реальном устройстве. Установка DSP-библиотеки сама по себе не считается готовым AEC.
+`live.enabled` остаётся `false` по умолчанию, пока пункты 3–7 не приняты на реальном устройстве. Установка DSP-библиотеки сама по себе не считается готовым AEC.
