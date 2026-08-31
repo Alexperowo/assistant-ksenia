@@ -663,13 +663,13 @@ class SpeechRecognizer:
             returncode=process.poll(),
         )
 
-    def list_devices(self) -> list[dict[str, object]]:
+    def _run_audio_device_worker(self, *arguments: str) -> dict[str, object]:
         worker = self.root / "scripts" / "audio_devices.py"
         if not self.python.is_file():
             raise SpeechRecognitionError(f"Не найден голосовой Python: {self.python}")
         try:
             result = subprocess.run(
-                [str(self.python), "-u", str(worker)],
+                [str(self.python), "-u", str(worker), *arguments],
                 cwd=str(self.root),
                 capture_output=True,
                 text=True,
@@ -681,8 +681,22 @@ class SpeechRecognizer:
             )
             event = json.loads(result.stdout.strip().splitlines()[-1])
         except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, IndexError) as exc:
-            raise SpeechRecognitionError(f"Не удалось получить список микрофонов: {exc}") from exc
+            raise SpeechRecognitionError(f"Не удалось проверить аудиоустройства: {exc}") from exc
+        if result.returncode != 0 or event.get("event") == "error":
+            raise SpeechRecognitionError(
+                str(event.get("error", "Проверка аудиоустройства завершилась ошибкой."))
+            )
+        return event
+
+    def list_devices(self) -> list[dict[str, object]]:
+        event = self._run_audio_device_worker()
         if event.get("event") != "devices":
             raise SpeechRecognitionError(str(event.get("error", "Микрофоны не найдены.")))
         devices = event.get("devices", [])
         return devices if isinstance(devices, list) else []
+
+    def probe_device(self, selector: str) -> dict[str, object]:
+        event = self._run_audio_device_worker("--probe", str(selector))
+        if event.get("event") != "probe_ready":
+            raise SpeechRecognitionError("Микрофон не подтвердил готовность.")
+        return event

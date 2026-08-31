@@ -426,7 +426,8 @@ def _audio_devices(
             "нужный микрофон перед запуском разговора."
         )
         return 0
-    devices = SpeechRecognizer(settings).list_devices()
+    recognizer = SpeechRecognizer(settings)
+    devices = recognizer.list_devices()
     print("\n=== Доступные микрофоны ===")
     if not devices:
         print("Входные устройства не найдены.")
@@ -499,6 +500,25 @@ def _audio_devices(
                 print(f"  - {name}")
             speech.say_and_wait("Название микрофона неоднозначно. Уточните его.")
             return 1
+        try:
+            probe = recognizer.probe_device(selector)
+        except SpeechRecognitionError as exc:
+            diagnostic_exception(
+                settings,
+                "audio_devices",
+                "probe_failed",
+                exc,
+            )
+            print(
+                "ОШИБКА: выбранный микрофон найден, но сейчас не открывается. "
+                "Настройка не изменена. Переподключите устройство и повторите проверку."
+            )
+            print("Техническая причина сохранена в диагностическом журнале.")
+            speech.say_and_wait(
+                "Выбранный микрофон сейчас не открывается. Настройка не изменена. "
+                "Переподключите устройство и повторите проверку."
+            )
+            return 1
         set_user_microphone(settings.root, selector)
         api_names = sorted(
             {str(device.get("host_api", "")) for device in matches if device.get("host_api")}
@@ -507,6 +527,11 @@ def _audio_devices(
         print(f"Выбран микрофон: {_spoken_device_name(selected_name)}.")
         if api_names:
             print("Доступные пути захвата: " + ", ".join(api_names))
+        print(
+            "Проверено фактическое открытие: "
+            f"{_spoken_device_name(probe.get('device'))}; "
+            f"{probe.get('host_api', '')}; {probe.get('sample_rate', '')} Гц."
+        )
         print("Выбор сохранён атомарно в config/user.json.")
         speech.say_and_wait(f"Микрофон {_spoken_device_name(selector)} выбран.")
         return 0

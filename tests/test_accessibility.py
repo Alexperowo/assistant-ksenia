@@ -12,6 +12,7 @@ from butler.cli import (
     _spoken_microphone_error,
 )
 from butler.confirmation import confirmation_text
+from butler.stt import SpeechRecognitionError
 
 
 class AccessibilityTests(unittest.TestCase):
@@ -66,6 +67,12 @@ class AccessibilityTests(unittest.TestCase):
                 "default": True,
             },
         ]
+        recognizer_class.return_value.probe_device.return_value = {
+            "event": "probe_ready",
+            "device": "Головной телефон (2- JBL Tour One M3)",
+            "host_api": "Windows WASAPI",
+            "sample_rate": 16000,
+        }
         speech = MagicMock()
         settings = SimpleNamespace(raw={"voice": {"wake_device": "JBL One"}})
 
@@ -109,6 +116,9 @@ class AccessibilityTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         save_microphone.assert_called_once_with(settings.root, "JBL Tour One M3")
+        recognizer_class.return_value.probe_device.assert_called_once_with(
+            "JBL Tour One M3"
+        )
         self.assertNotIn("index", save_microphone.call_args.args)
         self.assertIn("Windows WASAPI", output.getvalue())
 
@@ -176,6 +186,12 @@ class AccessibilityTests(unittest.TestCase):
                 "default": False,
             }
         ]
+        recognizer_class.return_value.probe_device.return_value = {
+            "event": "probe_ready",
+            "device": "Головной телефон (2- JBL Tour One M3)",
+            "host_api": "Windows WASAPI",
+            "sample_rate": 16000,
+        }
         speech = MagicMock()
         settings = SimpleNamespace(root=Path("D:/Project/assistant-ksenia"))
 
@@ -184,6 +200,34 @@ class AccessibilityTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         save_microphone.assert_called_once_with(settings.root, "Tour One M3")
+
+    @patch("butler.cli.set_user_microphone")
+    @patch("butler.cli.SpeechRecognizer")
+    def test_unavailable_microphone_is_not_persisted(
+        self, recognizer_class, save_microphone
+    ):
+        recognizer_class.return_value.list_devices.return_value = [
+            {
+                "index": 12,
+                "name": "JBL Tour One M3",
+                "host_api": "Windows WDM-KS",
+                "sample_rate": 16000,
+                "default": False,
+            }
+        ]
+        recognizer_class.return_value.probe_device.side_effect = SpeechRecognitionError(
+            "endpoint unavailable"
+        )
+        speech = MagicMock()
+        settings = SimpleNamespace(root=Path("D:/Project/assistant-ksenia"))
+
+        with redirect_stdout(io.StringIO()) as output:
+            result = _audio_devices(settings, speech, select="Tour One M3")
+
+        self.assertEqual(result, 1)
+        save_microphone.assert_not_called()
+        self.assertIn("Настройка не изменена", output.getvalue())
+        self.assertNotIn("endpoint unavailable", output.getvalue())
 
     def test_microphone_errors_are_actionable_when_spoken(self):
         message = _spoken_microphone_error(RuntimeError("PortAudio device unavailable"))

@@ -86,7 +86,7 @@ flowchart LR
 
 На текущей системе Александра с Windows 11, RTX 2080 Ti 22 ГБ и 48 ГБ ОЗУ проверены:
 
-- 407 unit/integration-тестов и три дополнительных прогона в случайном порядке;
+- 408 unit/integration-тестов и три дополнительных прогона в случайном порядке;
 - официальный `llama.cpp b10621` (stable v0.3.0), CUDA 12.4, с закреплёнными SHA-256;
 - отдельный закреплённый PoolSide backend commit `06f8ceb` для Laguna/DFlash, с patch provenance и SHA-256 runtime-файлов;
 - конфигурационно-управляемые DFlash, MTP, multimodal projector и квантованный KV;
