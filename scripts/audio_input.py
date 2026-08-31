@@ -133,19 +133,6 @@ def ranked_input_devices(sd, selector: str) -> list[tuple[int, dict[str, Any], s
             score -= 2
         devices.append((score, index, info, host))
 
-    if not devices and selector and numeric_selector is None:
-        # Windows 11 may expose a unified Bluetooth endpoint simply as "Headset".
-        for index, raw_info in enumerate(sd.query_devices()):
-            info = dict(raw_info)
-            name = str(info.get("name", ""))
-            if int(info.get("max_input_channels", 0)) < 1:
-                continue
-            if "headset" not in name.casefold() and "hands-free" not in name.casefold():
-                continue
-            host = _host_api_name(sd, info)
-            score = host_priority.get(host.casefold(), 50) + 30
-            devices.append((score, index, info, host))
-
     devices.sort(key=lambda item: (item[0], item[1]))
     return [(index, info, host) for _, index, info, host in devices]
 
@@ -160,15 +147,11 @@ def open_best_input_stream(
     candidates = ranked_input_devices(sd, selector)
     if not candidates:
         raise RuntimeError(f"Не найден входной микрофон: {selector or 'устройство по умолчанию'}")
-    if (
-        not selector.strip()
-        and len(candidates) > 1
-        and _default_input_index(sd) is None
-    ):
+    if not selector.strip() and len(candidates) > 1:
         raise RuntimeError(
-            "Windows не сообщает микрофон по умолчанию, а доступно несколько "
-            "входов. Выберите устройство через voice.wake_device после команды "
-            "audio-devices; произвольный вход не будет открыт автоматически."
+            "Доступно несколько аудиовходов. Выберите микрофон через "
+            "voice.wake_device после команды audio-devices; системный вход "
+            "по умолчанию или другое устройство не будут выбраны автоматически."
         )
 
     attempts: list[str] = []

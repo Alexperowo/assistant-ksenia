@@ -50,7 +50,7 @@ class FallbackSoundDevice(FakeSoundDevice):
             device["default_samplerate"] = 16000
 
     def check_input_settings(self, *, device, **_kwargs):
-        if device == 0:
+        if device == 1:
             raise self.PortAudioError("endpoint busy")
 
     def RawInputStream(self, **_kwargs):
@@ -82,21 +82,37 @@ class AudioInputTests(unittest.TestCase):
         self.assertEqual(candidates[0][2], "Windows WASAPI")
         self.assertEqual(candidates[-1][2], "Windows WDM-KS")
 
-    def test_default_device_is_first_but_other_devices_are_fallbacks(self):
+    def test_default_device_is_ranked_first_for_inventory(self):
         candidates = ranked_input_devices(FakeSoundDevice(), "")
         self.assertEqual(candidates[0][0], 2)
         self.assertEqual(len(candidates), 3)
+
+    def test_multiple_inputs_require_explicit_selection_even_with_default(self):
+        with self.assertRaisesRegex(RuntimeError, "voice.wake_device"):
+            open_best_input_stream(
+                FallbackSoundDevice(),
+                "",
+                lambda *_args: None,
+                target_rate=16000,
+            )
+
+    def test_unknown_named_device_does_not_fallback_to_another_headset(self):
+        candidates = ranked_input_devices(FakeSoundDevice(), "Unknown headset")
+        self.assertEqual(candidates, [])
 
     def test_wake_phrase_accepts_common_recognition_variant(self):
         self.assertTrue(is_activation("сения слушать", "Ксения слушай"))
         self.assertFalse(is_activation("ксения", "Ксения слушай"))
 
-    def test_successful_fallback_keeps_failed_microphone_attempts(self):
+    def test_selected_microphone_fallback_keeps_failed_host_api_attempts(self):
         opened = open_best_input_stream(
-            FallbackSoundDevice(), "", lambda *_args: None, target_rate=16000
+            FallbackSoundDevice(),
+            "JBL Sense Pro",
+            lambda *_args: None,
+            target_rate=16000,
         )
-        self.assertEqual(opened.device_index, 1)
-        self.assertEqual(opened.candidate_count, 3)
+        self.assertEqual(opened.device_index, 0)
+        self.assertEqual(opened.candidate_count, 2)
         self.assertTrue(opened.failed_attempts)
         self.assertIn("endpoint busy", opened.failed_attempts[0])
 

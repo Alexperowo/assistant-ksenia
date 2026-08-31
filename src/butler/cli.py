@@ -146,6 +146,11 @@ def _confirmation_text(name: str, arguments: dict) -> str:
 def _spoken_microphone_error(error: Exception) -> str:
     """Turn technical capture failures into short, actionable spoken guidance."""
     detail = str(error).casefold()
+    if "voice.wake_device" in detail or "несколько аудиовходов" in detail:
+        return (
+            "Найдено несколько аудиовходов. Сначала запустите ярлык Ксения — "
+            "список микрофонов и выберите нужное устройство."
+        )
     if "python" in detail:
         return "Голосовая среда недоступна. Запустите ярлык Ксения — полный аудит."
     if "модель" in detail and ("распозна" in detail or "активац" in detail):
@@ -412,11 +417,13 @@ def _audio_devices(
     if clear:
         set_user_microphone(settings.root, "")
         print(
-            "Сохранённый выбор микрофона удалён. "
-            "Будет использован вход Windows по умолчанию."
+            "Сохранённый выбор микрофона удалён. Один-единственный вход можно "
+            "использовать автоматически; при нескольких входах микрофон нужно "
+            "выбрать явно."
         )
         speech.say_and_wait(
-            "Сохранённый выбор микрофона удалён. Будет использован вход по умолчанию."
+            "Сохранённый выбор микрофона удалён. Если входов несколько, выберите "
+            "нужный микрофон перед запуском разговора."
         )
         return 0
     devices = SpeechRecognizer(settings).list_devices()
@@ -427,10 +434,22 @@ def _audio_devices(
         return 1
     for device in devices:
         marker = "ПО УМОЛЧАНИЮ" if device.get("default") else ""
+        display_name = _spoken_device_name(device.get("name"))
         print(
-            f"{device.get('index')}: {device.get('name')} — {device.get('host_api')}, "
+            f"{device.get('index')}: {display_name} — {device.get('host_api')}, "
             f"{device.get('sample_rate')} Гц {marker}"
         )
+    raw_settings = getattr(settings, "raw", {})
+    voice_settings = raw_settings.get("voice", {}) if isinstance(raw_settings, dict) else {}
+    configured_selector = (
+        str(voice_settings.get("wake_device", "")).strip()
+        if isinstance(voice_settings, dict)
+        else ""
+    )
+    if configured_selector:
+        print(f"Сохранённый выбор микрофона: {configured_selector}.")
+    else:
+        print("Сохранённый выбор микрофона не задан.")
     if interactive and select is None:
         speech.say_and_wait(
             "Введите уникальную часть названия нужного микрофона. "
@@ -442,8 +461,14 @@ def _audio_devices(
         ).strip()
         if selected_text == "-":
             set_user_microphone(settings.root, "")
-            print("Сохранённый выбор удалён. Будет использован вход Windows по умолчанию.")
-            speech.say_and_wait("Сохранённый выбор микрофона удалён.")
+            print(
+                "Сохранённый выбор удалён. При нескольких аудиовходах голосовой "
+                "режим потребует снова выбрать микрофон."
+            )
+            speech.say_and_wait(
+                "Сохранённый выбор микрофона удалён. При нескольких входах "
+                "выберите микрофон перед запуском разговора."
+            )
             return 0
         if selected_text:
             select = selected_text
@@ -478,22 +503,20 @@ def _audio_devices(
         api_names = sorted(
             {str(device.get("host_api", "")) for device in matches if device.get("host_api")}
         )
-        print(
-            f"Выбран микрофон: {next(iter({str(device.get('name', '')) for device in matches}))}."
-        )
+        selected_name = next(iter({str(device.get("name", "")) for device in matches}))
+        print(f"Выбран микрофон: {_spoken_device_name(selected_name)}.")
         if api_names:
             print("Доступные пути захвата: " + ", ".join(api_names))
         print("Выбор сохранён атомарно в config/user.json.")
         speech.say_and_wait(f"Микрофон {_spoken_device_name(selector)} выбран.")
         return 0
-    selection_required = len(devices) > 1 and not any(
-        bool(device.get("default")) for device in devices
-    )
+    selection_required = len(devices) > 1 and not configured_selector
     if selection_required:
         print(
-            "ВНИМАНИЕ: Windows не выбрала микрофон по умолчанию. "
-            "Укажите имя устройства в voice.wake_device; Ксения не станет "
-            "открывать произвольный вход."
+            "ВНИМАНИЕ: найдено несколько аудиовходов, а сохранённый выбор "
+            "микрофона отсутствует. Укажите уникальную часть имени: Ксения не "
+            "станет доверять системному входу по умолчанию или открывать другое "
+            "устройство автоматически."
         )
     spoken_devices = []
     for device in devices[:8]:
@@ -502,8 +525,8 @@ def _audio_devices(
             description += ", используется по умолчанию"
         spoken_devices.append(description)
     spoken_warning = (
-        " Windows не выбрала микрофон по умолчанию. Укажите нужное устройство "
-        "в настройке voice wake device."
+        " Найдено несколько аудиовходов. Укажите нужный микрофон; системный "
+        "вход по умолчанию не будет выбран автоматически."
         if selection_required
         else ""
     )
@@ -757,6 +780,15 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             "shared_capture_unavailable",
             exc,
         )
+        capture_error = str(exc).casefold()
+        if (
+            "voice.wake_device" in capture_error
+            or "несколько аудиовходов" in capture_error
+        ):
+            message = _spoken_microphone_error(exc)
+            print(message)
+            speech.say_and_wait(message)
+            return 2
     recognizer = SpeechRecognizer(settings, capture_endpoint)
     wake_listener = WakeListener(settings, capture_endpoint)
     live_config = settings.raw.get("live", {})
@@ -1619,7 +1651,7 @@ def build_parser() -> argparse.ArgumentParser:
     selection.add_argument(
         "--clear",
         action="store_true",
-        help="вернуться к входу Windows по умолчанию",
+        help="удалить сохранённый выбор микрофона",
     )
     audio_devices.add_argument(
         "--interactive",

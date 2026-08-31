@@ -14,6 +14,7 @@ venv/
 # Personal configuration and mutable state
 config/user.json
 config/user.json.*
+config/.*.lock
 runtime/
 workspace/*
 !workspace/README.txt

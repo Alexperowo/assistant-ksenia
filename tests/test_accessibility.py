@@ -16,7 +16,7 @@ from butler.confirmation import confirmation_text
 
 class AccessibilityTests(unittest.TestCase):
     @patch("butler.cli.SpeechRecognizer")
-    def test_device_inventory_warns_when_windows_has_no_default_input(
+    def test_device_inventory_requires_selection_when_multiple_inputs_exist(
         self, recognizer_class
     ):
         recognizer_class.return_value.list_devices.return_value = [
@@ -25,7 +25,7 @@ class AccessibilityTests(unittest.TestCase):
                 "name": "Input A",
                 "host_api": "Windows WASAPI",
                 "sample_rate": 48000,
-                "default": False,
+                "default": True,
             },
             {
                 "index": 5,
@@ -36,16 +36,45 @@ class AccessibilityTests(unittest.TestCase):
             },
         ]
         speech = MagicMock()
+        settings = SimpleNamespace(raw={"voice": {}})
 
         with redirect_stdout(io.StringIO()) as output:
-            result = _audio_devices(SimpleNamespace(), speech)
+            result = _audio_devices(settings, speech)
 
         self.assertEqual(result, 0)
-        self.assertIn("не выбрала микрофон по умолчанию", output.getvalue())
-        self.assertIn(
-            "не выбрала микрофон по умолчанию",
-            speech.say_and_wait.call_args.args[0],
-        )
+        self.assertIn("найдено несколько аудиовходов", output.getvalue())
+        self.assertIn("системному входу по умолчанию", output.getvalue())
+        self.assertIn("Найдено несколько аудиовходов", speech.say_and_wait.call_args.args[0])
+
+    @patch("butler.cli.SpeechRecognizer")
+    def test_device_inventory_shows_persisted_selection_without_warning(
+        self, recognizer_class
+    ):
+        recognizer_class.return_value.list_devices.return_value = [
+            {
+                "index": 1,
+                "name": "Headset (JBL One)",
+                "host_api": "Windows WASAPI",
+                "sample_rate": 16000,
+                "default": False,
+            },
+            {
+                "index": 2,
+                "name": "Microphone",
+                "host_api": "MME",
+                "sample_rate": 48000,
+                "default": True,
+            },
+        ]
+        speech = MagicMock()
+        settings = SimpleNamespace(raw={"voice": {"wake_device": "JBL One"}})
+
+        with redirect_stdout(io.StringIO()) as output:
+            result = _audio_devices(settings, speech)
+
+        self.assertEqual(result, 0)
+        self.assertIn("Сохранённый выбор микрофона: JBL One", output.getvalue())
+        self.assertNotIn("ВНИМАНИЕ", output.getvalue())
 
     @patch("butler.cli.set_user_microphone")
     @patch("butler.cli.SpeechRecognizer")
@@ -161,6 +190,13 @@ class AccessibilityTests(unittest.TestCase):
         self.assertIn("Микрофон недоступен", message)
         self.assertIn("проверка микрофона", message)
         self.assertNotIn("показаны на экране", message)
+
+    def test_multiple_input_error_points_to_selection_shortcut(self):
+        message = _spoken_microphone_error(
+            RuntimeError("Выберите устройство через voice.wake_device")
+        )
+        self.assertIn("список микрофонов", message)
+        self.assertIn("выберите", message)
 
     def test_missing_voice_python_points_to_audible_audit(self):
         message = _spoken_microphone_error(RuntimeError("Не найден голосовой Python"))
