@@ -13,7 +13,7 @@
 ### 1. Статический и быстрый слой
 
 - синтаксис PowerShell, JSON и Python;
-- не менее 393 unit/integration-тестов;
+- не менее 398 unit/integration-тестов;
 - отсутствие неожиданных warnings и skips;
 - три полных shuffled-order запуска;
 - тайм-ауты сети/subprocess и запрет shell;
@@ -114,7 +114,7 @@ python scripts\performance-report.py --json
 
 Регрессии tool lifecycle проверяют последовательности обычного исполнения, подтверждённого повтора и `TaskCancelled`, а также cooperative cancellation между файлами workspace/RAG. Они подтверждают terminal-состояние вызова и отсутствие продолжения после safe point, но намеренно не заявляют rollback уже завершённого действия или остановку внутри блокирующего внешнего backend-а.
 
-Регрессии fast resident tier проверяют уникальные loopback service/state, запрет запуска профиля чужим менеджером, rollback частично поднятого pool/coordinator, взаимоисключение primary/residents, передачу FAST/DELIBERATE в HTTP payload и research stages, строгий UI-Mate XML parser и fail-closed reviewer JSON. Живой gate дополнительно обязан поднять оба закреплённых 16K процесса, подтвердить отдельные PID/контексты и выполнить только read-only proposals; физическое действие не входит в этот gate до ScreenCaptureService и multi-monitor/DPI mapping.
+Регрессии fast resident tier проверяют уникальные loopback service/state, запрет запуска профиля чужим менеджером, rollback частично поднятого pool/coordinator, взаимоисключение primary/residents, передачу FAST/DELIBERATE в HTTP payload и research stages, физический DPI capture, отрицательные multi-monitor coordinates, строгий UI-Mate XML parser и fail-closed reviewer JSON. Живой gate дополнительно обязан поднять оба закреплённых 16K процесса, подтвердить отдельные PID/контексты и выполнить только read-only proposals; физическое действие не входит в gate до corpus 20–30 экранов и отдельной пользовательской приёмки.
 
 Фактическая отмена streaming-запроса и завершение HTTP reader проверяются отдельно на уже запущенной модели:
 

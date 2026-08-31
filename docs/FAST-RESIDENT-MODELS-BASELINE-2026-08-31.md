@@ -80,7 +80,7 @@ Production-модуль `ui_deliberation.py` ничего не исполняе�
 ## Ограничения и следующий gate
 
 - Agents-A1 выполняет policy/semantic review, но не видит screenshot и не подтверждает точность координат.
-- Нет production ScreenCaptureService с явными bounds виртуального рабочего стола и multi-monitor mapping.
+- На момент baseline не было production ScreenCaptureService; физический DPI-safe capture и mapping добавлены последующим D-027, но multi-monitor пока проверен только unit-cases.
 - `ActionProposal` ещё не передаётся исполнителю. Будущий adapter обязан преобразовать его только в существующие `windows_*` tools, после чего Permission Broker снова применит `windows_write=confirm` и financial guard.
 - В DELIBERATE проверяется каждый шаг, а не только первый. Иначе безопасный `Activities` может следующим шагом превратиться в поиск терминала.
 - Две малые модели не запускаются рядом с большой: coordinator и измерение освобождения/восстановления добавлены следующим чекпоинтом.

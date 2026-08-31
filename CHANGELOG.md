@@ -9,7 +9,8 @@
 - Added: декларативные FAST/DELIBERATE request modes. Agents-A1 deliberate использует измеренный budget 256; UI deliberate — независимый cross-review с максимум одной коррекцией вместо нестабильного native thinking.
 - Security: UI-Mate возвращает только типизированный read-only `ActionProposal`; строгий XML/JSON parser блокирует неизвестный tool, лишние действия, повреждённые параметры и координаты вне 0–999. Reviewer не заменяет Permission Broker, физическое исполнение не подключено.
 - Added: `ModelResidencyCoordinator` взаимоисключает малую пару и primary-модель, восстанавливает точный прежний набор и откатывает частичный сбой. Этапы web research выбирают FAST/DELIBERATE декларативно.
-- Tests: быстрый слой содержит 393 уникальных теста без warnings; добавлены service/state isolation, pool/coordinator rollback, endpoint/request payload, research routing, UI protocol и deliberation regressions.
+- Added: read-only `ScreenCaptureService` получает весь физический virtual desktop в thread-scoped Per-Monitor-V2 DPI-контексте, проверяет monitor/image bounds и отклоняет координаты в промежутках между экранами.
+- Tests: быстрый слой содержит 398 уникальных тестов без warnings; добавлены service/state isolation, pool/coordinator rollback, endpoint/request payload, research routing, DPI/multi-monitor mapping, UI protocol и deliberation regressions.
 
 - Added: выключенные `heavy_candidate` Laguna S 2.1 и `quality_candidate` Ornith Quality Q6_K закреплены точными source commit/size/SHA-256; функциональные роли не менялись.
 - Benchmark: одинаковый семисценарный A/B сравнил Laguna S DFlash off/Q4/BF16, conFIGur8tor Ornith MTP off/n=1/n=2/n=4, Qwen MTP off/n=2 и Ornith Quality. Qwen n=2 сохранил 72,12% acceptance и небольшой выигрыш; Laguna S DFlash и conFIGur8tor MTP замедлили ответы, поэтому кандидаты по умолчанию запускаются без speculative acceleration.
