@@ -8,13 +8,13 @@
 
 Текущая миграция убрала прежние модельные предположения из исполняемого кода. Функциональные роли теперь ссылаются на семантические профили, а конкретные семейства, файлы, источники, commit, размеры, SHA-256 и launch flags находятся только в декларативном каталоге. В `src` и эксплуатационных скриптах нет условий по названию модели и абсолютных путей конкретного компьютера; это закреплено регрессионным тестом.
 
-Кодовый и конфигурационный слой теперь разделяет LLM-runtime по профилям без условий по названию модели. Штатный `ModelManager` живьём принял обе рабочие пары на одном API-контракте: Laguna+DFlash использует PoolSide, Qwen+MTP+mmproj — официальный backend. 1 сентября полный `check.ps1` прошёл 428/428, три перемешанных порядка, release/dependency/Doctor/LAN, живую Laguna 96K за 0,515 с и Silero→Whisper CUDA с `landmark_recall=1.0`. RAG явно пропущен как выключенный. Строгий PCM smoke автоматически открыл Tour One M3, проиграл Silero Xenia с far-reference и отменил длинную фразу за 7,2 мс без SAPI; последующий A/B не обнаружил self-echo даже без AEC.
+Кодовый и конфигурационный слой разделяет LLM-runtime по профилям без условий по названию модели. Штатный `ModelManager` живьём принял обе рабочие пары на одном API-контракте: Laguna+DFlash использует PoolSide, Qwen+MTP+mmproj — официальный backend. Итоговый `check.ps1` 1 сентября прошёл 433/433, три перемешанных порядка, release/dependency/Doctor/LAN, активную Laguna 96K за 0,625 с и Silero→Whisper CUDA с `landmark_recall=1.0`; RAG явно пропущен как выключенный. Отдельный живой CHAT с настоящей историей дал точное совпадение 135/135 streaming-символов и `SELF_INTRO=False`. Строгий PCM smoke автоматически открыл Tour One M3, проиграл Silero Xenia с far-reference и отменил длинную фразу за 7,2 мс без SAPI. Затем человеческая речь во время TTS сохранилась в AEC off/on и дважды прервала полноценный Live-ответ с продолжением без wake-фразы.
 
 ## Автоматический результат
 
-- Обнаружено 428 уникальных unit/integration-тестов.
+- Обнаруживается не менее 433 уникальных unit/integration-тестов.
 - Основной прогон проходит без warnings и skips.
-- Runner требует минимум 428 тестов; release manifest использует то же значение.
+- Runner требует минимум 433 теста; release manifest использует то же значение.
 - Проверяются три дополнительных перемешанных порядка с seed 17, 73 и 211.
 - Python, JSON и все PowerShell-сценарии проходят синтаксическую проверку.
 - Release validator контролирует обязательные файлы, lock-файлы и отсутствие весов/личных данных в архиве.
@@ -44,7 +44,7 @@
 
 Первый живой cancellation-gate обнаружил подтверждённую задержку: checkpoint должен был отменить длинную генерацию через 500 мс, но синхронный `HTTPResponse.close()` удерживал поток около 1437 мс, и `llm_actually_cancelled` появился только через 2016 мс. После socket shutdown и асинхронного cleanup три последовательных повтора дали 578, 657 и 500 мс до исключения отмены. Во всех трёх случаях `active_reader_threads=0` и `stuck_reader_threads=0` после cleanup; процесс модели и порт затем штатно освобождены.
 
-Это подтверждает transport cancellation, но не измеряет физическую остановку звука. Полный barge-in acceptance по-прежнему требует реальный динамик/микрофон и отдельную пару `interrupt_detected → audio_actually_stopped`.
+Это подтверждает transport cancellation. Последующий Tour One M3 тест уже подтвердил слышимую остановку и продолжение с перебивающей реплики; точная пара `interrupt_detected → audio_actually_stopped` остаётся метрикой длинной 20–30-turn серии, а не неизвестностью самого маршрута.
 
 ### Tool lifecycle и cooperative cancellation
 
@@ -148,7 +148,7 @@ Ornith 1.5 35B-A3B APEX MTP Fixed:
 - `generated_text` и `spoken_text` хранятся отдельно;
 - в память попадает только непрерывный префикс полностью завершённых TTS-фраз.
 
-`live.enabled` остаётся `false`. Единые near/far PCM, opt-in WebRTC AEC3/NS, строгий Silero Xenia playback и фактический PCM stop уже реализованы. Не приняты измеримый self-echo A/B, живой произвольный речевой barge-in и продолжение следующей реплики без wake-фразы. Включать Live как обычную настройку до этих тестов нельзя.
+`live.enabled` остаётся `false` в переносимой конфигурации. Единые near/far PCM, opt-in WebRTC AEC3/NS, строгий Silero Xenia playback, фактический PCM stop и произвольный речевой barge-in реализованы. Tour One M3 дважды продолжил диалог с полной перебивающей реплики без wake-фразы и без наблюдаемого self-echo. До обычного default остаётся серия 20–30 ходов, паузы внутри мысли и проверка другого акустического тракта с измеримым эхом.
 
 30 августа единый near-end audio path был проверен настоящими desktop START/STOP. 1 сентября после переподключения JBL автовыбор записал 7,33 с реальной речи, а faster-whisper CUDA дал финал за 0,7 с. Затем добавлен opt-in PCM far-reference: output stream публикует принятые 10-мс кадры в тот же worker, где закреплённый `pywebrtc-audio` применяет AEC3/NS. Три последовательных AEC handshakes, строгий Xenia playback и stop за 7,2 мс зелёные. Акустическая величина echo reduction пока не измерена; подробности в `docs/AUDIO-FULL-DUPLEX-AUDIT.md`.
 
@@ -200,7 +200,7 @@ Permission Broker остаётся главной границей полном�
 
 ## Приоритет следующей разработки
 
-1. Реальный Live: измеренный barge-in/cancellation, единый захват микрофона и AEC/full-duplex поверх готового Live v1.
+1. Реальный Live: 20–30 последовательных ходов, паузы внутри мысли, latency traces и исправление только воспроизводимых сбоев поверх уже работающего speech barge-in/AEC-контура.
 2. Production Sandbox Worker без небезопасного host fallback.
 3. Измеряемая runtime-оптимизация: context profiles, prompt/KV reuse, стабильные ToolProfiles и MTP/DFlash sweep.
 4. Quality gates: RAG reranker только после benchmark, STT-корпус реальных команд и vision fallback.

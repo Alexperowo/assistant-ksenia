@@ -10,6 +10,7 @@ from butler.agent import (
     bounded_result_payload,
     is_raw_tool_markup,
     status_for_tool,
+    without_redundant_self_introduction,
 )
 from butler.chat import ChatError
 from butler.tasking import TaskCancelled
@@ -40,6 +41,29 @@ def tool_call_response(index: int) -> dict:
 
 
 class AgentTests(unittest.TestCase):
+    def test_legacy_self_introduction_is_removed_only_when_answer_continues(self):
+        self.assertEqual(
+            without_redundant_self_introduction(
+                "Меня зовут Тестовый ассистент. Ответ по существу.",
+                "Тестовый ассистент",
+            ),
+            "Ответ по существу.",
+        )
+        self.assertEqual(
+            without_redundant_self_introduction(
+                "Меня зовут Тестовый ассистент.",
+                "Тестовый ассистент",
+            ),
+            "Меня зовут Тестовый ассистент.",
+        )
+        self.assertEqual(
+            without_redundant_self_introduction(
+                "Ответ не связан с именем.",
+                "Тестовый ассистент",
+            ),
+            "Ответ не связан с именем.",
+        )
+
     @patch("butler.agent.ToolExecutor")
     @patch("butler.agent.tool_schemas")
     @patch("butler.agent.complete_chat")
@@ -208,6 +232,17 @@ class AgentTests(unittest.TestCase):
 
         self.assertEqual(spoken, ["Хорошо", ", выполняю."])
 
+    def test_final_text_stream_preserves_internal_whitespace_delta(self):
+        spoken = []
+        stream = _SafeFinalTextStream(spoken.append)
+
+        stream.feed("Первое")
+        stream.feed(" ")
+        stream.feed("слово.")
+        stream.finish("Первое слово.")
+
+        self.assertEqual("".join(spoken), "Первое слово.")
+
     @patch("butler.agent.ToolExecutor")
     @patch("butler.agent.complete_chat")
     def test_raw_tool_markup_gets_one_plain_answer_retry(self, complete, executor_class):
@@ -330,6 +365,7 @@ class AgentTests(unittest.TestCase):
         }
         settings = SimpleNamespace(
             raw={
+                "assistant": {"name": "Тестовый ассистент"},
                 "memory": {"compression_enabled": False},
                 "agent": {
                     "conversation_history_messages": 4,
@@ -356,6 +392,12 @@ class AgentTests(unittest.TestCase):
         self.assertIsNotNone(complete.call_args.kwargs["on_content_delta"])
         self.assertEqual(deltas, ["Я Ксения."])
         self.assertLessEqual(len(complete.call_args.args[1]), 5)
+        prompt = complete.call_args.args[1][0]["content"]
+        self.assertIn("по имени Тестовый ассистент", prompt)
+        self.assertIn("Не представляйся", prompt)
+        self.assertIn("сразу начинай с ответа по существу", prompt)
+        self.assertNotIn("Меня зовут Ксения", prompt)
+        self.assertNotIn("Александр", prompt)
 
     @patch("butler.agent.ToolExecutor")
     def test_conversation_prompt_keeps_compressed_memory(self, _executor_class):

@@ -197,6 +197,33 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "AEC разрешён только"):
                 load_settings(root)
 
+    def test_speech_barge_in_requires_full_duplex_audio_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            default = {
+                "assistant": {"name": "Тест", "default_role": "dev"},
+                "paths": {
+                    "llama_server": "server.exe",
+                    "models_dir": "models",
+                    "runtime_dir": "runtime",
+                },
+                "server": {"host": "127.0.0.1", "port": 18080},
+                "voice": {"playback_backend": "pcm"},
+                "live": {
+                    "enabled": True,
+                    "speech_barge_in": True,
+                    "audio_processing": {"enabled": False},
+                },
+                "models": {},
+            }
+            (root / "config" / "default.json").write_text(
+                json.dumps(default), encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(ConfigError, "Live barge-in"):
+                load_settings(root)
+
     def test_invalid_confirmation_microphone_handoff_timeout_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

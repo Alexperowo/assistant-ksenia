@@ -53,9 +53,11 @@ class MicrophoneCaptureGate:
         self._exclusive_lock = threading.Lock()
 
     def monitor_cancel_event(
-        self, owner_cancelled: threading.Event
+        self, *owner_cancelled: threading.Event
     ) -> _AnyCancellationEvent:
-        return _AnyCancellationEvent(owner_cancelled, self._pause_requested)
+        if not owner_cancelled:
+            raise ValueError("Нужен хотя бы один сигнал завершения monitor-а.")
+        return _AnyCancellationEvent(*owner_cancelled, self._pause_requested)
 
     def monitor_checkpoint(self, owner_cancelled: threading.Event) -> bool:
         """Acknowledge a requested hand-off and wait until capture is released."""

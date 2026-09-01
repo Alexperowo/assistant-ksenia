@@ -70,6 +70,39 @@ def is_raw_tool_markup(text: str) -> bool:
     return any(marker in normalized for marker in _RAW_TOOL_MARKERS)
 
 
+def without_redundant_self_introduction(text: str, assistant_name: str) -> str:
+    """Remove only a legacy repeated identity prefix from conversation context.
+
+    Older CHAT prompts taught the model to start ordinary answers by naming
+    itself. Keep the actual stored exchange intact, but do not feed that
+    accidental pattern back into the next request. An identity-only answer is
+    preserved because it may be the legitimate answer to a name question.
+    """
+    clean_text = text.strip()
+    clean_name = assistant_name.strip()
+    if not clean_text or not clean_name:
+        return clean_text
+    folded = clean_text.casefold()
+    folded_name = clean_name.casefold()
+    prefixes = (
+        f"меня зовут {folded_name}",
+        f"я {folded_name}",
+        f"я — {folded_name}",
+        f"я - {folded_name}",
+    )
+    separators = " \t\r\n.,:;!?…—–-"
+    for prefix in prefixes:
+        if not folded.startswith(prefix):
+            continue
+        boundary = len(prefix)
+        if boundary < len(folded) and folded[boundary] not in separators:
+            continue
+        remainder = clean_text[boundary:].lstrip(separators)
+        if remainder:
+            return remainder
+    return clean_text
+
+
 @dataclass(frozen=True)
 class AgentToolEvent:
     name: str
@@ -101,7 +134,13 @@ class _SafeFinalTextStream:
         self.emitted = False
 
     def _emit(self, text: str) -> None:
-        if self.callback is None or not text.strip():
+        if self.callback is None or not text:
+            return
+        # llama.cpp may emit an internal separator as its own streaming delta.
+        # Leading whitespace is irrelevant after the final answer is stripped,
+        # but dropping a separator after visible text makes generated/spoken
+        # memory differ from the model response and can join spoken words.
+        if not self.emitted and not text.strip():
             return
         self.emitted = True
         self.callback(text)
@@ -348,13 +387,23 @@ class AgentSession:
                 continue
             if not content.strip() or message.get("tool_calls") or is_raw_tool_markup(content):
                 continue
+            if role == "assistant":
+                content = without_redundant_self_introduction(
+                    content,
+                    str(self.settings.raw.get("assistant", {}).get("name", "")),
+                )
             recent.append({"role": role, "content": content})
+        assistant_name = (
+            str(self.settings.raw.get("assistant", {}).get("name", "")).strip()
+            or "локальный ассистент"
+        )
         system_content = (
-            "Ты Ксения, локальный голосовой дворецкий и партнёр Александра. "
+            f"Ты — локальный голосовой ассистент по имени {assistant_name}. "
             "Отвечай по-русски, кратко, естественно и так, чтобы ответ было удобно "
             f"слушать слабовидящему человеку. Сегодня {date.today().isoformat()}. "
-            "Прямо ответь на каждую часть вопроса. Если Александр спрашивает твоё имя, "
-            "скажи: «Меня зовут Ксения». "
+            "Прямо ответь на каждую часть вопроса и сразу начинай с ответа по существу. "
+            "Не представляйся и не повторяй своё имя в начале ответа. Называй имя только "
+            "тогда, когда пользователь прямо спрашивает, как тебя зовут. "
             "В этом коротком разговорном ходе инструменты не нужны и недоступны."
         )
         if compressed_summary:

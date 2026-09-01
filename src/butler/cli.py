@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -49,7 +50,11 @@ from butler.orchestrator import RoutedAgentSession
 from butler.processes import current_process_image_path
 from butler.resilience import RepeatingFailurePolicy
 from butler.speech import SpeechAnnouncer
-from butler.stt import SpeechRecognitionError, SpeechRecognizer
+from butler.stt import (
+    SpeechRecognitionError,
+    SpeechRecognitionTimeout,
+    SpeechRecognizer,
+)
 from butler.tasking import (
     DurableTaskStore,
     TaskCancelled,
@@ -845,6 +850,10 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
     wake_listener = WakeListener(settings, capture_endpoint)
     live_config = settings.raw.get("live", {})
     live_enabled = bool(live_config.get("enabled", False))
+    speech_barge_in_enabled = bool(live_config.get("speech_barge_in", False))
+    barge_in_probe_seconds = float(
+        live_config.get("barge_in_probe_seconds", 2.0)
+    )
     live_minimum_phrase_chars = max(
         1, int(live_config.get("minimum_phrase_chars", 24))
     )
@@ -870,6 +879,7 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
         print(message)
         speech.say_and_wait(message)
         live_enabled = False
+        speech_barge_in_enabled = False
     controls = settings.raw.get("headset_controls", {})
     headset_listener = None
     activation_button = str(controls.get("activation_button", "play_pause"))
@@ -935,68 +945,90 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             voice_config.get("microphone_error_reminder_seconds", 300.0)
         ),
     )
+    pending_live_turns: queue.Queue[dict[str, object]] = queue.Queue(maxsize=1)
     while True:
-        print("Ожидаю фразу «Ксения слушай»...")
         try:
-            wake_event = wake_listener.wait_event(
-                timeout=300,
-                external_events=(
-                    headset_listener.events if headset_listener is not None else None
-                ),
-            )
-            diagnostic_event(
-                settings,
-                "voice_agent",
-                "wake_received",
-                wake_event=wake_event.get("event", ""),
-                device=wake_event.get("device", ""),
-                host_api=wake_event.get("host_api", ""),
-            )
-            microphone_failures.reset()
-            if wake_event.get("event") == "stop":
-                speech.stop()
-                print("[Озвучивание остановлено]")
-                continue
-            if wake_event.get("event") == "headset":
-                print(
-                    f"[Активация кнопкой наушников: {wake_event.get('button', '')}]",
-                    flush=True,
-                )
-            speech.stop()
+            event = pending_live_turns.get_nowait()
+        except queue.Empty:
+            event = None
+        if event is not None:
             trace_id = new_trace_id()
             turn_id = new_trace_id()
-            with trace_scope(trace_id=trace_id, turn_id=turn_id):
-                event = recognizer.listen_after_prompt(
-                    lambda: speech.say_and_wait("Слушаю.")
-                )
-        except WakeListenerTimeout:
-            # The wake worker is periodically reopened so a transient Bluetooth
-            # problem can recover. An idle window is normal and must stay silent.
-            continue
-        except WakeListenerError as exc:
-            print(f"Ошибка микрофона: {exc}")
-            decision = microphone_failures.record_failure(time.monotonic())
             diagnostic_event(
                 settings,
                 "voice_agent",
-                "microphone_retry_scheduled",
-                level="warning",
-                failure_count=decision.failure_count,
-                delay_seconds=decision.delay_seconds,
-                announcement=decision.announce,
+                "barge_in_turn_resumed",
+                trace_id=trace_id,
+                turn_id=turn_id,
+                engine=event.get("engine", ""),
+                capture_seconds=event.get("capture_seconds", 0),
             )
-            if decision.announce:
-                speech.say_and_wait(
-                    _spoken_microphone_error(exc)
-                    + " Я продолжу проверять подключение молча."
+            print("[Продолжаю с реплики, которой вы перебили Ксению]", flush=True)
+        else:
+            print("Ожидаю фразу «Ксения слушай»...")
+            try:
+                wake_event = wake_listener.wait_event(
+                    timeout=300,
+                    external_events=(
+                        headset_listener.events
+                        if headset_listener is not None
+                        else None
+                    ),
                 )
-            if decision.delay_seconds:
-                time.sleep(decision.delay_seconds)
-            continue
-        except SpeechRecognitionError as exc:
-            print(f"Ошибка микрофона: {exc}")
-            speech.say_and_wait(_spoken_microphone_error(exc))
-            continue
+                diagnostic_event(
+                    settings,
+                    "voice_agent",
+                    "wake_received",
+                    wake_event=wake_event.get("event", ""),
+                    device=wake_event.get("device", ""),
+                    host_api=wake_event.get("host_api", ""),
+                )
+                microphone_failures.reset()
+                if wake_event.get("event") == "stop":
+                    speech.stop()
+                    print("[Озвучивание остановлено]")
+                    continue
+                if wake_event.get("event") == "headset":
+                    print(
+                        "[Активация кнопкой наушников: "
+                        f"{wake_event.get('button', '')}]",
+                        flush=True,
+                    )
+                speech.stop()
+                trace_id = new_trace_id()
+                turn_id = new_trace_id()
+                with trace_scope(trace_id=trace_id, turn_id=turn_id):
+                    event = recognizer.listen_after_prompt(
+                        lambda: speech.say_and_wait("Слушаю.")
+                    )
+            except WakeListenerTimeout:
+                # The wake worker is periodically reopened so a transient Bluetooth
+                # problem can recover. An idle window is normal and must stay silent.
+                continue
+            except WakeListenerError as exc:
+                print(f"Ошибка микрофона: {exc}")
+                decision = microphone_failures.record_failure(time.monotonic())
+                diagnostic_event(
+                    settings,
+                    "voice_agent",
+                    "microphone_retry_scheduled",
+                    level="warning",
+                    failure_count=decision.failure_count,
+                    delay_seconds=decision.delay_seconds,
+                    announcement=decision.announce,
+                )
+                if decision.announce:
+                    speech.say_and_wait(
+                        _spoken_microphone_error(exc)
+                        + " Я продолжу проверять подключение молча."
+                    )
+                if decision.delay_seconds:
+                    time.sleep(decision.delay_seconds)
+                continue
+            except SpeechRecognitionError as exc:
+                print(f"Ошибка микрофона: {exc}")
+                speech.say_and_wait(_spoken_microphone_error(exc))
+                continue
 
         user_text = str(event.get("text", "")).strip()
         diagnostic_event(
@@ -1145,7 +1177,11 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
         task_store.transition(task.id, TaskState.RUNNING, "Начинаю")
         task_finished = threading.Event()
         agent_finished = threading.Event()
-        stop_monitor_cancel = microphone_gate.monitor_cancel_event(task_finished)
+        human_barge_in_started = threading.Event()
+        stop_monitor_cancel = microphone_gate.monitor_cancel_event(
+            task_finished,
+            *([live_stream_started] if speech_barge_in_enabled else []),
+        )
         live_output = (
             ConversationCoordinator(
                 speech,
@@ -1160,6 +1196,8 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
         def monitor_voice_stop() -> None:
             stop_listener = WakeListener(settings, capture_endpoint)
             while not task_finished.is_set():
+                if speech_barge_in_enabled and live_stream_started.is_set():
+                    break
                 if not microphone_gate.monitor_checkpoint(task_finished):
                     return
                 try:
@@ -1173,6 +1211,8 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                         cancel_event=stop_monitor_cancel,
                     )
                 except WakeListenerCancelled:
+                    if speech_barge_in_enabled and live_stream_started.is_set():
+                        break
                     if not microphone_gate.monitor_checkpoint(task_finished):
                         return
                     continue
@@ -1224,6 +1264,75 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                     ),
                     task_id=task.id,
                     wake_event=event_name,
+                )
+                return
+
+            if (
+                not speech_barge_in_enabled
+                or live_output is None
+                or task_finished.is_set()
+            ):
+                return
+
+            while not task_finished.is_set():
+                def interrupt_for_human_speech() -> None:
+                    if human_barge_in_started.is_set():
+                        return
+                    human_barge_in_started.set()
+                    diagnostic_milestone(
+                        settings,
+                        "interrupt_detected",
+                        task_id=task.id,
+                        source="human_speech",
+                    )
+                    if not agent_finished.is_set():
+                        try:
+                            task_store.cancel(task.id)
+                        except (KeyError, OSError, ValueError):
+                            pass
+                    live_output.interrupt("human_speech")
+
+                try:
+                    next_turn = recognizer.listen_once(
+                        max_seconds=recognizer.max_command_seconds,
+                        on_voice_started=interrupt_for_human_speech,
+                        no_speech_timeout_seconds=barge_in_probe_seconds,
+                    )
+                except SpeechRecognitionTimeout:
+                    continue
+                except SpeechRecognitionError as exc:
+                    if task_finished.is_set():
+                        return
+                    diagnostic_exception(
+                        settings,
+                        "voice_agent",
+                        "speech_barge_in_failed",
+                        exc,
+                        task_id=task.id,
+                    )
+                    task_finished.wait(1.0)
+                    continue
+                if not human_barge_in_started.is_set():
+                    continue
+                try:
+                    pending_live_turns.put_nowait(next_turn)
+                except queue.Full:
+                    diagnostic_event(
+                        settings,
+                        "voice_agent",
+                        "barge_in_turn_dropped",
+                        level="error",
+                        task_id=task.id,
+                    )
+                    return
+                diagnostic_event(
+                    settings,
+                    "voice_agent",
+                    "barge_in_turn_captured",
+                    task_id=task.id,
+                    engine=next_turn.get("engine", ""),
+                    capture_seconds=next_turn.get("capture_seconds", 0),
+                    recognition_seconds=next_turn.get("recognition_seconds", 0),
                 )
                 return
 
@@ -1350,13 +1459,16 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                 turn_id=turn_id,
                 duration_ms=round((time.monotonic() - task_started) * 1000),
             )
-            print("Задача отменена.")
-            with trace_scope(
-                trace_id=trace_id,
-                turn_id=turn_id,
-                task_id=task.id,
-            ):
-                speech.say_and_wait("Задача отменена.")
+            if human_barge_in_started.is_set():
+                print("[Ответ прерван человеческой речью; распознаю продолжение]")
+            else:
+                print("Задача отменена.")
+                with trace_scope(
+                    trace_id=trace_id,
+                    turn_id=turn_id,
+                    task_id=task.id,
+                ):
+                    speech.say_and_wait("Задача отменена.")
             continue
         except ChatError as exc:
             if live_output is not None:
@@ -1403,7 +1515,13 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             continue
         finally:
             task_finished.set()
-            stop_monitor.join(timeout=4)
+            stop_monitor.join(
+                timeout=(
+                    recognizer.max_command_seconds + 30
+                    if human_barge_in_started.is_set()
+                    else 4
+                )
+            )
         task_store.transition(
             task.id,
             TaskState.COMPLETED,

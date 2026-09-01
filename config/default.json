@@ -92,6 +92,8 @@
   },
   "live": {
     "enabled": false,
+    "speech_barge_in": false,
+    "barge_in_probe_seconds": 2.0,
     "semantic_endpointing": true,
     "turn_complete_silence_seconds": 0.45,
     "turn_ordinary_silence_seconds": 0.85,

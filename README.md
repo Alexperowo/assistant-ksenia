@@ -40,7 +40,7 @@ _English summary: an accessibility-first, local Russian voice assistant and deve
 | Голосовая активация | Vosk: «Ксения слушай» и «Ксения стоп» |
 | Диктовка | faster-whisper Large v3 Turbo, CUDA или CPU fallback |
 | Русский голос | Silero Xenia, числа и даты словами; SAPI остаётся резервом только вне PCM/Live |
-| Live v1 | Потоковая разбивка ответа, подтверждение реально законченного аудио, PCM far-reference и opt-in WebRTC AEC; выключен до echo/barge-in приёмки |
+| Live v1 | Потоковая речь, generated/spoken memory, PCM far-reference, opt-in WebRTC AEC и произвольное речевое перебивание с продолжением без wake-фразы; выключен по умолчанию до длинной приёмки |
 | Локальные модели | Одна активная GGUF-модель через `llama.cpp`, переключение по ролям |
 | Роли | Ассистент, исследователь, разработчик и тяжёлый мозг |
 | Длинные задачи | Профили до 96K, квантованный KV, DFlash/MTP, RAG и сжатие истории |
@@ -86,7 +86,7 @@ flowchart LR
 
 На текущей системе Александра с Windows 11, RTX 2080 Ti 22 ГБ и 48 ГБ ОЗУ проверены:
 
-- 428 unit/integration-тестов и три дополнительных прогона в случайном порядке;
+- 433 unit/integration-теста и три дополнительных прогона в случайном порядке;
 - официальный `llama.cpp b10621` (stable v0.3.0), CUDA 12.4, с закреплёнными SHA-256;
 - отдельный закреплённый PoolSide backend commit `06f8ceb` для Laguna/DFlash, с patch provenance и SHA-256 runtime-файлов;
 - конфигурационно-управляемые DFlash, MTP, multimodal projector и квантованный KV;
@@ -94,7 +94,7 @@ flowchart LR
 - RAG, LAN, браузерное исследование, процессы и безопасные инструменты;
 - единый `AudioCaptureService`: один input stream на весь `voice-agent`, измеренный 40-мс физический input block, аутентифицированные 10-мс near/far PCM-каналы и opt-in WebRTC AEC/NS;
 - строгий PCM Silero Xenia на Tour One M3 и отмена playback за 7,2 мс; PCM/Live никогда не подменяет ошибку роботизированным SAPI;
-- программный Live v1: Vosk partial transcripts → hybrid turn detector, поток итогового ответа, barge-in state machine и раздельные generated/spoken ответы; режим остаётся выключенным до измеримого self-echo A/B и произвольного речевого barge-in;
+- программный Live v1: Vosk partial transcripts → hybrid turn detector, поток итогового ответа, barge-in state machine и раздельные generated/spoken ответы; Tour One M3 живьём принял человеческую речь поверх Xenia и дважды продолжил с полной реплики без wake-фразы, но portable default остаётся выключенным до серии 20–30 ходов;
 - стадийная установка, резервная копия и откат `llama.cpp`;
 - распаковка release ZIP и изолированный online installer smoke-test.
 

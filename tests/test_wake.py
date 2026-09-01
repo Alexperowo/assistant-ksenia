@@ -145,6 +145,16 @@ class MicrophoneCaptureGateTests(unittest.TestCase):
                 self.fail("Захват не должен быть предоставлен без monitor acknowledgement.")
         self.assertFalse(gate.monitor_cancel_event(owner_cancelled).is_set())
 
+    def test_any_owner_can_cancel_monitor(self):
+        gate = MicrophoneCaptureGate()
+        task_finished = threading.Event()
+        streaming_started = threading.Event()
+        combined = gate.monitor_cancel_event(task_finished, streaming_started)
+
+        self.assertFalse(combined.is_set())
+        streaming_started.set()
+        self.assertTrue(combined.is_set())
+
 
 if __name__ == "__main__":
     unittest.main()

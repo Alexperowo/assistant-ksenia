@@ -4,7 +4,7 @@
 
 ## Вывод
 
-Существующий Live-контур нельзя переписывать: state machine, streaming TTS, hybrid endpointing, barge-in ordering и разделение `generated_text`/`spoken_text` уже реализованы и покрыты тестами. Нижний аудиотракт теперь также имеет единый near/far PCM path и opt-in WebRTC AEC3. Незакрытая часть сузилась до измеримого качества подавления self-echo, произвольного речевого barge-in и продолжения диалога без повторной wake-фразы.
+Существующий Live-контур нельзя переписывать: state machine, streaming TTS, hybrid endpointing, barge-in ordering и разделение `generated_text`/`spoken_text` уже реализованы и покрыты тестами. Нижний аудиотракт имеет единый near/far PCM path и opt-in WebRTC AEC3. Произвольный speech-start barge-in и продолжение диалога без повторной wake-фразы теперь также реализованы и проверены на Tour One M3. Незакрытая часть — длинная серия 20–30 ходов, паузы внутри мысли и измеримое сравнение при устройстве, где self-echo действительно присутствует.
 
 В обычном `voice-agent` теперь работает единый `AudioCaptureService`. Один дочерний процесс открывает физический input stream и публикует mono/int16 PCM по 10 мс через ограниченные очереди. `wake_worker.py`, `stt_service.py`, Vosk fallback и busy stop-monitor подключаются как потребители к одному локальному потоку:
 
@@ -25,11 +25,11 @@
 | `LiveSession` и streaming TTS | DONE | `src/butler/live.py`; FIFO completion и late-callback тесты |
 | Generated/spoken text | DONE | только непрерывный полностью проигранный prefix попадает в память |
 | LLM cancellation | DONE | живой Laguna/PoolSide gate, 500–657 мс до отмены |
-| Keyword/headset barge-in | PARTIAL | stop monitor и фактический PCM stop работают; произвольная речь ещё не подключена |
+| Keyword/headset barge-in | DONE для opt-in Live | до первой речевой дельты действует keyword/headset stop; после начала ответа STT ловит произвольную речь, останавливает TTS/LLM и передаёт полный следующий ход без wake-фразы |
 | Hybrid turn detection | DONE для записываемой команды | Vosk partial + amplitude gate + semantic timing; не работает постоянно во время TTS |
 | Единоличное владение устройством | DONE для `voice-agent` | один capture worker владеет endpoint; wake/STT/stop переключают подписки, fallback сохраняет прежний gate |
 | `AudioCaptureService` / ring buffer | DONE для near/far transport | loopback + случайный ключ, точные 10-мс mono/int16 frames, bounded queues, один render publisher и обнаружение разрыва |
-| AEC | PARTIAL | WebRTC AEC3 интегрирован; первый Tour One M3 A/B не обнаружил self-echo даже без DSP, но одновременная человеческая речь ещё не проверена |
+| AEC | PARTIAL | WebRTC AEC3 интегрирован; Tour One M3 A/B не обнаружил self-echo даже без DSP, а одновременная человеческая речь сохранилась и распозналась; неизвестна эффективность на тракте с измеримым эхом |
 | Noise suppression / AGC | PARTIAL | NS 0–3 подключён opt-in; AGC доступен отдельным флагом, но качество STT не принято |
 | Input/output device profile | PARTIAL | input автоматически выбирается по роли и реальному open/start; PCM умеет точный Windows default или устойчивый фрагмент output, но профиль задержки устройства ещё не принят |
 | Device calibration | MISSING | нет корреляционного измерения render→capture delay |
@@ -93,11 +93,11 @@ Microsoft sample требует Windows build 22540+; текущая машин�
 2. **Единый near-end worker — DONE для `voice-agent`.** Один процесс владеет input stream и публикует 10-мс frames в ограниченные очереди. Wake, partial/final STT и stop-monitor являются потребителями. Старый путь сохранён как fallback.
 3. **Output contract — DONE для opt-in PCM.** Read-only инвентаризация, точный Windows default, явный selector и фактически открытый route реализованы. SoundPlayer остаётся default до физического A/B.
 4. **Render reference — DONE для transport.** PCM backend публикует только принятые output stream кадры; loopback требует случайный memory-only ключ, допускает одного publisher и очищает bounded queue при разрыве.
-5. **AEC adapter — PARTIAL.** Закреплённый WebRTC wheel интегрирован, конфигурация fail-closed и реальный Xenia PCM smoke зелёный. Физический A/B 1 сентября дважды проиграл одну Xenia-фразу на Tour One M3 и не нашёл активных near-end кадров даже без AEC; DSP не включён, потому что измеримого выигрыша нет. Следующий тест должен добавить человеческую речь во время TTS, затем synthetic echo corpus при необходимости. NS и AGC сравнивать отдельно, чтобы не ухудшить окончания.
+5. **AEC adapter — PARTIAL.** Закреплённый WebRTC wheel интегрирован, конфигурация fail-closed и реальный Xenia PCM smoke зелёный. Физический A/B 1 сентября не нашёл self-echo даже без AEC; отдельный проход с человеческой речью поверх TTS дал 131 активный кадр без AEC и 202 с AEC, причём второй вариант распознал полную тестовую фразу. Это доказывает сохранение near speech на данном тракте, но не echo reduction. NS и AGC сравнивать отдельно, чтобы не ухудшить окончания.
 6. **Calibration profile.** Только если измерения показывают пользу: `input_endpoint`, `output_endpoint`, sample rates, estimated echo delay и AEC settings. При смене устройства профиль не переиспользовать вслепую.
-7. **Physical acceptance.** Наушники, затем JBL-динамики: 20–30 ходов, паузы 1–2 секунды, произвольный barge-in, отсутствие self-interrupt, `interrupt_detected → audio_actually_stopped`, корректный spoken prefix.
+7. **Physical acceptance — первый проход DONE, длинная серия PENDING.** На Tour One M3 обычная человеческая речь дважды прервала Xenia, остановила текущую генерацию/очередь и целиком стала следующим ходом без новой wake-фразы. Теперь нужны 20–30 ходов, паузы 1–2 секунды, корреляция `interrupt_detected → audio_actually_stopped` и проверка spoken prefix после каждого сбоя.
 
-`live.enabled`, `voice.playback_backend=pcm` и `live.audio_processing.enabled` остаются выключенными по умолчанию, пока пункты 5–7 не приняты на реальном устройстве. Успешное воспроизведение и установка DSP-библиотеки сами по себе не считаются готовым full-duplex.
+`live.enabled`, `voice.playback_backend=pcm`, `live.audio_processing.enabled` и `live.speech_barge_in` остаются выключенными в переносимой конфигурации до длинной серии. Произвольный barge-in fail-closed требует одновременно Live, PCM и AEC; при недоступном streaming STT небезопасного fallback нет.
 
 ## Физический baseline 1 сентября
 

@@ -145,6 +145,7 @@ def capture_phrase(
     before_capture=None,
     on_event=None,
     partial_model=None,
+    no_speech_timeout_seconds: float | None = None,
 ):
     import sounddevice as sd
 
@@ -179,8 +180,13 @@ def capture_phrase(
                 break
         capture_started_at = time.monotonic()
         deadline = capture_started_at + max_seconds
+        requested_no_speech_timeout = (
+            float(args.no_speech_timeout_seconds)
+            if no_speech_timeout_seconds is None
+            else float(no_speech_timeout_seconds)
+        )
         no_speech_deadline = capture_started_at + min(
-            max_seconds, max(2.0, float(args.no_speech_timeout_seconds))
+            max_seconds, max(0.5, requested_no_speech_timeout)
         )
         resample_state = None
         pre_roll: deque[bytes] = deque()
@@ -452,6 +458,9 @@ def main() -> int:
                     before_capture=wait_for_start if prepare_before_prompt else None,
                     on_event=emit_capture_event,
                     partial_model=partial_model,
+                    no_speech_timeout_seconds=command.get(
+                        "no_speech_timeout_seconds"
+                    ),
                 )
                 text = ""
                 engine = "faster-whisper"
@@ -499,7 +508,11 @@ def main() -> int:
                     exc.telemetry if isinstance(exc, AudioCaptureError) else {}
                 )
                 event = {
-                    "event": "error",
+                    "event": (
+                        "timeout"
+                        if telemetry.get("endpoint_reason") == "no_speech"
+                        else "error"
+                    ),
                     "id": request_id,
                     "error": str(exc),
                     **telemetry,

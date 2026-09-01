@@ -22,6 +22,10 @@ class SpeechRecognitionError(RuntimeError):
     pass
 
 
+class SpeechRecognitionTimeout(SpeechRecognitionError):
+    """No speech arrived during a bounded listening window."""
+
+
 _AUDIO_TELEMETRY_KEYS = (
     "device",
     "host_api",
@@ -349,6 +353,8 @@ class SpeechRecognizer:
         max_seconds: int,
         prompt: Callable[[], None] | None = None,
         on_partial: Callable[[str], None] | None = None,
+        on_voice_started: Callable[[], None] | None = None,
+        no_speech_timeout_seconds: float | None = None,
     ) -> dict[str, object] | None:
         with self._lock:
             if not self._start_service() or self._service is None:
@@ -372,14 +378,17 @@ class SpeechRecognizer:
                 prompt_synchronized=prompt is not None,
             )
             try:
-                self._service.stdin.write(
-                    json.dumps(
-                        {
-                            "cmd": "prepare_listen" if prompt is not None else "listen",
-                            "id": request_id,
-                            "max_seconds": max_seconds,
-                        }
+                command = {
+                    "cmd": "prepare_listen" if prompt is not None else "listen",
+                    "id": request_id,
+                    "max_seconds": max_seconds,
+                }
+                if no_speech_timeout_seconds is not None:
+                    command["no_speech_timeout_seconds"] = max(
+                        0.5, float(no_speech_timeout_seconds)
                     )
+                self._service.stdin.write(
+                    json.dumps(command)
                     + "\n"
                 )
                 self._service.stdin.flush()
@@ -422,9 +431,21 @@ class SpeechRecognizer:
                                     request_id=request_id,
                                 )
                         continue
+                    if event.get("event") == "voice_started":
+                        if on_voice_started is not None:
+                            try:
+                                on_voice_started()
+                            except Exception as exc:
+                                diagnostic_exception(
+                                    self.settings,
+                                    "stt",
+                                    "voice_started_callback_failed",
+                                    exc,
+                                    request_id=request_id,
+                                )
+                        continue
                     if event.get("event") in {
                         "capture_started",
-                        "voice_started",
                         "semantic_endpointing_unavailable",
                         "capture_completed",
                     }:
@@ -447,6 +468,21 @@ class SpeechRecognizer:
                     "Связь со STT потеряна после начала слушания; "
                     "повторная запись без нового приглашения не запущена."
                 ) from exc
+            if event.get("event") == "timeout":
+                with self._request_trace_lock:
+                    self._request_trace_fields.pop(request_id, None)
+                    self._partial_milestones.discard(request_id)
+                diagnostic_event(
+                    self.settings,
+                    "stt",
+                    "listen_timeout",
+                    request_id=request_id,
+                    duration_ms=round((time.monotonic() - started) * 1000),
+                    **_audio_telemetry(event),
+                )
+                raise SpeechRecognitionTimeout(
+                    str(event.get("error", "Речь не обнаружена вовремя."))
+                )
             if event.get("event") != "transcript":
                 with self._request_trace_lock:
                     self._request_trace_fields.pop(request_id, None)
@@ -524,6 +560,8 @@ class SpeechRecognizer:
         max_seconds: int | None = None,
         *,
         on_partial: Callable[[str], None] | None = None,
+        on_voice_started: Callable[[], None] | None = None,
+        no_speech_timeout_seconds: float | None = None,
     ) -> dict[str, object]:
         effective_max_seconds = max_seconds or self.max_command_seconds
         if not self.python.is_file():
@@ -536,9 +574,16 @@ class SpeechRecognizer:
         service_result = self._listen_service(
             effective_max_seconds,
             on_partial=on_partial,
+            on_voice_started=on_voice_started,
+            no_speech_timeout_seconds=no_speech_timeout_seconds,
         )
         if service_result is not None:
             return service_result
+
+        if on_voice_started is not None or no_speech_timeout_seconds is not None:
+            raise SpeechRecognitionError(
+                "Потоковое обнаружение речи требует готовый quality STT service."
+            )
 
         return self._listen_worker(effective_max_seconds)
 

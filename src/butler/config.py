@@ -946,9 +946,13 @@ def load_settings(root: Path | None = None) -> Settings:
     if not isinstance(live_enabled, bool):
         raise ConfigError("Параметр live.enabled должен быть логическим значением.")
     semantic_endpointing = live.get("semantic_endpointing", True)
-    if not isinstance(semantic_endpointing, bool):
+    speech_barge_in = live.get("speech_barge_in", False)
+    if not isinstance(semantic_endpointing, bool) or not isinstance(
+        speech_barge_in, bool
+    ):
         raise ConfigError(
-            "Параметр live.semantic_endpointing должен быть логическим значением."
+            "Параметры live.semantic_endpointing и live.speech_barge_in "
+            "должны быть логическими значениями."
         )
     audio_processing = live.get("audio_processing", {})
     if not isinstance(audio_processing, dict):
@@ -972,6 +976,7 @@ def load_settings(root: Path | None = None) -> Settings:
         )
         stream_delay_ms = int(audio_processing.get("stream_delay_ms", 0))
         ns_level = int(audio_processing.get("ns_level", 1))
+        barge_in_probe_seconds = float(live.get("barge_in_probe_seconds", 2.0))
     except (TypeError, ValueError) as exc:
         raise ConfigError("Числовые параметры live повреждены.") from exc
     if not 1 <= minimum_phrase_chars <= maximum_phrase_chars <= 2_000:
@@ -994,12 +999,24 @@ def load_settings(root: Path | None = None) -> Settings:
         raise ConfigError("AEC stream delay должен быть от 0 до 1000 мс.")
     if not 0 <= ns_level <= 3:
         raise ConfigError("Уровень noise suppression должен быть от 0 до 3.")
+    if not 0.5 <= barge_in_probe_seconds <= 5.0:
+        raise ConfigError("Live barge-in probe должен быть от 0,5 до 5 секунд.")
     if audio_processing_enabled and (not live_enabled or playback_backend != "pcm"):
         raise ConfigError(
             "AEC разрешён только при live.enabled=true и voice.playback_backend=pcm."
         )
+    if speech_barge_in and (
+        not live_enabled
+        or playback_backend != "pcm"
+        or not audio_processing_enabled
+    ):
+        raise ConfigError(
+            "Произвольный Live barge-in требует Live, PCM и включённый AEC."
+        )
     if live:
         live["semantic_endpointing"] = semantic_endpointing
+        live["speech_barge_in"] = speech_barge_in
+        live["barge_in_probe_seconds"] = barge_in_probe_seconds
         live["turn_complete_silence_seconds"] = turn_silences[0]
         live["turn_ordinary_silence_seconds"] = turn_silences[1]
         live["turn_incomplete_silence_seconds"] = turn_silences[2]

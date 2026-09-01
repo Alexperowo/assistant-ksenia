@@ -6,7 +6,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from butler.stt import SpeechRecognitionError, SpeechRecognizer
+from butler.stt import (
+    SpeechRecognitionError,
+    SpeechRecognitionTimeout,
+    SpeechRecognizer,
+)
 
 
 class SpeechRecognizerTests(unittest.TestCase):
@@ -183,17 +187,54 @@ class SpeechRecognizerTests(unittest.TestCase):
             )
             prompt = MagicMock()
             on_partial = MagicMock()
+            on_voice_started = MagicMock()
 
             with patch.object(recognizer, "_start_service", return_value=True):
-                event = recognizer._listen_service(45, prompt, on_partial)
+                event = recognizer._listen_service(
+                    45,
+                    prompt,
+                    on_partial,
+                    on_voice_started,
+                )
 
             self.assertEqual(event["text"], "проверка")
             prompt.assert_called_once_with()
             on_partial.assert_called_once_with("проверь")
+            on_voice_started.assert_called_once_with()
             writes = "".join(call.args[0] for call in stdin.write.call_args_list)
             commands = [json.loads(line) for line in writes.splitlines()]
             self.assertEqual(commands[0]["cmd"], "prepare_listen")
             self.assertEqual(commands[1]["cmd"], "start_listen")
+            recognizer._service = None
+
+    def test_no_speech_timeout_is_nonfatal_and_sent_to_service(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = SimpleNamespace(
+                root=root,
+                runtime_dir=root / "runtime",
+                raw={"diagnostics": {"enabled": False}, "voice": {}},
+            )
+            recognizer = SpeechRecognizer(settings)
+            stdin = MagicMock()
+            recognizer._service = SimpleNamespace(stdin=stdin)
+            recognizer._events.put(
+                {
+                    "event": "timeout",
+                    "id": "1",
+                    "endpoint_reason": "no_speech",
+                }
+            )
+
+            with patch.object(recognizer, "_start_service", return_value=True):
+                with self.assertRaises(SpeechRecognitionTimeout):
+                    recognizer._listen_service(
+                        45,
+                        no_speech_timeout_seconds=1.5,
+                    )
+
+            command = json.loads(stdin.write.call_args_list[0].args[0])
+            self.assertEqual(command["no_speech_timeout_seconds"], 1.5)
             recognizer._service = None
 
     def test_worker_exit_after_listen_started_does_not_trigger_second_recording(self):
