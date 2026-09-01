@@ -229,6 +229,36 @@ class SpeechPrivacyTests(unittest.TestCase):
             self.assertFalse(accepted)
             sapi.assert_not_called()
 
+    def test_pcm_speech_never_falls_back_to_sapi(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            script = root / "scripts" / "speak.ps1"
+            script.parent.mkdir()
+            script.touch()
+            settings = SimpleNamespace(
+                runtime_dir=root / "runtime",
+                raw={"diagnostics": {"enabled": False}},
+            )
+            announcer = SpeechAnnouncer(
+                root,
+                voice_config={
+                    "engine": "silero",
+                    "speaker": "xenia",
+                    "playback_backend": "pcm",
+                },
+                diagnostics_source=settings,
+            )
+
+            with (
+                patch.object(announcer, "_send_silero", return_value=False),
+                patch.object(announcer, "_speak_with_sapi") as sapi,
+            ):
+                announcer.say("Обычная фраза.")
+                announcer.say_and_wait("Фраза с ожиданием.")
+                announcer.test_voices()
+
+            sapi.assert_not_called()
+
     def test_tracked_worker_failure_reports_failure_without_sapi_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

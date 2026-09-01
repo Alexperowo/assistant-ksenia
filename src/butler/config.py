@@ -922,6 +922,14 @@ def load_settings(root: Path | None = None) -> Settings:
     voice["confirmation_microphone_handoff_timeout_seconds"] = (
         confirmation_handoff_timeout
     )
+    playback_backend = str(voice.get("playback_backend", "system")).strip().casefold()
+    if playback_backend not in {"system", "pcm"}:
+        raise ConfigError("voice.playback_backend должен быть system или pcm.")
+    output_device = voice.get("output_device", "")
+    if not isinstance(output_device, str):
+        raise ConfigError("voice.output_device должен быть строкой.")
+    voice["playback_backend"] = playback_backend
+    voice["output_device"] = output_device.strip()
     live = raw.get("live", {})
     if not isinstance(live, dict):
         raise ConfigError("Раздел live должен быть объектом.")
@@ -933,6 +941,15 @@ def load_settings(root: Path | None = None) -> Settings:
         raise ConfigError(
             "Параметр live.semantic_endpointing должен быть логическим значением."
         )
+    audio_processing = live.get("audio_processing", {})
+    if not isinstance(audio_processing, dict):
+        raise ConfigError("Раздел live.audio_processing должен быть объектом.")
+    audio_processing_enabled = audio_processing.get("enabled", False)
+    auto_gain_control = audio_processing.get("auto_gain_control", False)
+    if not isinstance(audio_processing_enabled, bool) or not isinstance(
+        auto_gain_control, bool
+    ):
+        raise ConfigError("Флаги live.audio_processing должны быть логическими.")
     try:
         minimum_phrase_chars = int(live.get("minimum_phrase_chars", 24))
         maximum_phrase_chars = int(live.get("maximum_phrase_chars", 220))
@@ -944,6 +961,8 @@ def load_settings(root: Path | None = None) -> Settings:
             float(live.get("turn_ordinary_silence_seconds", 0.85)),
             float(live.get("turn_incomplete_silence_seconds", 2.2)),
         )
+        stream_delay_ms = int(audio_processing.get("stream_delay_ms", 0))
+        ns_level = int(audio_processing.get("ns_level", 1))
     except (TypeError, ValueError) as exc:
         raise ConfigError("Числовые параметры live повреждены.") from exc
     if not 1 <= minimum_phrase_chars <= maximum_phrase_chars <= 2_000:
@@ -962,6 +981,14 @@ def load_settings(root: Path | None = None) -> Settings:
             "Паузы Live-реплики должны удовлетворять условию "
             "0 < complete <= ordinary <= incomplete <= 10."
         )
+    if not 0 <= stream_delay_ms <= 1_000:
+        raise ConfigError("AEC stream delay должен быть от 0 до 1000 мс.")
+    if not 0 <= ns_level <= 3:
+        raise ConfigError("Уровень noise suppression должен быть от 0 до 3.")
+    if audio_processing_enabled and (not live_enabled or playback_backend != "pcm"):
+        raise ConfigError(
+            "AEC разрешён только при live.enabled=true и voice.playback_backend=pcm."
+        )
     if live:
         live["semantic_endpointing"] = semantic_endpointing
         live["turn_complete_silence_seconds"] = turn_silences[0]
@@ -970,6 +997,11 @@ def load_settings(root: Path | None = None) -> Settings:
         live["minimum_phrase_chars"] = minimum_phrase_chars
         live["maximum_phrase_chars"] = maximum_phrase_chars
         live["playback_timeout_seconds"] = playback_timeout_seconds
+        audio_processing["enabled"] = audio_processing_enabled
+        audio_processing["stream_delay_ms"] = stream_delay_ms
+        audio_processing["ns_level"] = ns_level
+        audio_processing["auto_gain_control"] = auto_gain_control
+        live["audio_processing"] = audio_processing
     settings = Settings(
         root=root,
         raw=raw,

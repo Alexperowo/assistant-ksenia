@@ -196,6 +196,14 @@ Agents-A1 принят как текущий `researcher`: FAST использу
 
 Риск: три снимка не репрезентативны, coordinate regions размечаются человеком, а текстовый reviewer не видит экран. Поэтому UI execution остаётся отключённым до 20–30 разных случаев и одного отдельно подтверждённого обратимого действия через существующие `windows_*` tools и Permission Broker. Откат — удалить runner/evaluator; ScreenCaptureService и resident-модели остаются независимыми. Полный baseline: `docs/UI-MATE-READONLY-ACCEPTANCE-2026-08-31.md`.
 
+## D-029: AEC получает только фактически проигрываемый PCM и не допускает SAPI-подмену
+
+Проблема: `System.Media.SoundPlayer` не отдаёт render PCM, поэтому собственный голос Ксении нельзя вычесть из микрофона. Простая установка AEC-библиотеки без общего near/far времени создала бы ложную границу. Первый opt-in spike дополнительно выявил воспроизводимый таймаут far handshake: при AEC дочерний worker блокировался в чтении Windows `stdin` pipe, хотя сам DSP обрабатывал реальные JBL-кадры примерно за 0,07–0,21 мс.
+
+Выбран узкий PCM backend. Output разрешается по точному Windows default или устойчивому фрагменту имени, WAV пишется 10-мс кадрами, а far reference публикуется только после успешного `RawOutputStream.write`. Один аутентифицированный loopback publisher передаёт far в тот же capture worker, где закреплённый `pywebrtc-audio 0.1.0` применяет AEC3/NS к near. Управляющий pipe на Windows читается через неблокирующий `PeekNamedPipe`, поэтому main thread не мешает audio/socket threads. При PCM любой отказ Silero, output или far-reference заканчивается без SAPI: системный голос не имеет far reference и может вызвать self-interrupt.
+
+Отвергнуты публикация WAV сразу после синтеза, прямой LLM→audio device, второй физический input owner, автоматический SAPI fallback и преждевременное включение Live. Риски: WebRTC wheel молодой и неподписанный, stream delay Bluetooth не откалиброван, а успешный playback не доказывает величину echo reduction. Проверка: SHA-256/source lock, unit-тесты loopback/frame/resample/output/config/pipe, три последовательных AEC handshakes после трёх секунд захвата, строгий Xenia PCM playback на Tour One M3 и отмена с worker completion за 7,2 мс. Откат — оставить `system`, `live.enabled=false` и `audio_processing.enabled=false`; legacy voice path не зависит от PCM/AEC. Следующий допуск требует synthetic и физический A/B, произвольный speech barge-in и 20–30 turns.
+
 ## Как добавлять решение
 
 Новая запись должна содержать проблему, выбранный вариант, отвергнутые альтернативы, риски, способ проверки и план отката. Если решение меняет безопасность или пользовательский контракт, требуется согласование Александра.

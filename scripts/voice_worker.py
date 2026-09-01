@@ -14,8 +14,11 @@ import wave
 from datetime import datetime
 from pathlib import Path
 
+from audio_input import TOKEN_ENVIRONMENT_KEY
+from audio_output import PcmPlaybackController
 
 PLAYBACK_BACKEND = "System.Media.SoundPlayer"
+PCM_PLAYBACK_BACKEND = "sounddevice.RawOutputStream"
 OUTPUT_ROUTE = "windows_default"
 SILERO_RUSSIAN_QUALITY_OPTIONS = {
     "put_accent": True,
@@ -89,6 +92,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--runtime-dir", type=Path, required=True)
     parser.add_argument("--leading-silence-ms", type=int, default=120)
     parser.add_argument("--cold-leading-silence-ms", type=int, default=1000)
+    parser.add_argument(
+        "--playback-backend", choices=["system", "pcm"], default="system"
+    )
+    parser.add_argument("--output-device", default="")
+    parser.add_argument("--far-host", default="")
+    parser.add_argument("--far-port", type=int, default=0)
     return parser.parse_args()
 
 
@@ -121,6 +130,10 @@ class PlaybackController:
     def generation(self) -> int:
         with self._lock:
             return self._generation
+
+    @property
+    def output_route(self) -> str:
+        return OUTPUT_ROUTE
 
     def play(self, path: Path, generation: int) -> bool:
         player_script = Path(__file__).with_name("play-wav.ps1")
@@ -258,12 +271,16 @@ def main() -> int:
                 **SILERO_RUSSIAN_QUALITY_OPTIONS,
             )
         warmup_seconds = time.monotonic() - warmup_started_at
+        playback_backend = (
+            PCM_PLAYBACK_BACKEND if args.playback_backend == "pcm" else PLAYBACK_BACKEND
+        )
+        output_route = args.output_device.strip() or OUTPUT_ROUTE
         append_worker_log(
             log_path,
             f"[{datetime.now().isoformat(timespec='seconds')}] "
             f"Silero запущен: model={args.model}, speaker={args.speaker}, "
-            f"device={active_device}, playback={PLAYBACK_BACKEND}, "
-            f"output={OUTPUT_ROUTE}, прогрев={warmup_seconds:.2f} с, pid={os.getpid()}\n",
+            f"device={active_device}, playback={playback_backend}, "
+            f"output={output_route}, прогрев={warmup_seconds:.2f} с, pid={os.getpid()}\n",
         )
         print(
             json.dumps(
@@ -272,8 +289,10 @@ def main() -> int:
                     "device": active_device,
                     "warmup_ms": round(warmup_seconds * 1000),
                     "pid": os.getpid(),
-                    "playback_backend": PLAYBACK_BACKEND,
-                    "output_route": OUTPUT_ROUTE,
+                    "playback_backend": playback_backend,
+                    "output_route": output_route,
+                    "far_reference": bool(args.far_port),
+                    "far_port": args.far_port,
                 }
             ),
             flush=True,
@@ -288,7 +307,18 @@ def main() -> int:
 
     counter = 0
     commands: queue.Queue[dict | None] = queue.Queue()
-    controller = PlaybackController()
+    if args.playback_backend == "pcm":
+        far_token = os.environ.get(TOKEN_ENVIRONMENT_KEY, "")
+        if args.far_port and len(far_token) < 32:
+            raise RuntimeError("Не задан ключ локального far-end reference.")
+        controller = PcmPlaybackController(
+            args.output_device,
+            far_host=args.far_host,
+            far_port=args.far_port,
+            far_token=far_token,
+        )
+    else:
+        controller = PlaybackController()
     reader = threading.Thread(target=read_commands, args=(commands, controller), daemon=True)
     reader.start()
     last_playback_at = 0.0
@@ -393,8 +423,8 @@ def main() -> int:
                                 "chunk_count": chunk_count,
                                 "audio_suspiciously_short": suspiciously_short,
                                 "leading_silence_ms": leading_silence_ms,
-                                "playback_backend": PLAYBACK_BACKEND,
-                                "output_route": OUTPUT_ROUTE,
+                                "playback_backend": playback_backend,
+                                "output_route": controller.output_route,
                             }
                         ),
                         flush=True,
@@ -417,7 +447,7 @@ def main() -> int:
                 f"Озвучивание id={request_id or '-'}; символов={len(text)}; "
                 f"device={active_device}; синтез={synthesis_seconds:.2f} с; "
                 f"воспроизведение={playback_seconds:.2f} с; "
-                f"аудио={audio_duration_ms} мс; output={OUTPUT_ROUTE}; "
+                f"аудио={audio_duration_ms} мс; output={controller.output_route}; "
                 f"фрагментов={chunk_count}; подозрительно_коротко={suspiciously_short}; "
                 f"тишина={leading_silence_ms} мс; "
                 f"время={total_seconds:.2f} с; "
@@ -439,8 +469,8 @@ def main() -> int:
                             "audio_suspiciously_short": suspiciously_short,
                             "leading_silence_ms": leading_silence_ms,
                             "duration_ms": round(total_seconds * 1000),
-                            "playback_backend": PLAYBACK_BACKEND,
-                            "output_route": OUTPUT_ROUTE,
+                            "playback_backend": playback_backend,
+                            "output_route": controller.output_route,
                         }
                         | ({"error": failure} if failure else {})
                         | ({"cancelled": True} if cancelled else {})

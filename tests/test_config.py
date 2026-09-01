@@ -174,6 +174,29 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "Паузы Live-реплики"):
                 load_settings(root)
 
+    def test_aec_requires_live_pcm_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            default = {
+                "assistant": {"name": "Тест", "default_role": "dev"},
+                "paths": {
+                    "llama_server": "server.exe",
+                    "models_dir": "models",
+                    "runtime_dir": "runtime",
+                },
+                "server": {"host": "127.0.0.1", "port": 18080},
+                "voice": {"playback_backend": "system"},
+                "live": {"audio_processing": {"enabled": True}},
+                "models": {},
+            }
+            (root / "config" / "default.json").write_text(
+                json.dumps(default), encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(ConfigError, "AEC разрешён только"):
+                load_settings(root)
+
     def test_invalid_confirmation_microphone_handoff_timeout_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -462,6 +485,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(settings.raw["voice"]["speaker"], "xenia")
             live = settings.raw["live"]
             self.assertFalse(live["enabled"])
+            self.assertEqual(settings.raw["voice"]["playback_backend"], "system")
+            self.assertFalse(live["audio_processing"]["enabled"])
             self.assertLessEqual(
                 live["minimum_phrase_chars"], live["maximum_phrase_chars"]
             )

@@ -67,6 +67,8 @@
     "docs/UI-MATE-READONLY-ACCEPTANCE-2026-08-31.md",
     "docs/ИНСТРУКЦИЯ-ПОЛЬЗОВАТЕЛЯ.txt",
     "scripts/check.ps1",
+    "scripts/audio_capture_service.py",
+    "scripts/audio_output.py",
     "scripts/hardware-report.ps1",
     "scripts/install-runtime.ps1",
     "scripts/install-llama.ps1",
@@ -96,6 +98,8 @@
     "src/butler/turn_detection.py",
     "tests/test_doctor.py",
     "tests/test_distribution.py",
+    "tests/test_audio_capture_service.py",
+    "tests/test_audio_output.py",
     "tests/test_live.py",
     "tests/test_model_assets.py",
     "tests/test_performance.py",
@@ -189,7 +193,7 @@
     "workspace"
   ],
   "quality_gate": {
-    "minimum_tests": 413,
+    "minimum_tests": 423,
     "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1"
   },
   "models": {

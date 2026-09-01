@@ -120,6 +120,7 @@ function Test-RuntimePackages {
             $checks.Add("assert m.version('$($parts[0])') == '$($parts[1])'")
         }
     }
+    $checks.Add("assert m.version('$([string]$assetLock.audio_processing.package)') == '$([string]$assetLock.audio_processing.version)'")
     # Import smoke tests belong to Doctor. Version reconciliation must not fail
     # because a valid library writes a harmless message to native stderr.
     $code = "import importlib.metadata as m; " + ($checks.ToArray() -join '; ')
@@ -234,6 +235,29 @@ if (Test-RuntimePackages $venvPython) {
     if ($LASTEXITCODE -ne 0) { throw 'Не удалось установить проверенную CUDA-версию Torch.' }
     & $venvPython -m pip install --upgrade --requirement $runtimeRequirementsPath
     if ($LASTEXITCODE -ne 0) { throw 'Не удалось установить закреплённые библиотеки Ксении.' }
+    $audioWheel = Join-Path $downloadRoot ([string]$assetLock.audio_processing.filename)
+    New-Item -ItemType Directory -Force -Path $downloadRoot | Out-Null
+    if (Test-Path -LiteralPath $audioWheel -PathType Leaf) {
+        $audioWheelValid = (Get-Item -LiteralPath $audioWheel).Length -eq [int64]$assetLock.audio_processing.size_bytes -and
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $audioWheel).Hash -eq [string]$assetLock.audio_processing.sha256
+        if (-not $audioWheelValid) { Move-ToInstallerQuarantine $audioWheel -AllowedRoot $downloadRoot }
+    }
+    if (-not (Test-Path -LiteralPath $audioWheel -PathType Leaf)) {
+        $audioWheelPartial = "$audioWheel.partial"
+        if (Test-Path -LiteralPath $audioWheelPartial) {
+            Move-ToInstallerQuarantine $audioWheelPartial -AllowedRoot $downloadRoot
+        }
+        Invoke-WebRequest -UseBasicParsing -Uri ([string]$assetLock.audio_processing.url) `
+            -OutFile $audioWheelPartial -TimeoutSec 300
+        if ((Get-Item -LiteralPath $audioWheelPartial).Length -ne [int64]$assetLock.audio_processing.size_bytes -or
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $audioWheelPartial).Hash -ne [string]$assetLock.audio_processing.sha256) {
+            Move-ToInstallerQuarantine $audioWheelPartial -AllowedRoot $downloadRoot
+            throw 'Контрольная сумма pywebrtc-audio не совпала.'
+        }
+        Move-Item -LiteralPath $audioWheelPartial -Destination $audioWheel
+    }
+    & $venvPython -m pip install --no-deps --force-reinstall $audioWheel
+    if ($LASTEXITCODE -ne 0) { throw 'Не удалось установить проверенный pywebrtc-audio wheel.' }
     & $venvPython -m pip check
     if ($LASTEXITCODE -ne 0) { throw 'pip check обнаружил конфликт библиотек.' }
     if (-not (Test-RuntimePackages $venvPython)) {

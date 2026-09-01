@@ -32,6 +32,7 @@ class CaptureEndpoint:
     frame_bytes: int
     device_name: str
     host_api: str
+    render_port: int = 0
 
     def child_environment(self) -> dict[str, str]:
         environment = os.environ.copy()
@@ -52,6 +53,11 @@ class AudioCaptureService:
         self.worker = settings.root / "scripts" / "audio_capture_service.py"
         self.device = str(voice.get("wake_device", ""))
         self.sample_rate = int(voice.get("wake_sample_rate", 16000))
+        live_audio = settings.raw.get("live", {}).get("audio_processing", {})
+        self.audio_processing_enabled = bool(live_audio.get("enabled", False))
+        self.stream_delay_ms = max(0, int(live_audio.get("stream_delay_ms", 0)))
+        self.ns_level = max(0, min(3, int(live_audio.get("ns_level", 1))))
+        self.auto_gain_control = bool(live_audio.get("auto_gain_control", False))
         self._process: subprocess.Popen[str] | None = None
         self._endpoint: CaptureEndpoint | None = None
         self._stderr_lines: queue.Queue[str] = queue.Queue(maxsize=50)
@@ -112,6 +118,18 @@ class AudioCaptureService:
                 "--frame-ms",
                 "10",
             ]
+            if self.audio_processing_enabled:
+                command.extend(
+                    [
+                        "--audio-processing",
+                        "--stream-delay-ms",
+                        str(self.stream_delay_ms),
+                        "--ns-level",
+                        str(self.ns_level),
+                    ]
+                )
+                if self.auto_gain_control:
+                    command.append("--auto-gain-control")
             started = time.monotonic()
             try:
                 process = subprocess.Popen(
@@ -173,12 +191,14 @@ class AudioCaptureService:
                     frame_bytes=int(ready.get("frame_bytes", 0)),
                     device_name=str(ready.get("device_name", "")),
                     host_api=str(ready.get("host_api", "")),
+                    render_port=int(ready.get("render_port", 0)),
                 )
                 if (
                     endpoint.host != "127.0.0.1"
                     or endpoint.port <= 0
                     or endpoint.sample_rate <= 0
                     or endpoint.frame_bytes <= 0
+                    or endpoint.render_port <= 0
                 ):
                     raise AudioCaptureServiceError(
                         "Сервис микрофона вернул повреждённый endpoint."
@@ -194,6 +214,8 @@ class AudioCaptureService:
                     host_api=endpoint.host_api,
                     sample_rate=endpoint.sample_rate,
                     frame_bytes=endpoint.frame_bytes,
+                    render_reference=True,
+                    audio_processing=self.audio_processing_enabled,
                 )
                 return endpoint
             except (AudioCaptureServiceError, json.JSONDecodeError, TypeError, ValueError) as exc:

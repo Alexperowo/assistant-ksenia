@@ -129,6 +129,11 @@ class SpeechAnnouncer:
         self.cold_leading_silence_ms = int(
             voice_config.get("cold_leading_silence_ms", 1000)
         )
+        self.playback_backend = str(
+            voice_config.get("playback_backend", "system")
+        ).strip().casefold()
+        self.output_device = str(voice_config.get("output_device", "")).strip()
+        self._capture_endpoint = None
         self.startup_timeout_seconds = max(
             5.0, float(voice_config.get("tts_startup_timeout_seconds", 120))
         )
@@ -142,6 +147,15 @@ class SpeechAnnouncer:
         self._worker_ready = threading.Event()
         self._worker_start_error = ""
         atexit.register(self.close)
+
+    def configure_capture_endpoint(self, endpoint: object | None) -> None:
+        """Attach far-reference routing before the persistent TTS worker starts."""
+        with self._lock:
+            if self._worker is not None and self._worker.poll() is None:
+                raise RuntimeError(
+                    "Нельзя менять audio endpoint после запуска TTS worker."
+                )
+            self._capture_endpoint = endpoint
 
     def _silero_available(self) -> bool:
         if not (
@@ -189,36 +203,59 @@ class SpeechAnnouncer:
             worker_env = os.environ.copy()
             worker_env["PYTHONIOENCODING"] = "utf-8"
             worker_env["PYTHONUTF8"] = "1"
+            command = [
+                str(self.python),
+                "-u",
+                str(self.worker_script),
+                "--model",
+                self.model,
+                "--model-path",
+                str(self.tts_model_path),
+                "--model-size",
+                str(self.tts_model_expected_size),
+                "--model-sha256",
+                self.tts_model_sha256,
+                "--speaker",
+                self.speaker,
+                "--sample-rate",
+                str(self.sample_rate),
+                "--threads",
+                str(self.threads),
+                "--device",
+                self.device,
+                "--min-free-vram-mb",
+                str(self.min_free_vram_mb),
+                "--runtime-dir",
+                str(self.runtime_dir / "voice"),
+                "--leading-silence-ms",
+                str(self.leading_silence_ms),
+                "--cold-leading-silence-ms",
+                str(self.cold_leading_silence_ms),
+                "--playback-backend",
+                self.playback_backend,
+                "--output-device",
+                self.output_device,
+            ]
+            endpoint = self._capture_endpoint
+            if self.playback_backend == "pcm" and endpoint is not None:
+                render_port = int(getattr(endpoint, "render_port", 0))
+                if render_port > 0:
+                    command.extend(
+                        [
+                            "--far-host",
+                            str(getattr(endpoint, "host", "127.0.0.1")),
+                            "--far-port",
+                            str(render_port),
+                        ]
+                    )
+                    child_environment = getattr(endpoint, "child_environment", None)
+                    if callable(child_environment):
+                        worker_env = child_environment()
+                        worker_env.update(
+                            {"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+                        )
             self._worker = subprocess.Popen(
-                [
-                    str(self.python),
-                    "-u",
-                    str(self.worker_script),
-                    "--model",
-                    self.model,
-                    "--model-path",
-                    str(self.tts_model_path),
-                    "--model-size",
-                    str(self.tts_model_expected_size),
-                    "--model-sha256",
-                    self.tts_model_sha256,
-                    "--speaker",
-                    self.speaker,
-                    "--sample-rate",
-                    str(self.sample_rate),
-                    "--threads",
-                    str(self.threads),
-                    "--device",
-                    self.device,
-                    "--min-free-vram-mb",
-                    str(self.min_free_vram_mb),
-                    "--runtime-dir",
-                    str(self.runtime_dir / "voice"),
-                    "--leading-silence-ms",
-                    str(self.leading_silence_ms),
-                    "--cold-leading-silence-ms",
-                    str(self.cold_leading_silence_ms),
-                ],
+                command,
                 cwd=str(self.root),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -720,6 +757,15 @@ class SpeechAnnouncer:
         )
         if self._send_silero(spoken_text):
             return
+        if self.playback_backend == "pcm":
+            diagnostic_event(
+                self.diagnostics_source,
+                "tts",
+                "pcm_request_failed",
+                level="error",
+                spoken_chars=len(spoken_text),
+            )
+            return
         diagnostic_event(
             self.diagnostics_source,
             "tts",
@@ -763,7 +809,12 @@ class SpeechAnnouncer:
 
     def live_available(self) -> bool:
         """Return whether the ordered persistent Silero queue can support Live."""
-        return self._silero_available()
+        if not self._silero_available():
+            return False
+        if self.playback_backend != "pcm":
+            return True
+        endpoint = self._capture_endpoint
+        return endpoint is not None and int(getattr(endpoint, "render_port", 0)) > 0
 
     def say_and_wait(self, text: str) -> None:
         if not self.enabled or not text.strip() or not self.script.exists():
@@ -779,6 +830,15 @@ class SpeechAnnouncer:
             **_speech_metadata(text, spoken_text),
         )
         if self._send_silero(spoken_text, wait=True):
+            return
+        if self.playback_backend == "pcm":
+            diagnostic_event(
+                self.diagnostics_source,
+                "tts",
+                "pcm_request_failed",
+                level="error",
+                spoken_chars=len(spoken_text),
+            )
             return
         diagnostic_event(
             self.diagnostics_source,
@@ -796,6 +856,15 @@ class SpeechAnnouncer:
         )
         for speaker, text in samples:
             if not self._send_silero(text, speaker, wait=True):
+                if self.playback_backend == "pcm":
+                    diagnostic_event(
+                        self.diagnostics_source,
+                        "tts",
+                        "pcm_request_failed",
+                        level="error",
+                        spoken_chars=len(text),
+                    )
+                    continue
                 self._speak_with_sapi(text, wait=True)
 
     def close(self) -> None:

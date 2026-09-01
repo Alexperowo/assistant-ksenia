@@ -39,8 +39,8 @@ _English summary: an accessibility-first, local Russian voice assistant and deve
 |---|---|
 | Голосовая активация | Vosk: «Ксения слушай» и «Ксения стоп» |
 | Диктовка | faster-whisper Large v3 Turbo, CUDA или CPU fallback |
-| Русский голос | Silero Xenia, числа и даты словами, Windows SAPI как резерв |
-| Live v1 | Потоковая разбивка ответа на фразы, подтверждение реально законченного аудио, гибридное определение конца реплики и безопасное прерывание; opt-in до проверки AEC |
+| Русский голос | Silero Xenia, числа и даты словами; SAPI остаётся резервом только вне PCM/Live |
+| Live v1 | Потоковая разбивка ответа, подтверждение реально законченного аудио, PCM far-reference и opt-in WebRTC AEC; выключен до echo/barge-in приёмки |
 | Локальные модели | Одна активная GGUF-модель через `llama.cpp`, переключение по ролям |
 | Роли | Ассистент, исследователь, разработчик и тяжёлый мозг |
 | Длинные задачи | Профили до 96K, квантованный KV, DFlash/MTP, RAG и сжатие истории |
@@ -86,14 +86,15 @@ flowchart LR
 
 На текущей системе Александра с Windows 11, RTX 2080 Ti 22 ГБ и 48 ГБ ОЗУ проверены:
 
-- 413 unit/integration-тестов и три дополнительных прогона в случайном порядке;
+- 423 unit/integration-теста и три дополнительных прогона в случайном порядке;
 - официальный `llama.cpp b10621` (stable v0.3.0), CUDA 12.4, с закреплёнными SHA-256;
 - отдельный закреплённый PoolSide backend commit `06f8ceb` для Laguna/DFlash, с patch provenance и SHA-256 runtime-файлов;
 - конфигурационно-управляемые DFlash, MTP, multimodal projector и квантованный KV;
 - русский TTS → WAV → faster-whisper на CUDA без потери контрольных частей;
 - RAG, LAN, браузерное исследование, процессы и безопасные инструменты;
-- единый near-end `AudioCaptureService`: один input stream на весь `voice-agent`, аутентифицированные 10-мс PCM-подписки для wake/STT/stop и безопасный прежний fallback;
-- программный Live v1: Vosk partial transcripts → hybrid turn detector, поток итогового ответа, barge-in state machine и раздельные generated/spoken ответы; режим остаётся выключенным до живой проверки AEC, микрофона и произвольного речевого barge-in;
+- единый `AudioCaptureService`: один input stream на весь `voice-agent`, аутентифицированные 10-мс near/far PCM-каналы и opt-in WebRTC AEC/NS;
+- строгий PCM Silero Xenia на Tour One M3 и отмена playback за 7,2 мс; PCM/Live никогда не подменяет ошибку роботизированным SAPI;
+- программный Live v1: Vosk partial transcripts → hybrid turn detector, поток итогового ответа, barge-in state machine и раздельные generated/spoken ответы; режим остаётся выключенным до измеримого self-echo A/B и произвольного речевого barge-in;
 - стадийная установка, резервная копия и откат `llama.cpp`;
 - распаковка release ZIP и изолированный online installer smoke-test.
 

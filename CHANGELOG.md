@@ -1,5 +1,11 @@
 # История изменений
 
+- Added: opt-in PCM backend открывает точный Windows default либо устойчивый output selector, проигрывает Silero точными 10-мс кадрами и публикует в единый audio worker только принятый output stream far-reference.
+- Added: закреплённый `pywebrtc-audio 0.1.0` с точным Windows wheel SHA-256 и source revision; установщик проверяет артефакт до установки. AEC3/NS/AGC-конфигурация fail-closed и остаётся выключенной вместе с Live.
+- Fixed: блокирующее чтение Windows `stdin` pipe лишало AEC worker возможности обслужить far handshake. Неблокирующий control loop выдержал три последовательных живых запуска после трёх секунд захвата.
+- Verified: строгий PCM smoke на Tour One M3 проиграл именно Silero Xenia без SAPI; длинная фраза была фактически остановлена и подтверждена worker-ом за 7,2 мс.
+- Security: PCM/Live никогда не подменяет ошибку роботизированным SAPI, потому что системный playback не предоставляет far-reference и мог бы запустить self-interrupt.
+- Tests: быстрый слой увеличен до 423 уникальных тестов; добавлены near/far auth, frame/resample/output routing, AEC config, Windows pipe и запрет PCM→SAPI fallback. Полный `check.ps1` прошёл 423/423, три shuffled-порядка, release/dependency/Doctor/LAN, активную Laguna 96K за 1,344 с и Silero→Whisper CUDA с `landmark_recall=1.0`; RAG явно пропущен как выключенный.
 - Performance: реальная голосовая trace отделила быстрые стадии (открытие микрофона 0,9 с, финальный STT 0,7 с, загрузка Laguna 9,1 с) от холодной оценки полного agent prompt, где первый токен не появился за 93 с.
 - Benchmark: одинаковый cold/warm A/B Laguna на 16K и 96K показал почти одинаковый холодный TTFT полного 2215-token tool prefix — 64,34 и 63,85 с. Повтор с 2221 cached tokens занял 1,66 и 1,85 с; 16K сэкономил память, но не устранил bottleneck.
 - Fixed: короткая реплика без запроса внешнего действия теперь относится к стабильному `CHAT`-профилю без 20 tool schemas. Команды, research и длинные задачи сохраняют прежние маршруты и Permission Broker.

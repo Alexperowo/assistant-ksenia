@@ -15,7 +15,18 @@
     "faster-whisper": "1.2.1",
     "ctranslate2": "4.8.1",
     "googlenewsdecoder": "0.1.7",
-    "huggingface-hub": "1.27.0"
+    "huggingface-hub": "1.27.0",
+    "pywebrtc-audio": "0.1.0"
+  },
+  "audio_processing": {
+    "package": "pywebrtc-audio",
+    "version": "0.1.0",
+    "filename": "pywebrtc_audio-0.1.0-cp312-cp312-win_amd64.whl",
+    "url": "https://files.pythonhosted.org/packages/49/7c/1360a81011b99cb897e044199424b104abe7f27abf7dd3e126bbc1a16a01/pywebrtc_audio-0.1.0-cp312-cp312-win_amd64.whl",
+    "size_bytes": 311988,
+    "sha256": "6EEF9065089A2E25EF1B9743661CB48CAA4C2E65ACEE1314E8957D0C24AE534A",
+    "source_repo": "strands-labs/pywebrtc-audio",
+    "source_revision": "9c1c2a2186bb05244d39ac2b906edc3ec4328463"
   },
   "torch": {
     "requirements": "requirements/torch.lock.txt",

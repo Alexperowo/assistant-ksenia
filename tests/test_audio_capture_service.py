@@ -1,8 +1,11 @@
 import os
+import socket
 import sys
 import threading
 import unittest
 from pathlib import Path
+
+import numpy as np
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -11,14 +14,46 @@ if str(SCRIPTS) not in sys.path:
 
 from audio_capture_service import (  # noqa: E402
     TOKEN_ENVIRONMENT_KEY as WORKER_TOKEN_ENVIRONMENT_KEY,
+    AudioProcessingAdapter,
     CaptureServer,
+    FarReferenceBuffer,
     FrameAssembler,
+    RenderReferenceServer,
+    _iter_control_lines,
 )
 from audio_input import open_remote_input_stream  # noqa: E402
 from butler.audio_capture import CaptureEndpoint, TOKEN_ENVIRONMENT_KEY  # noqa: E402
 
 
 class AudioCaptureServiceTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows named-pipe regression")
+    def test_control_pipe_wait_does_not_block_other_python_threads(self):
+        read_descriptor, write_descriptor = os.pipe()
+        stopped = threading.Event()
+        received = []
+        heartbeat = threading.Event()
+        try:
+            with os.fdopen(read_descriptor, "rb", buffering=0) as reader:
+                consumer = threading.Thread(
+                    target=lambda: received.extend(
+                        _iter_control_lines(reader, stopped, poll_interval=0.01)
+                    ),
+                    daemon=True,
+                )
+                consumer.start()
+                threading.Timer(0.05, heartbeat.set).start()
+                self.assertTrue(heartbeat.wait(1))
+                os.write(write_descriptor, b'{"cmd":"shutdown"}\n')
+                os.close(write_descriptor)
+                write_descriptor = -1
+                consumer.join(timeout=2)
+                self.assertFalse(consumer.is_alive())
+                self.assertEqual(received, ['{"cmd":"shutdown"}\n'])
+        finally:
+            stopped.set()
+            if write_descriptor >= 0:
+                os.close(write_descriptor)
+
     def test_frame_assembler_emits_exact_ten_millisecond_frames(self):
         assembler = FrameAssembler(16000, 16000, 10)
         self.assertEqual(assembler.frame_bytes, 320)
@@ -36,6 +71,7 @@ class AudioCaptureServiceTests(unittest.TestCase):
             frame_bytes=320,
             device_name="Test microphone",
             host_api="Windows WASAPI",
+            render_port=32124,
         )
 
         arguments = endpoint.command_arguments()
@@ -46,6 +82,54 @@ class AudioCaptureServiceTests(unittest.TestCase):
         self.assertEqual(environment[TOKEN_ENVIRONMENT_KEY], endpoint.token)
         self.assertNotEqual(os.environ.get(TOKEN_ENVIRONMENT_KEY), endpoint.token)
         self.assertEqual(TOKEN_ENVIRONMENT_KEY, WORKER_TOKEN_ENVIRONMENT_KEY)
+
+    def test_authenticated_render_publisher_delivers_exact_far_frame(self):
+        token = "f" * 64
+        reference = FarReferenceBuffer(frame_bytes=320, maximum_frames=2)
+        server = RenderReferenceServer(token, reference)
+        try:
+            server.start()
+            connection = socket.create_connection(("127.0.0.1", server.port), timeout=2)
+            try:
+                connection.sendall(token.encode("ascii") + b"\n")
+                header = bytearray()
+                while not header.endswith(b"\n"):
+                    header.extend(connection.recv(1))
+                self.assertIn(b'"event": "ready"', bytes(header))
+                frame = bytes(range(256)) + bytes(range(64))
+                connection.sendall(frame)
+                for _attempt in range(100):
+                    received = reference.take()
+                    if received == frame:
+                        break
+                    threading.Event().wait(0.01)
+                self.assertEqual(received, frame)
+            finally:
+                connection.close()
+        finally:
+            server.close()
+
+    def test_audio_processing_pairs_near_with_far_and_preserves_frame_size(self):
+        class FakeProcessor:
+            def __init__(self):
+                self.calls = []
+
+            def process(self, near, far):
+                self.calls.append((near.copy(), far.copy()))
+                return near - far
+
+        reference = FarReferenceBuffer(frame_bytes=320)
+        far = np.full(160, 2, dtype=np.int16)
+        near = np.full(160, 7, dtype=np.int16)
+        reference.publish(far.tobytes())
+        processor = FakeProcessor()
+        adapter = AudioProcessingAdapter(processor, reference)
+
+        cleaned = np.frombuffer(adapter.process(near.tobytes()), dtype=np.int16)
+
+        self.assertTrue(np.all(cleaned == 5))
+        self.assertTrue(np.array_equal(processor.calls[0][0], near))
+        self.assertTrue(np.array_equal(processor.calls[0][1], far))
 
     def test_authenticated_subscriber_receives_bounded_pcm_frame(self):
         token = "b" * 64

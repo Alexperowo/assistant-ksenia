@@ -85,6 +85,8 @@
     "microphone_error_reminder_seconds": 300,
     "leading_silence_ms": 120,
     "cold_leading_silence_ms": 1000,
+    "playback_backend": "system",
+    "output_device": "",
     "confirmation_microphone_handoff_timeout_seconds": 5.0
   },
   "live": {
@@ -95,7 +97,13 @@
     "turn_incomplete_silence_seconds": 2.2,
     "minimum_phrase_chars": 24,
     "maximum_phrase_chars": 220,
-    "playback_timeout_seconds": 600
+    "playback_timeout_seconds": 600,
+    "audio_processing": {
+      "enabled": false,
+      "stream_delay_ms": 0,
+      "ns_level": 1,
+      "auto_gain_control": false
+    }
   },
   "browser": {
     "enabled": true,

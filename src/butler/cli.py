@@ -840,6 +840,7 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             print(message)
             speech.say_and_wait(message)
             return 2
+    speech.configure_capture_endpoint(capture_endpoint)
     recognizer = SpeechRecognizer(settings, capture_endpoint)
     wake_listener = WakeListener(settings, capture_endpoint)
     live_config = settings.raw.get("live", {})
