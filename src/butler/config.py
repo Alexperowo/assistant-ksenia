@@ -928,8 +928,17 @@ def load_settings(root: Path | None = None) -> Settings:
     output_device = voice.get("output_device", "")
     if not isinstance(output_device, str):
         raise ConfigError("voice.output_device должен быть строкой.")
+    try:
+        capture_block_ms = int(voice.get("capture_block_ms", 40))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("voice.capture_block_ms должен быть целым числом.") from exc
+    if not 10 <= capture_block_ms <= 250 or capture_block_ms % 10:
+        raise ConfigError(
+            "voice.capture_block_ms должен быть кратен 10 и находиться от 10 до 250 мс."
+        )
     voice["playback_backend"] = playback_backend
     voice["output_device"] = output_device.strip()
+    voice["capture_block_ms"] = capture_block_ms
     live = raw.get("live", {})
     if not isinstance(live, dict):
         raise ConfigError("Раздел live должен быть объектом.")

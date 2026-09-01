@@ -100,6 +100,7 @@
 | `scripts/performance-report.py` | человеко- и машиночитаемый отчёт реальных задержек |
 | `scripts/test_model_cancellation.py` | живой gate отмены LLM-stream и фактического завершения HTTP reader |
 | `scripts/runtime_context_benchmark.py` | безопасный временный sweep context, load/TTFT/cache/RAM/VRAM и восстановление исходной модели |
+| `scripts/benchmark_audio_full_duplex.py` | физический A/B Xenia/AEC, near-end WAV и RMS-метрики без изменения пользовательской конфигурации |
 | `scripts/check.ps1` | объединённый quality gate |
 | `scripts/run_test_suite.py` | инвентарь, warnings, skips и shuffled order |
 

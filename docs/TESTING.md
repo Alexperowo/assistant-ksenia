@@ -13,7 +13,7 @@
 ### 1. Статический и быстрый слой
 
 - синтаксис PowerShell, JSON и Python;
-- не менее 423 unit/integration-тестов;
+- не менее 428 unit/integration-тестов;
 - отсутствие неожиданных warnings и skips;
 - три полных shuffled-order запуска;
 - тайм-ауты сети/subprocess и запрет shell;
@@ -36,6 +36,7 @@
 
 - MTP on/off, скорость, VRAM и детерминизм;
 - русский agent/tool benchmark кандидата;
+- `python scripts/benchmark_audio_full_duplex.py` — слышимый локальный A/B Xenia/AEC. Перед запуском подключить нужную гарнитуру и молчать во время двух фраз; скрипт не меняет `user.json`, требует успешный Silero без SAPI и пишет WAV/JSON только в `runtime/audio-full-duplex`;
 - настоящий поиск и Chromium;
 - длинный контекст и сжатие;
 - исследование товаров/цен;

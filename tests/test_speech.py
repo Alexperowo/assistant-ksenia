@@ -191,7 +191,14 @@ class SpeechPrivacyTests(unittest.TestCase):
 
             worker = MagicMock()
             worker.stdout = io.StringIO(
-                json.dumps({"event": "speech_done", "id": "7", "ok": True})
+                json.dumps(
+                    {
+                        "event": "speech_done",
+                        "id": "7",
+                        "ok": True,
+                        "output_route": "Test headphones / MME / 48000 Hz",
+                    }
+                )
                 + "\n"
             )
             worker.poll.return_value = 0
@@ -202,6 +209,10 @@ class SpeechPrivacyTests(unittest.TestCase):
             self.assertFalse(completions[0].cancelled)
             self.assertEqual(completions[0].original_text, "Сегодня 10 августа.")
             self.assertNotRegex(completions[0].spoken_text, r"\d")
+            self.assertEqual(
+                completions[0].output_route,
+                "Test headphones / MME / 48000 Hz",
+            )
 
     def test_tracked_speech_never_falls_back_to_unordered_sapi(self):
         with tempfile.TemporaryDirectory() as directory:

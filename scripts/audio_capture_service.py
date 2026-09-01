@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="")
     parser.add_argument("--sample-rate", type=int, default=16000)
     parser.add_argument("--frame-ms", type=int, default=10)
+    parser.add_argument("--input-block-ms", type=int, default=40)
     parser.add_argument("--audio-processing", action="store_true")
     parser.add_argument("--stream-delay-ms", type=int, default=0)
     parser.add_argument("--ns-level", type=int, default=1)
@@ -462,6 +463,7 @@ def main() -> int:
         args.device,
         callback,
         target_rate=args.sample_rate,
+        block_ms=args.input_block_ms,
     )
     assembler = FrameAssembler(opened.sample_rate, args.sample_rate, args.frame_ms)
     far_reference = FarReferenceBuffer(assembler.frame_bytes)

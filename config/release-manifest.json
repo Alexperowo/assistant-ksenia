@@ -68,6 +68,7 @@
     "docs/ИНСТРУКЦИЯ-ПОЛЬЗОВАТЕЛЯ.txt",
     "scripts/check.ps1",
     "scripts/audio_capture_service.py",
+    "scripts/benchmark_audio_full_duplex.py",
     "scripts/audio_output.py",
     "scripts/hardware-report.ps1",
     "scripts/install-runtime.ps1",
@@ -99,6 +100,7 @@
     "tests/test_doctor.py",
     "tests/test_distribution.py",
     "tests/test_audio_capture_service.py",
+    "tests/test_audio_full_duplex_benchmark.py",
     "tests/test_audio_output.py",
     "tests/test_live.py",
     "tests/test_model_assets.py",
@@ -193,7 +195,7 @@
     "workspace"
   ],
   "quality_gate": {
-    "minimum_tests": 423,
+    "minimum_tests": 428,
     "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1"
   },
   "models": {

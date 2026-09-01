@@ -72,6 +72,7 @@
     "wake_word": "Ксения слушай",
     "wake_model": "runtime/voice/vosk-model-small-ru-0.22",
     "wake_sample_rate": 16000,
+    "capture_block_ms": 40,
     "wake_device": "",
     "stt_engine": "auto",
     "stt_model": "",

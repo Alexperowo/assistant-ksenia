@@ -29,7 +29,7 @@
 | Hybrid turn detection | DONE для записываемой команды | Vosk partial + amplitude gate + semantic timing; не работает постоянно во время TTS |
 | Единоличное владение устройством | DONE для `voice-agent` | один capture worker владеет endpoint; wake/STT/stop переключают подписки, fallback сохраняет прежний gate |
 | `AudioCaptureService` / ring buffer | DONE для near/far transport | loopback + случайный ключ, точные 10-мс mono/int16 frames, bounded queues, один render publisher и обнаружение разрыва |
-| AEC | PARTIAL | WebRTC AEC3 интегрирован и живой PCM path работает; нет измеримого self-echo A/B и corpus |
+| AEC | PARTIAL | WebRTC AEC3 интегрирован; первый Tour One M3 A/B не обнаружил self-echo даже без DSP, но одновременная человеческая речь ещё не проверена |
 | Noise suppression / AGC | PARTIAL | NS 0–3 подключён opt-in; AGC доступен отдельным флагом, но качество STT не принято |
 | Input/output device profile | PARTIAL | input автоматически выбирается по роли и реальному open/start; PCM умеет точный Windows default или устойчивый фрагмент output, но профиль задержки устройства ещё не принят |
 | Device calibration | MISSING | нет корреляционного измерения render→capture delay |
@@ -93,8 +93,14 @@ Microsoft sample требует Windows build 22540+; текущая машин�
 2. **Единый near-end worker — DONE для `voice-agent`.** Один процесс владеет input stream и публикует 10-мс frames в ограниченные очереди. Wake, partial/final STT и stop-monitor являются потребителями. Старый путь сохранён как fallback.
 3. **Output contract — DONE для opt-in PCM.** Read-only инвентаризация, точный Windows default, явный selector и фактически открытый route реализованы. SoundPlayer остаётся default до физического A/B.
 4. **Render reference — DONE для transport.** PCM backend публикует только принятые output stream кадры; loopback требует случайный memory-only ключ, допускает одного publisher и очищает bounded queue при разрыве.
-5. **AEC adapter — PARTIAL.** Закреплённый WebRTC wheel интегрирован, конфигурация fail-closed и реальный Xenia PCM smoke зелёный. Далее нужны synthetic echo corpus и физический A/B AEC off/on. NS и AGC сравнивать отдельно, чтобы не ухудшить окончания.
+5. **AEC adapter — PARTIAL.** Закреплённый WebRTC wheel интегрирован, конфигурация fail-closed и реальный Xenia PCM smoke зелёный. Физический A/B 1 сентября дважды проиграл одну Xenia-фразу на Tour One M3 и не нашёл активных near-end кадров даже без AEC; DSP не включён, потому что измеримого выигрыша нет. Следующий тест должен добавить человеческую речь во время TTS, затем synthetic echo corpus при необходимости. NS и AGC сравнивать отдельно, чтобы не ухудшить окончания.
 6. **Calibration profile.** Только если измерения показывают пользу: `input_endpoint`, `output_endpoint`, sample rates, estimated echo delay и AEC settings. При смене устройства профиль не переиспользовать вслепую.
 7. **Physical acceptance.** Наушники, затем JBL-динамики: 20–30 ходов, паузы 1–2 секунды, произвольный barge-in, отсутствие self-interrupt, `interrupt_detected → audio_actually_stopped`, корректный spoken prefix.
 
 `live.enabled`, `voice.playback_backend=pcm` и `live.audio_processing.enabled` остаются выключенными по умолчанию, пока пункты 5–7 не приняты на реальном устройстве. Успешное воспроизведение и установка DSP-библиотеки сами по себе не считаются готовым full-duplex.
+
+## Физический baseline 1 сентября
+
+`scripts/benchmark_audio_full_duplex.py` не меняет личную конфигурацию, требует тишины пользователя и хранит локальные WAV/JSON только в `runtime/audio-full-duplex/<timestamp>`. На Tour One M3 оба прохода завершились `engine=silero`, без SAPI. Без AEC near-end `measurement_rms_p95=0.53`, с AEC — `0.0`; в обоих случаях `active_frame_count=0` при пороге 80. Это доказывает отсутствие наблюдаемого self-echo в данной посадке, но не доказывает способность услышать пользователя во время TTS.
+
+Отдельный sweep физического input block сравнил 20/40/80/250 мс. На MME 20 мс иногда дали первый callback через 656–687 мс и пачечные нулевые интервалы; 40 мс дали первый callback 31–63 мс и медианный интервал 47 мс без PortAudio status. WASAPI не улучшил долгосрочную подачу той же Bluetooth-гарнитуры, поэтому host API не переупорядочен. Default `voice.capture_block_ms` снижен с исторических 250 до измеренных 40 мс и остаётся конфигурируемым.

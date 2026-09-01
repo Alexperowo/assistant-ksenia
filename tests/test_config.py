@@ -221,6 +221,28 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "передачи микрофона"):
                 load_settings(root)
 
+    def test_invalid_capture_block_duration_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            default = {
+                "assistant": {"name": "Тест", "default_role": "dev"},
+                "paths": {
+                    "llama_server": "server.exe",
+                    "models_dir": "models",
+                    "runtime_dir": "runtime",
+                },
+                "server": {"host": "127.0.0.1", "port": 18080},
+                "voice": {"capture_block_ms": 17},
+                "models": {},
+            }
+            (root / "config" / "default.json").write_text(
+                json.dumps(default), encoding="utf-8"
+            )
+
+            with self.assertRaisesRegex(ConfigError, "capture_block_ms"):
+                load_settings(root)
+
     def test_security_booleans_reject_string_false(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

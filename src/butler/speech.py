@@ -47,6 +47,7 @@ class SpeechCompletion:
     ok: bool
     cancelled: bool
     engine: str
+    output_route: str = ""
 
 
 SpeechCompletionCallback = Callable[[SpeechCompletion], None]
@@ -415,6 +416,7 @@ class SpeechAnnouncer:
                 ok=bool(worker_event.get("ok", False)),
                 cancelled=bool(worker_event.get("cancelled", False)),
                 engine="silero",
+                output_route=str(worker_event.get("output_route", "")),
             )
             diagnostic_milestone(
                 self.diagnostics_source,

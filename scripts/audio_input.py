@@ -206,6 +206,7 @@ def open_best_input_stream(
     callback: Callable[..., None],
     *,
     target_rate: int = 16000,
+    block_ms: int = 40,
 ) -> OpenedInput:
     selector = selector.strip()
     candidates = (
@@ -246,7 +247,7 @@ def open_best_input_stream(
                 )
                 stream = sd.RawInputStream(
                     samplerate=sample_rate,
-                    blocksize=max(800, sample_rate // 4),
+                    blocksize=max(1, round(sample_rate * block_ms / 1000)),
                     dtype="int16",
                     channels=1,
                     device=index,
@@ -326,6 +327,7 @@ def open_configured_input_stream(
     callback: Callable[..., None],
     *,
     target_rate: int = 16000,
+    block_ms: int = 40,
     capture_host: str = "",
     capture_port: int = 0,
     capture_token: str = "",
@@ -342,6 +344,7 @@ def open_configured_input_stream(
         selector,
         callback,
         target_rate=target_rate,
+        block_ms=block_ms,
     )
 
 

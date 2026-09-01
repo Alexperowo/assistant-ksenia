@@ -53,6 +53,7 @@ class AudioCaptureService:
         self.worker = settings.root / "scripts" / "audio_capture_service.py"
         self.device = str(voice.get("wake_device", ""))
         self.sample_rate = int(voice.get("wake_sample_rate", 16000))
+        self.capture_block_ms = int(voice.get("capture_block_ms", 40))
         live_audio = settings.raw.get("live", {}).get("audio_processing", {})
         self.audio_processing_enabled = bool(live_audio.get("enabled", False))
         self.stream_delay_ms = max(0, int(live_audio.get("stream_delay_ms", 0)))
@@ -117,6 +118,8 @@ class AudioCaptureService:
                 str(self.sample_rate),
                 "--frame-ms",
                 "10",
+                "--input-block-ms",
+                str(self.capture_block_ms),
             ]
             if self.audio_processing_enabled:
                 command.extend(

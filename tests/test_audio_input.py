@@ -52,6 +52,7 @@ class FallbackSoundDevice(FakeSoundDevice):
     def __init__(self):
         super().__init__()
         self.default = type("Default", (), {"device": (0, -1)})()
+        self.stream_arguments = []
         for device in self._devices:
             device["default_samplerate"] = 16000
 
@@ -60,6 +61,7 @@ class FallbackSoundDevice(FakeSoundDevice):
             raise self.PortAudioError("endpoint busy")
 
     def RawInputStream(self, **_kwargs):
+        self.stream_arguments.append(_kwargs)
         return self._Stream()
 
     @staticmethod
@@ -103,14 +105,27 @@ class AudioInputTests(unittest.TestCase):
         self.assertEqual(inventory["outputs"][0]["channels"], 2)
 
     def test_working_speech_default_is_selected_automatically(self):
+        fake = FallbackSoundDevice()
         opened = open_best_input_stream(
-            FallbackSoundDevice(),
+            fake,
             "",
             lambda *_args: None,
             target_rate=16000,
         )
         self.assertEqual(opened.device_name, "Headset (JBL Sense Pro)")
         self.assertEqual(opened.device_index, 0)
+        self.assertEqual(fake.stream_arguments[0]["blocksize"], 640)
+
+    def test_capture_block_duration_scales_with_physical_sample_rate(self):
+        fake = FallbackSoundDevice()
+        open_best_input_stream(
+            fake,
+            "",
+            lambda *_args: None,
+            target_rate=16000,
+            block_ms=80,
+        )
+        self.assertEqual(fake.stream_arguments[0]["blocksize"], 1280)
 
     def test_unknown_named_device_does_not_fallback_to_another_headset(self):
         candidates = ranked_input_devices(FakeSoundDevice(), "Unknown headset")
