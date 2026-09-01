@@ -48,20 +48,6 @@ PLANNING_HINTS = (
     "исследуй и сделай",
 )
 
-DIRECT_CONVERSATION_HINTS = (
-    "как тебя зовут",
-    "кто ты",
-    "ты меня слышишь",
-    "слышишь меня",
-    "что ты умеешь",
-    "назови текущую дату",
-    "скажи текущую дату",
-    "ксения слушай",
-    "ксения, слушай",
-    "привет",
-    "спасибо",
-)
-
 DIRECT_CONVERSATION_BLOCKERS = (
     "найди",
     "поищи",
@@ -86,6 +72,21 @@ DIRECT_CONVERSATION_BLOCKERS = (
     "сайт",
     "запомни",
     "удали",
+    "проверь",
+    "провер",
+    "сделай",
+    "помоги",
+    "установ",
+    "обнов",
+    "настрой",
+    "скача",
+    "сравн",
+    "проанализ",
+    "прочитай",
+    "покажи",
+    "переключ",
+    "включ",
+    "выключ",
 )
 
 PLANNING_TOOLS = {
@@ -240,10 +241,12 @@ class RoutedAgentSession:
             blocker in normalized for blocker in DIRECT_CONVERSATION_BLOCKERS
         ):
             return False
-        return any(
-            hint.replace("ё", "е") in normalized
-            for hint in DIRECT_CONVERSATION_HINTS
-        )
+        # A short utterance that does not request an external action is ordinary
+        # conversation. Requiring a small whitelist of greetings made normal
+        # feedback fall through to the full 20-tool prompt, whose cold prefix is
+        # expensive on partially CPU-offloaded models. Action and research routes
+        # remain explicit and are selected before this lightweight profile.
+        return bool(normalized)
 
     def _make_plan(
         self,

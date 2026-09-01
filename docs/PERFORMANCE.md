@@ -71,6 +71,17 @@ python scripts\performance-report.py `
 
 Кроме waterfall рассчитываются безопасные длительности существующих компонентов: model start/stop, agent/tool selection, tool execution, RAG search, web research, STT, TTS и LLM. `completion_completed` отдельно пишет prompt/completion/total tokens и эффективную скорость всего HTTP completion. Все chat-запросы явно закрепляют `cache_prompt=true`; completion и простой streaming transport сохраняют числовые `cached_prompt_tokens` и `prompt_cache_hit_ratio`, но не содержимое prefix. Streaming-запрос просит `stream_options.include_usage`; если конкретный совместимый backend не возвращает usage, поля остаются `null` и не попадают в статистику. Эта скорость полезна как пользовательская end-to-end метрика, но не заменяет нативные timings `llama.cpp` в модельном benchmark. Фактический context/cache baseline двух рабочих моделей находится в `RUNTIME-OPTIMIZATION-BASELINE.md`.
 
+### Подтверждённый холодный tool-prefix bottleneck — 1 сентября 2026
+
+Физическая голосовая trace с Tour One M3 показала: открытие микрофона заняло около 0,9 с, финальный faster-whisper — 0,7 с, а Laguna загрузилась за 9,1 с. После этого первый содержательный токен полного agent prompt не появился более чем за 93 с. Контрольный `runtime_context_benchmark.py` разделил влияние KV и prefix:
+
+| Context | GPU после загрузки | Private memory | Cold TTFT, 2215 prompt tokens | Next-turn TTFT, 2221 cached tokens |
+|---:|---:|---:|---:|---:|
+| 16384 | 13812 МБ | 13,43 ГБ | 64336 мс | 1657 мс |
+| 98304 | 16712 МБ | 16,70 ГБ | 63851 мс | 1847 мс |
+
+Следовательно, уменьшение KV экономит около 2,9 ГБ VRAM и 3,3 ГБ private memory, но не лечит холодную оценку полного набора схем. Измеримый рычаг здесь — стабильный prefix и выбор `CHAT` до начала короткой разговорной задачи; набор инструментов внутри задачи по-прежнему не уменьшается.
+
 Отменяемый HTTP transport наблюдает жизненный цикл вспомогательного reader thread. На каждой остановке доступны `active_reader_threads`, накопительный `cancelled_streams`, `reader_shutdown_latency_ms` и текущее число `stuck_reader_threads`. При отмене transport сначала делает `shutdown()` loopback-сокета, ждёт reader не более 100 мс и, если тот ещё занят, переносит `close()` в служебный daemon-thread. Неостановившийся reader отмечается warning и остаётся учтённым до фактического выхода; это сигнал для решения о замене transport, а не повод блокировать разговор или заранее переписывать весь HTTP-клиент.
 
 ## Приватность и совместимость

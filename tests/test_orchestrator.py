@@ -98,6 +98,16 @@ class OrchestratorTests(unittest.TestCase):
                 "Привет, найди реальные цены в двух магазинах"
             )
         )
+        self.assertTrue(
+            session._is_direct_conversation(
+                "Ты не попадаешь в ударение, у тебя плохая фонетика."
+            )
+        )
+        self.assertFalse(
+            session._is_direct_conversation(
+                "Проверь настройки голосового режима"
+            )
+        )
 
     def test_date_fast_path_does_not_start_model(self):
         session = RoutedAgentSession(load_settings())
