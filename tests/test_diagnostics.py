@@ -10,6 +10,7 @@ from butler.diagnostics import (
     bind_trace_context,
     current_trace_fields,
     event,
+    milestone,
     new_trace_id,
     safe_url,
     text_metadata,
@@ -157,6 +158,23 @@ class DiagnosticsTests(unittest.TestCase):
             observed,
             [{"trace_id": "trace-thread", "task_id": "task-thread"}],
         )
+
+    def test_milestone_accepts_domain_source_field_without_argument_collision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = self._settings(Path(directory))
+            milestone(
+                settings,
+                "interrupt_detected",
+                source="voice_stop",
+                task_id="task-1",
+            )
+            saved = json.loads(
+                (Path(directory) / "logs" / "diagnostics.jsonl").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(saved["event"], "interrupt_detected")
+            self.assertEqual(saved["source"], "voice_stop")
 
 
 if __name__ == "__main__":

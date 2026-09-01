@@ -70,10 +70,10 @@
 | `media_buttons.py` | AVRCP/медиакнопка как опциональная активация |
 | `resilience.py` | bounded backoff повторяющихся ошибок |
 | `scripts/audio_capture_service.py` | единственный физический input stream, resample и точные 10-мс frames, аутентифицированный loopback и bounded per-subscriber queues |
-| `scripts/audio_input.py` | выбор локального аудиовхода или подписка на общий PCM; неоднозначный набор без Windows default отклоняется |
+| `scripts/audio_input.py` | выбор локального аудиовхода или подписка на общий PCM; автовыбор речевой роли с реальным open/start и без loopback/line sources; ручной selector остаётся строгим |
 | `scripts/wake_worker.py` | дочерний процесс Vosk |
 | `scripts/stt_worker.py`, `stt_service.py` | дочерний/долгоживущий faster-whisper; в opt-in Live сервис дополнительно использует закреплённый Vosk для partial endpointing |
-| `scripts/voice_worker.py` | Silero-синтез и WAV |
+| `scripts/voice_worker.py` | Silero-синтез, явные русские accent/омограф/ё options, WAV и текущий SoundPlayer fallback |
 | `scripts/pcm_audio.py` | совместимость PCM/audioop на Python 3.12 |
 
 ## Память и задачи

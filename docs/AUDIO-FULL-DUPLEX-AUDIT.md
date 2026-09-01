@@ -31,7 +31,7 @@ TTS-сервис синтезирует WAV, затем отдельный Power
 | `AudioCaptureService` / ring buffer | DONE для near-end | loopback + случайный ключ, точные 10-мс mono/int16 frames, bounded drop-oldest queues и обнаружение разрыва |
 | AEC | MISSING | нет системной проверки APO и нет WebRTC far reference |
 | Noise suppression / AGC | MISSING | amplitude noise gate не является NS/AGC |
-| Input/output device profile | PARTIAL | строковый `wake_device` теперь можно доступно и атомарно выбрать по устойчивому фрагменту имени; пары endpoint id/output/echo delay ещё нет |
+| Input/output device profile | PARTIAL | input автоматически выбирается по роли и реальному open/start, ручной `wake_device` остаётся строгим override; output/default виден в мастере, но ещё не управляется |
 | Device calibration | MISSING | нет корреляционного измерения render→capture delay |
 
 ## Подтверждённая проблема выбора устройства
@@ -89,7 +89,7 @@ Microsoft sample требует Windows build 22540+; текущая машин�
 
 1. **Device contract — DONE для input.** Хранится не индекс, а пользовательское предпочтение и фактически открытый endpoint; неоднозначность даёт fail-closed. В журнале есть input endpoint, sample rate, frame size и startup latency без записи звука.
 2. **Единый near-end worker — DONE для `voice-agent`.** Один процесс владеет input stream и публикует 10-мс frames в ограниченные очереди. Wake, partial/final STT и stop-monitor являются потребителями. Старый путь сохранён как fallback.
-3. **Output contract.** Добавить доступную инвентаризацию и атомарный выбор устойчивого output name fragment. Старый SoundPlayer остаётся default, пока новый backend не прошёл физический A/B.
+3. **Output contract — PARTIAL.** Доступная read-only инвентаризация и Windows default добавлены в общий мастер. Атомарный output selector и PCM backend ещё не приняты; SoundPlayer остаётся default до физического A/B.
 4. **Render reference.** Добавить opt-in PCM backend, который принимает PCM Silero и одновременно кладёт фактически принятые output buffer-ом 10-мс render frames в тот же audio worker. Нельзя считать момент генерации WAV моментом воспроизведения; потеря far publisher должна быть наблюдаема и не выдаваться за AEC.
 5. **AEC adapter.** Подключить backend через узкий интерфейс. Сначала offline synthetic corpus, затем реальный A/B Windows APO против закреплённого WebRTC wheel. NS и AGC включать отдельно и сравнивать STT, чтобы не ухудшить окончания.
 6. **Calibration profile.** Только если измерения показывают пользу: `input_endpoint`, `output_endpoint`, sample rates, estimated echo delay и AEC settings. При смене устройства профиль не переиспользовать вслепую.

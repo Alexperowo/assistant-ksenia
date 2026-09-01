@@ -260,6 +260,7 @@ def event(
     source: object,
     component: str,
     name: str,
+    /,
     *,
     level: str = "info",
     **fields: object,
@@ -316,6 +317,7 @@ def event(
 def milestone(
     source: object,
     name: str,
+    /,
     **fields: object,
 ) -> Path | None:
     """Record one privacy-safe timestamp in an end-to-end performance trace."""

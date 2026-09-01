@@ -417,17 +417,19 @@ def _audio_devices(
     if clear:
         set_user_microphone(settings.root, "")
         print(
-            "Сохранённый выбор микрофона удалён. Один-единственный вход можно "
-            "использовать автоматически; при нескольких входах микрофон нужно "
-            "выбрать явно."
+            "Сохранённый выбор микрофона удалён. Ксения будет автоматически "
+            "выбирать рабочий речевой микрофон."
         )
         speech.say_and_wait(
-            "Сохранённый выбор микрофона удалён. Если входов несколько, выберите "
-            "нужный микрофон перед запуском разговора."
+            "Сохранённый выбор удалён. Ксения будет выбирать рабочий речевой "
+            "микрофон автоматически."
         )
         return 0
     recognizer = SpeechRecognizer(settings)
     devices = recognizer.list_devices()
+    output_devices = recognizer.list_output_devices()
+    if not isinstance(output_devices, list):
+        output_devices = []
     print("\n=== Доступные микрофоны ===")
     if not devices:
         print("Входные устройства не найдены.")
@@ -451,24 +453,45 @@ def _audio_devices(
         print(f"Сохранённый выбор микрофона: {configured_selector}.")
     else:
         print("Сохранённый выбор микрофона не задан.")
+    print("\n=== Устройства вывода звука ===")
+    if output_devices:
+        for device in output_devices:
+            marker = "ПО УМОЛЧАНИЮ" if device.get("default") else ""
+            display_name = _spoken_device_name(device.get("name"))
+            print(
+                f"{device.get('index')}: {display_name} — {device.get('host_api')}, "
+                f"{device.get('sample_rate')} Гц, {device.get('channels')} кан. {marker}"
+            )
+    else:
+        print("Устройства вывода звука не найдены.")
+    default_outputs = [device for device in output_devices if device.get("default")]
+    if default_outputs:
+        output_name = _spoken_device_name(default_outputs[0].get("name"))
+        print(
+            "Обычная речь Ксении сейчас следует системному маршруту Windows: "
+            f"{output_name}. Этот мастер пока не меняет устройство вывода."
+        )
+    else:
+        output_name = ""
+        print(
+            "ВНИМАНИЕ: Windows не сообщает устройство вывода по умолчанию. "
+            "Проверьте Параметры Windows → Система → Звук → Вывод."
+        )
     if interactive and select is None:
         speech.say_and_wait(
-            "Введите уникальную часть названия нужного микрофона. "
-            "Чтобы ничего не менять, нажмите Enter. "
-            "Чтобы вернуться к входу по умолчанию, введите дефис."
+            "Ксения выбирает рабочий микрофон автоматически. Для ручной коррекции введите "
+            "часть названия. Чтобы оставить автовыбор, нажмите Enter."
         )
         selected_text = input(
-            "Уникальная часть названия; Enter — не менять; - — вход по умолчанию: "
+            "Часть названия для ручного выбора; Enter — автовыбор; - — сбросить: "
         ).strip()
         if selected_text == "-":
             set_user_microphone(settings.root, "")
             print(
-                "Сохранённый выбор удалён. При нескольких аудиовходах голосовой "
-                "режим потребует снова выбрать микрофон."
+                "Сохранённый выбор удалён. Голосовой режим снова использует автовыбор."
             )
             speech.say_and_wait(
-                "Сохранённый выбор микрофона удалён. При нескольких входах "
-                "выберите микрофон перед запуском разговора."
+                "Сохранённый выбор удалён. Автоматический выбор микрофона включён."
             )
             return 0
         if selected_text:
@@ -535,13 +558,11 @@ def _audio_devices(
         print("Выбор сохранён атомарно в config/user.json.")
         speech.say_and_wait(f"Микрофон {_spoken_device_name(selector)} выбран.")
         return 0
-    selection_required = len(devices) > 1 and not configured_selector
-    if selection_required:
+    automatic_selection = not configured_selector
+    if automatic_selection:
         print(
-            "ВНИМАНИЕ: найдено несколько аудиовходов, а сохранённый выбор "
-            "микрофона отсутствует. Укажите уникальную часть имени: Ксения не "
-            "станет доверять системному входу по умолчанию или открывать другое "
-            "устройство автоматически."
+            "Автовыбор включён: Ксения попытается открыть текущую речевую гарнитуру. "
+            "Стереомикшер, loopback и линейные входы автоматически не выбираются."
         )
     spoken_devices = []
     for device in devices[:8]:
@@ -550,16 +571,21 @@ def _audio_devices(
             description += ", используется по умолчанию"
         spoken_devices.append(description)
     spoken_warning = (
-        " Найдено несколько аудиовходов. Укажите нужный микрофон; системный "
-        "вход по умолчанию не будет выбран автоматически."
-        if selection_required
+        " Автовыбор речевого микрофона включён."
+        if automatic_selection
         else ""
+    )
+    spoken_output = (
+        f" Устройство вывода Windows по умолчанию: {output_name}."
+        if output_name
+        else " Windows не сообщает устройство вывода по умолчанию."
     )
     speech.say_and_wait(
         f"Найдено микрофонов: {len(devices)}. "
         + "; ".join(spoken_devices)
         + "."
         + spoken_warning
+        + spoken_output
     )
     return 0
 

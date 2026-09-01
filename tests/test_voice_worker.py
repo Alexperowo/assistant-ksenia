@@ -7,10 +7,26 @@ from unittest.mock import patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from voice_worker import PlaybackController, split_tts_text  # noqa: E402
+from voice_worker import (  # noqa: E402
+    SILERO_RUSSIAN_QUALITY_OPTIONS,
+    PlaybackController,
+    split_tts_text,
+)
 
 
 class VoiceWorkerTests(unittest.TestCase):
+    def test_russian_stress_and_yo_quality_options_are_explicit(self):
+        self.assertEqual(
+            SILERO_RUSSIAN_QUALITY_OPTIONS,
+            {
+                "put_accent": True,
+                "put_stress_homo": True,
+                "put_yo": True,
+                "put_yo_homo": True,
+                "stress_single_vowel": True,
+            },
+        )
+
     def test_long_text_is_split_without_losing_words(self):
         text = (
             "Первое достаточно длинное предложение для проверки. " * 12

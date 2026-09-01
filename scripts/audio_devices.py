@@ -16,6 +16,54 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _default_device_index(sd, position: int) -> int:
+    try:
+        index = int(sd.default.device[position])
+    except (AttributeError, IndexError, TypeError, ValueError, sd.PortAudioError):
+        return -1
+    return index if index >= 0 else -1
+
+
+def audio_inventory(sd) -> dict[str, list[dict[str, object]]]:
+    default_input = _default_device_index(sd, 0)
+    default_output = _default_device_index(sd, 1)
+    inputs: list[dict[str, object]] = []
+    outputs: list[dict[str, object]] = []
+    for index, raw in enumerate(sd.query_devices()):
+        info = dict(raw)
+        try:
+            host = dict(sd.query_hostapis(int(info.get("hostapi", -1)))).get(
+                "name", ""
+            )
+        except (TypeError, ValueError, sd.PortAudioError):
+            host = ""
+        common = {
+            "index": index,
+            "name": str(info.get("name", index)),
+            "host_api": str(host),
+            "sample_rate": int(round(float(info.get("default_samplerate", 0)))),
+        }
+        input_channels = int(info.get("max_input_channels", 0))
+        output_channels = int(info.get("max_output_channels", 0))
+        if input_channels > 0:
+            inputs.append(
+                common
+                | {
+                    "channels": input_channels,
+                    "default": index == default_input,
+                }
+            )
+        if output_channels > 0:
+            outputs.append(
+                common
+                | {
+                    "channels": output_channels,
+                    "default": index == default_output,
+                }
+            )
+    return {"inputs": inputs, "outputs": outputs}
+
+
 def main() -> int:
     args = parse_args()
     try:
@@ -45,23 +93,18 @@ def main() -> int:
                 opened.close()
             return 0
 
-        default_input = int(sd.default.device[0]) if sd.default.device[0] is not None else -1
-        devices = []
-        for index, raw in enumerate(sd.query_devices()):
-            info = dict(raw)
-            if int(info.get("max_input_channels", 0)) < 1:
-                continue
-            host = dict(sd.query_hostapis(int(info.get("hostapi", -1)))).get("name", "")
-            devices.append(
+        inventory = audio_inventory(sd)
+        print(
+            json.dumps(
                 {
-                    "index": index,
-                    "name": str(info.get("name", index)),
-                    "host_api": str(host),
-                    "sample_rate": int(round(float(info.get("default_samplerate", 0)))),
-                    "default": index == default_input,
-                }
+                    "event": "devices",
+                    "devices": inventory["inputs"],
+                    "inputs": inventory["inputs"],
+                    "outputs": inventory["outputs"],
+                },
+                ensure_ascii=False,
             )
-        print(json.dumps({"event": "devices", "devices": devices}, ensure_ascii=False))
+        )
         return 0
     except Exception as exc:
         print(json.dumps({"event": "error", "error": str(exc)}, ensure_ascii=False))

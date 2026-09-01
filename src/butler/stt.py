@@ -102,6 +102,7 @@ class SpeechRecognizer:
         self._stderr_reader: threading.Thread | None = None
         self._counter = 0
         self._fallback_reason_logged = False
+        self._audio_inventory_cache: dict[str, list[dict[str, object]]] | None = None
         self._lock = threading.RLock()
         self._request_trace_lock = threading.Lock()
         self._request_trace_fields: dict[str, dict[str, str]] = {}
@@ -689,11 +690,26 @@ class SpeechRecognizer:
         return event
 
     def list_devices(self) -> list[dict[str, object]]:
+        return list(self.audio_inventory()["inputs"])
+
+    def list_output_devices(self) -> list[dict[str, object]]:
+        return list(self.audio_inventory()["outputs"])
+
+    def audio_inventory(self) -> dict[str, list[dict[str, object]]]:
+        if self._audio_inventory_cache is not None:
+            return self._audio_inventory_cache
         event = self._run_audio_device_worker()
         if event.get("event") != "devices":
-            raise SpeechRecognitionError(str(event.get("error", "Микрофоны не найдены.")))
-        devices = event.get("devices", [])
-        return devices if isinstance(devices, list) else []
+            raise SpeechRecognitionError(
+                str(event.get("error", "Аудиоустройства не найдены."))
+            )
+        inputs = event.get("inputs", event.get("devices", []))
+        outputs = event.get("outputs", [])
+        self._audio_inventory_cache = {
+            "inputs": inputs if isinstance(inputs, list) else [],
+            "outputs": outputs if isinstance(outputs, list) else [],
+        }
+        return self._audio_inventory_cache
 
     def probe_device(self, selector: str) -> dict[str, object]:
         event = self._run_audio_device_worker("--probe", str(selector))

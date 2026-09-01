@@ -137,6 +137,69 @@ def ranked_input_devices(sd, selector: str) -> list[tuple[int, dict[str, Any], s
     return [(index, info, host) for _, index, info, host in devices]
 
 
+def _automatic_input_role(name: str) -> str:
+    """Classify generic Windows endpoints without depending on a device brand."""
+    normalized = " ".join(str(name or "").casefold().replace("_", " ").split())
+    blocked_hints = (
+        "stereo mix",
+        "stereo input",
+        "what u hear",
+        "loopback",
+        "line input",
+        "стерео микшер",
+        "линейный вход",
+        "лин. вход",
+    )
+    if any(hint in normalized for hint in blocked_hints):
+        return "blocked"
+    communication_hints = (
+        "headset",
+        "hands-free",
+        "hands free",
+        "головной телефон",
+        "гарнитур",
+    )
+    if any(hint in normalized for hint in communication_hints):
+        return "communication"
+    microphone_hints = ("microphone", "mic input", "микрофон")
+    if any(hint in normalized for hint in microphone_hints):
+        return "microphone"
+    return "unknown"
+
+
+def automatic_input_devices(sd) -> list[tuple[int, dict[str, Any], str]]:
+    """Choose safe speech endpoints while ignoring loopback and line sources.
+
+    A usable Windows speech default wins. Otherwise communications endpoints are
+    tried before ordinary microphone jacks. Unknown/generic recording routes are
+    never selected silently.
+    """
+    candidates = ranked_input_devices(sd, "")
+    classified = [
+        (candidate, _automatic_input_role(str(candidate[1].get("name", ""))))
+        for candidate in candidates
+    ]
+    default_index = _default_input_index(sd)
+    default_role = next(
+        (
+            role
+            for (index, _info, _host), role in classified
+            if index == default_index and role in {"communication", "microphone"}
+        ),
+        "",
+    )
+    selected_role = default_role or (
+        "communication"
+        if any(role == "communication" for _candidate, role in classified)
+        else "microphone"
+    )
+    return [
+        candidate
+        for candidate, role in classified
+        if role == selected_role
+    ]
+
+
 def open_best_input_stream(
     sd,
     selector: str,
@@ -144,15 +207,19 @@ def open_best_input_stream(
     *,
     target_rate: int = 16000,
 ) -> OpenedInput:
-    candidates = ranked_input_devices(sd, selector)
+    selector = selector.strip()
+    candidates = (
+        ranked_input_devices(sd, selector)
+        if selector
+        else automatic_input_devices(sd)
+    )
     if not candidates:
-        raise RuntimeError(f"Не найден входной микрофон: {selector or 'устройство по умолчанию'}")
-    if not selector.strip() and len(candidates) > 1:
-        raise RuntimeError(
-            "Доступно несколько аудиовходов. Выберите микрофон через "
-            "voice.wake_device после команды audio-devices; системный вход "
-            "по умолчанию или другое устройство не будут выбраны автоматически."
+        detail = (
+            f": {selector}"
+            if selector
+            else ". Откройте ярлык «Ксения — список микрофонов»"
         )
+        raise RuntimeError(f"Не найден подходящий речевой микрофон{detail}")
 
     attempts: list[str] = []
     for index, info, host in candidates:

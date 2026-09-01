@@ -21,7 +21,7 @@ $shortcuts = @(
     @{ Name = 'Ксения — проверка активации'; Target = 'TEST-WAKE-WORD.cmd'; Description = 'Отдельно проверить фразу Ксения слушай.' },
     @{ Name = 'Ксения — проверка голоса'; Target = 'TEST-VOICE.cmd'; Description = 'Прослушать русские голоса Silero.' },
     @{ Name = 'Ксения — проверка кнопки наушников'; Target = 'TEST-HEADSET-CONTROLS.cmd'; Description = 'Определить сенсорный жест JBL и включить им голосовую активацию.' },
-    @{ Name = 'Ксения — список микрофонов'; Target = 'AUDIO-DEVICES.cmd'; Description = 'Показать все доступные устройства записи.' },
+    @{ Name = 'Ксения — список микрофонов'; Target = 'AUDIO-DEVICES.cmd'; Description = 'Показать входы, выбрать микрофон и сообщить текущий выход Windows.' },
     @{ Name = 'Ксения — полный аудит'; Target = 'AUDIT.cmd'; Description = 'Проверить Python, голос, модели и программу.' },
     @{ Name = 'Ксения — вход в сайты'; Target = 'BROWSER-PROFILE.cmd'; Description = 'Открыть отдельный браузер Ксении для входа в нужные сайты.' }
 )

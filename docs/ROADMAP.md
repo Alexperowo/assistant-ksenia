@@ -15,7 +15,7 @@
 - [x] Сжатие истории с голосовыми статусами и совместимостью строгих chat templates.
 - [x] Постоянная история, подтверждённые факты и передача памяти между ролями.
 - [x] Гибридный RAG: FTS5, Qwen3-Embedding-0.6B на CPU, векторы, цитаты до строк, порог уверенности, стабильный порядок и пропуск секретов.
-- [x] Silero Xenia, произношение дат и чисел, защита начала Bluetooth-речи и SAPI-резерв.
+- [x] Silero Xenia, произношение дат и чисел, явно закреплённые русские accent/омограф/ё options, защита начала Bluetooth-речи и SAPI-резерв. Словарь исключений ударений ещё нуждается в реальных примерах.
 - [x] Vosk для «Ксения слушай/стоп», faster-whisper Large v3 Turbo для команды.
 - [x] Голосовая остановка задачи во время генерации и ограниченный retry микрофона.
 - [x] Программный Live v1: отдельный coordinator/state machine, Vosk partial transcripts → hybrid turn detector, поток итоговых дельт, отслеживаемые TTS-фразы, cancellation-before-audio-stop и раздельные generated/spoken ответы; безопасно выключен до акустической приёмки.
@@ -39,7 +39,7 @@
 - [x] Полный комплект передачи проекта человеку или другой нейросети: `AGENTS.md`, архитектура, карта кода, конфигурация, данные, безопасность, тестирование, решения и журнал изменений.
 - [x] Машинные lock-файлы Python/`llama.cpp`, аппаратные профили, проверка состояния без изменений и отчёт по реальному VRAM.
 - [x] Чистый online-архив без LLM и личных данных, стадийное обновление `llama.cpp`, резервная копия и проверенный откат.
-- [x] 408 автоматических тестов, контроль количества и предупреждений, три случайных порядка, полный контракт ярлыков, performance tracing, tool lifecycle/cancellation, fast resident tier, доступный атомарный fail-closed выбор и open/close probe микрофона, единый near-end capture worker, runtime cache/profiles и регрессии запрета модельного/машинного хардкода.
+- [x] 413 автоматических тестов, контроль количества и предупреждений, три случайных порядка, полный контракт ярлыков, performance tracing, tool lifecycle/cancellation, fast resident tier, автовыбор реально открывающегося речевого микрофона без loopback/line sources, строгий ручной override, output-инвентаризация, единый near-end capture worker, runtime cache/profiles и регрессии запрета модельного/машинного хардкода.
 
 ## Пользовательская приёмка Александра
 
@@ -67,7 +67,7 @@
 - [ ] Завершить fast-tier UI acceptance: строгий read-only runner и первые 3/3 шага готовы; расширить corpus до 20–30 случаев на разных приложениях/масштабах, затем выполнить один подтверждённый action только через существующие `windows_*` tools и Permission Broker. Runtime coordinator и ScreenCaptureService уже готовы. Baselines: `docs/FAST-RESIDENT-MODELS-BASELINE-2026-08-31.md`, `docs/SCREEN-CAPTURE-BASELINE-2026-08-31.md`, `docs/UI-MATE-READONLY-ACCEPTANCE-2026-08-31.md`.
 - [x] Измерить RuntimeProfile 16K/32K/48K/96K на обеих рабочих моделях: меньший context экономит память, но не TTFT; автоматическое переключение отклонено из-за reload/cache penalty. Явный `cache_prompt`, cache hit telemetry и стабильный snapshot `AGENT_FULL` внедрены. Детали: `docs/RUNTIME-OPTIMIZATION-BASELINE.md`.
 - [ ] Production Sandbox Worker — **BLOCKED внешним prerequisite**: аудит подтвердил `VirtualizationFirmwareEnabled=False`, отсутствие WSL/container runtime и неактивный hypervisor. До включения AMD-V/SVM команды остаются выключенными. Затем живым fault-injection набором сравнить Windows Sandbox/Hyper-V worker и нативный AppContainer + Job Object; experimental `CreateProcessInSandbox` и MXC 0.8.0 не считать production boundary. Контракт и доказательства: `docs/SANDBOX-AUDIT.md`.
-- [ ] AEC/full-duplex — **PARTIAL**: единый near-end 10-мс worker готов и проверен desktop START/STOP; supply-chain и CPU-spike `pywebrtc-audio` 0.1.0 завершены, 129 upstream-тестов зелёные, AEC+NS+AGC работает около 96× realtime. Output audit обнаружил, что PortAudio default ведёт на WCS Display, явного output selector нет, а JBL hands-free использует отдельные 16 кГц. Далее: устойчивый output-device contract → opt-in PCM/far-reference backend → Windows APO probe → synthetic A/B → реальные динамики/JBL. Production DSP dependency и `live.enabled` не включать до измеримого выигрыша.
+- [ ] AEC/full-duplex — **PARTIAL**: единый near-end 10-мс worker готов; input и output/default инвентаризуются; Tour One M3 живьём автовыбран, записан и распознан без ручного selector. Supply-chain и CPU-spike `pywebrtc-audio` 0.1.0 завершены, 129 upstream-тестов зелёные, AEC+NS+AGC работает около 96× realtime. Далее: opt-in PCM output/far-reference backend → AEC adapter → synthetic A/B → реальный JBL self-echo/barge-in corpus. `live.enabled` не включать до измеримого выигрыша.
 - [ ] Собрать небольшой постоянный русский benchmark реальных задач Александра для сравнения будущих моделей.
 - [ ] Добавить лёгкий reranker после FTS5 + embeddings + RRF и сравнить top-5 на памяти, документации и коде.
 - [ ] Добавить MCP gateway только через typed adapter → Permission Broker → executor; прямой доступ LLM к MCP-серверу запрещён.

@@ -17,6 +17,13 @@ from pathlib import Path
 
 PLAYBACK_BACKEND = "System.Media.SoundPlayer"
 OUTPUT_ROUTE = "windows_default"
+SILERO_RUSSIAN_QUALITY_OPTIONS = {
+    "put_accent": True,
+    "put_stress_homo": True,
+    "put_yo": True,
+    "put_yo_homo": True,
+    "stress_single_vowel": True,
+}
 
 
 def sha256_file(path: Path) -> str:
@@ -231,6 +238,7 @@ def main() -> int:
                 text="Голос готов.",
                 speaker=args.speaker,
                 sample_rate=args.sample_rate,
+                **SILERO_RUSSIAN_QUALITY_OPTIONS,
             )
         except Exception as exc:
             if active_device != "cuda":
@@ -247,6 +255,7 @@ def main() -> int:
                 text="Голос готов.",
                 speaker=args.speaker,
                 sample_rate=args.sample_rate,
+                **SILERO_RUSSIAN_QUALITY_OPTIONS,
             )
         warmup_seconds = time.monotonic() - warmup_started_at
         append_worker_log(
@@ -318,6 +327,7 @@ def main() -> int:
                         text=chunk,
                         speaker=speaker,
                         sample_rate=args.sample_rate,
+                        **SILERO_RUSSIAN_QUALITY_OPTIONS,
                     )
                 except Exception as exc:
                     if active_device != "cuda":
@@ -334,6 +344,7 @@ def main() -> int:
                         text=chunk,
                         speaker=speaker,
                         sample_rate=args.sample_rate,
+                        **SILERO_RUSSIAN_QUALITY_OPTIONS,
                     )
                 if index:
                     rendered.append(pause)

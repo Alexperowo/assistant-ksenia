@@ -4,7 +4,12 @@ from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from audio_input import open_best_input_stream, ranked_input_devices  # noqa: E402
+from audio_devices import audio_inventory  # noqa: E402
+from audio_input import (  # noqa: E402
+    automatic_input_devices,
+    open_best_input_stream,
+    ranked_input_devices,
+)
 from wake_worker import is_activation  # noqa: E402
 
 
@@ -14,16 +19,17 @@ class FakeSoundDevice:
 
     def __init__(self):
         self._devices = [
-            {"name": "Headset (JBL Sense Pro)", "max_input_channels": 1, "hostapi": 0},
-            {"name": "Headset (JBL Sense Pro)", "max_input_channels": 1, "hostapi": 1},
-            {"name": "Microphone", "max_input_channels": 1, "hostapi": 2},
+            {"name": "Headset (JBL Sense Pro)", "max_input_channels": 1, "max_output_channels": 0, "hostapi": 0, "default_samplerate": 16000},
+            {"name": "Headset (JBL Sense Pro)", "max_input_channels": 1, "max_output_channels": 0, "hostapi": 1, "default_samplerate": 16000},
+            {"name": "Microphone", "max_input_channels": 1, "max_output_channels": 0, "hostapi": 2, "default_samplerate": 48000},
+            {"name": "Speakers", "max_input_channels": 0, "max_output_channels": 2, "hostapi": 1, "default_samplerate": 48000},
         ]
         self._hosts = [
             {"name": "Windows WDM-KS"},
             {"name": "Windows WASAPI"},
             {"name": "MME"},
         ]
-        self.default = type("Default", (), {"device": (2, -1)})()
+        self.default = type("Default", (), {"device": (2, 3)})()
 
     def query_devices(self, index=None):
         return self._devices if index is None else self._devices[index]
@@ -87,14 +93,24 @@ class AudioInputTests(unittest.TestCase):
         self.assertEqual(candidates[0][0], 2)
         self.assertEqual(len(candidates), 3)
 
-    def test_multiple_inputs_require_explicit_selection_even_with_default(self):
-        with self.assertRaisesRegex(RuntimeError, "voice.wake_device"):
-            open_best_input_stream(
-                FallbackSoundDevice(),
-                "",
-                lambda *_args: None,
-                target_rate=16000,
-            )
+    def test_audio_inventory_separates_inputs_outputs_and_defaults(self):
+        inventory = audio_inventory(FakeSoundDevice())
+
+        self.assertEqual(len(inventory["inputs"]), 3)
+        self.assertEqual(len(inventory["outputs"]), 1)
+        self.assertTrue(inventory["inputs"][2]["default"])
+        self.assertTrue(inventory["outputs"][0]["default"])
+        self.assertEqual(inventory["outputs"][0]["channels"], 2)
+
+    def test_working_speech_default_is_selected_automatically(self):
+        opened = open_best_input_stream(
+            FallbackSoundDevice(),
+            "",
+            lambda *_args: None,
+            target_rate=16000,
+        )
+        self.assertEqual(opened.device_name, "Headset (JBL Sense Pro)")
+        self.assertEqual(opened.device_index, 0)
 
     def test_unknown_named_device_does_not_fallback_to_another_headset(self):
         candidates = ranked_input_devices(FakeSoundDevice(), "Unknown headset")
@@ -116,17 +132,38 @@ class AudioInputTests(unittest.TestCase):
         self.assertTrue(opened.failed_attempts)
         self.assertIn("endpoint busy", opened.failed_attempts[0])
 
-    def test_multiple_inputs_without_default_require_explicit_selection(self):
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "voice.wake_device",
-        ):
-            open_best_input_stream(
-                NoDefaultSoundDevice(),
-                "",
-                lambda *_args: None,
-                target_rate=16000,
-            )
+    def test_without_speech_default_communication_device_beats_microphone_jack(self):
+        opened = open_best_input_stream(
+            NoDefaultSoundDevice(),
+            "",
+            lambda *_args: None,
+            target_rate=16000,
+        )
+        self.assertEqual(opened.device_name, "Headset (JBL Sense Pro)")
+        self.assertEqual(opened.device_index, 0)
+
+    def test_loopback_and_line_sources_are_not_automatic_microphones(self):
+        fake = NoDefaultSoundDevice()
+        fake._devices = [
+            {
+                "name": "Stereo Mix",
+                "max_input_channels": 2,
+                "max_output_channels": 0,
+                "hostapi": 2,
+                "default_samplerate": 48000,
+            },
+            {
+                "name": "Line Input",
+                "max_input_channels": 2,
+                "max_output_channels": 0,
+                "hostapi": 2,
+                "default_samplerate": 48000,
+            },
+        ]
+
+        self.assertEqual(automatic_input_devices(fake), [])
+        with self.assertRaisesRegex(RuntimeError, "речевой микрофон"):
+            open_best_input_stream(fake, "", lambda *_args: None)
 
     def test_single_input_without_default_remains_automatic(self):
         opened = open_best_input_stream(

@@ -17,7 +17,7 @@ from butler.stt import SpeechRecognitionError
 
 class AccessibilityTests(unittest.TestCase):
     @patch("butler.cli.SpeechRecognizer")
-    def test_device_inventory_requires_selection_when_multiple_inputs_exist(
+    def test_device_inventory_explains_automatic_selection_with_multiple_inputs(
         self, recognizer_class
     ):
         recognizer_class.return_value.list_devices.return_value = [
@@ -36,6 +36,16 @@ class AccessibilityTests(unittest.TestCase):
                 "default": False,
             },
         ]
+        recognizer_class.return_value.list_output_devices.return_value = [
+            {
+                "index": 3,
+                "name": "Speakers",
+                "host_api": "Windows WASAPI",
+                "sample_rate": 48000,
+                "channels": 2,
+                "default": True,
+            }
+        ]
         speech = MagicMock()
         settings = SimpleNamespace(raw={"voice": {}})
 
@@ -43,9 +53,9 @@ class AccessibilityTests(unittest.TestCase):
             result = _audio_devices(settings, speech)
 
         self.assertEqual(result, 0)
-        self.assertIn("найдено несколько аудиовходов", output.getvalue())
-        self.assertIn("системному входу по умолчанию", output.getvalue())
-        self.assertIn("Найдено несколько аудиовходов", speech.say_and_wait.call_args.args[0])
+        self.assertIn("Автовыбор включён", output.getvalue())
+        self.assertIn("Стереомикшер", output.getvalue())
+        self.assertIn("Автовыбор речевого микрофона", speech.say_and_wait.call_args.args[0])
 
     @patch("butler.cli.SpeechRecognizer")
     def test_device_inventory_shows_persisted_selection_without_warning(
@@ -67,12 +77,16 @@ class AccessibilityTests(unittest.TestCase):
                 "default": True,
             },
         ]
-        recognizer_class.return_value.probe_device.return_value = {
-            "event": "probe_ready",
-            "device": "Головной телефон (2- JBL Tour One M3)",
-            "host_api": "Windows WASAPI",
-            "sample_rate": 16000,
-        }
+        recognizer_class.return_value.list_output_devices.return_value = [
+            {
+                "index": 3,
+                "name": "Speakers",
+                "host_api": "Windows WASAPI",
+                "sample_rate": 48000,
+                "channels": 2,
+                "default": True,
+            }
+        ]
         speech = MagicMock()
         settings = SimpleNamespace(raw={"voice": {"wake_device": "JBL One"}})
 
@@ -82,6 +96,41 @@ class AccessibilityTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("Сохранённый выбор микрофона: JBL One", output.getvalue())
         self.assertNotIn("ВНИМАНИЕ", output.getvalue())
+
+    @patch("butler.cli.SpeechRecognizer")
+    def test_device_inventory_explains_current_windows_output_without_changing_it(
+        self, recognizer_class
+    ):
+        recognizer_class.return_value.list_devices.return_value = [
+            {
+                "index": 1,
+                "name": "Microphone",
+                "host_api": "MME",
+                "sample_rate": 48000,
+                "default": True,
+            }
+        ]
+        recognizer_class.return_value.list_output_devices.return_value = [
+            {
+                "index": 4,
+                "name": "WCS Display",
+                "host_api": "Windows WASAPI",
+                "sample_rate": 44100,
+                "channels": 2,
+                "default": True,
+            }
+        ]
+        speech = MagicMock()
+        settings = SimpleNamespace(raw={"voice": {}})
+
+        with redirect_stdout(io.StringIO()) as output:
+            result = _audio_devices(settings, speech)
+
+        self.assertEqual(result, 0)
+        self.assertIn("Устройства вывода звука", output.getvalue())
+        self.assertIn("системному маршруту Windows: WCS Display", output.getvalue())
+        self.assertIn("пока не меняет устройство вывода", output.getvalue())
+        self.assertIn("WCS Display", speech.say_and_wait.call_args.args[0])
 
     @patch("butler.cli.set_user_microphone")
     @patch("butler.cli.SpeechRecognizer")
