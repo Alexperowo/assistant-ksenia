@@ -118,6 +118,13 @@ $modelResult = Invoke-PythonCaptured @((Join-Path $projectRoot 'scripts\test_act
 $modelResult.Lines | Tee-Object -FilePath $report -Append
 if ($modelResult.Code -ne 0) { exit $modelResult.Code }
 
+$cancellationResult = Invoke-PythonCaptured @(
+    (Join-Path $projectRoot 'scripts\test_model_cancellation.py'),
+    '--cancel-after-ms', '500'
+)
+$cancellationResult.Lines | Tee-Object -FilePath $report -Append
+if ($cancellationResult.Code -ne 0) { exit $cancellationResult.Code }
+
 $ragResult = Invoke-PythonCaptured @((Join-Path $projectRoot 'scripts\test-rag.py'))
 $ragResult.Lines | Tee-Object -FilePath $report -Append
 if ($ragResult.Code -ne 0) { exit $ragResult.Code }

@@ -8,7 +8,7 @@
 
 После последующих тестов дистрибутива, Live, атомарных транзакций, отменяемого транспорта, model/tool lifecycle, backend-маршрутизации, fast resident tier/coordinator, переключения Thinking-пары, DPI-safe screen capture, автовыбора речевого input, near/far PCM, AEC/barge-in-конфигурации, Windows control pipe, физического A/B-harness, ролевого запуска моделей и детерминированной текущей погоды быстрый слой содержит 447 тестов. Полный аудит дополнительно запускает настоящую активную LLM, CPU-эмбеддер RAG, временный LAN-сервер и связку Silero → WAV → faster-whisper на CUDA.
 
-Последний полный `check.ps1` 2 сентября прошёл 444/444 и три порядка без warnings/skips, release validator, `pip check`, Doctor, LAN, живой UI-Mate 16K за 0,375 с и Silero→Whisper CUDA (`landmark_recall=1.0`). RAG явно пропущен из-за выключенной конфигурации; это незакрытая живая проверка, а не скрытый успех.
+Последний полный `check.ps1` 2 сентября прошёл 447/447 и три порядка без warnings/skips, release validator, `pip check`, Doctor, LAN, живой UI-Mate 16K за 0,328 с, отмену stream за 516 мс с нулевыми active/stuck reader и Silero→Whisper CUDA (`landmark_recall=1.0`). RAG явно пропущен из-за выключенной конфигурации; это незакрытая живая проверка, а не скрытый успех.
 
 ## Что проверено в самом наборе тестов
 
