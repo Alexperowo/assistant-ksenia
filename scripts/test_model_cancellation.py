@@ -27,8 +27,23 @@ def main() -> int:
     args = parser.parse_args()
 
     settings = load_settings(ROOT)
-    state = ModelManager(settings).running_state()
-    if state is None:
+    preferred_role = settings.default_role
+    preferred_manager = ModelManager.for_role(settings, preferred_role)
+    state = preferred_manager.running_state()
+    manager = (
+        preferred_manager
+        if state is not None and state.role == preferred_role
+        else None
+    )
+    if manager is None:
+        for service_name in settings.model_service_names():
+            candidate = ModelManager(settings, service_name)
+            candidate_state = candidate.running_state()
+            if candidate_state is not None:
+                manager = candidate
+                state = candidate_state
+                break
+    if state is None or manager is None:
         print(
             json.dumps(
                 {
@@ -75,6 +90,8 @@ def main() -> int:
                 ],
                 checkpoint=checkpoint,
                 max_tokens=4096,
+                service=manager.service,
+                request_mode=settings.assistant_request_mode(state.role),
             )
         except TaskCancelled:
             cancelled = True
@@ -95,6 +112,7 @@ def main() -> int:
             and counts["stuck_reader_threads"] == 0
         ),
         "role": state.role,
+        "service": manager.service.name,
         "pid": state.pid,
         "trace_id": trace_id,
         "cancel_after_ms": cancel_after_ms,

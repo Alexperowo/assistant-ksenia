@@ -27,7 +27,6 @@ from butler.config import (
     set_user_assistant_mode,
     set_user_headset_control,
     set_user_microphone,
-    set_user_reasoning,
     set_user_response_budget,
     write_user_settings,
 )
@@ -648,57 +647,6 @@ def _configure_capability_model(settings, speech: SpeechAnnouncer) -> int:
     set_user_capability_model(settings.root, capability, profile_name)
     print(f"Профиль назначен: {profile.label}")
     speech.say_and_wait("Модельный профиль назначен. Он применится к следующей задаче.")
-    return 0
-
-
-def _configure_reasoning(settings, speech: SpeechAnnouncer) -> int:
-    print("\n=== Режим рассуждений ===")
-    profiles = settings.model_roles()
-    for index, role in enumerate(profiles, 1):
-        profile = settings.model(role)
-        print(f"{index}. {profile.label}: {reasoning_label(profile.reasoning)}")
-    print(f"{len(profiles) + 1}. Изменить для всех профилей")
-    raw_role = input("Номер профиля или Enter для отмены: ").strip()
-    if not raw_role:
-        return 0
-    try:
-        selected_index = int(raw_role) - 1
-    except ValueError:
-        selected_index = -1
-    if selected_index == len(profiles):
-        selected_roles = profiles
-    elif 0 <= selected_index < len(profiles):
-        selected_roles = (profiles[selected_index],)
-    else:
-        print("Такого номера нет.")
-        return 1
-
-    levels = {
-        "0": "off",
-        "1": "brief",
-        "2": "normal",
-        "3": "deep",
-    }
-    print("0. Выключено — самый быстрый и устойчивый режим.")
-    print("1. Кратко — до 256 токенов рассуждений.")
-    print("2. Обычно — до 768 токенов рассуждений.")
-    print("3. Глубоко — до 1536 токенов; может заметно замедлить ответ.")
-    raw_level = input("Уровень: 0, 1, 2, 3 или Enter для отмены: ").strip()
-    if not raw_level:
-        return 0
-    level = levels.get(raw_level)
-    if level is None:
-        print("Такого уровня нет.")
-        return 1
-
-    for role in selected_roles:
-        set_user_reasoning(settings.root, role, level)
-    label = reasoning_label(level)
-    role_names = " и ".join(selected_roles)
-    print(f"Режим «{label}» сохранён для: {role_names}.")
-    speech.say_and_wait(
-        f"Режим рассуждений: {label}. Он применится при следующем запуске модели."
-    )
     return 0
 
 

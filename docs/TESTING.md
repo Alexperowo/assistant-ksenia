@@ -131,6 +131,8 @@ python scripts\performance-report.py --json
 python scripts\test_model_cancellation.py --cancel-after-ms 500
 ```
 
+Gate выбирает активный сервис из всей декларативной таблицы, поэтому при штатной резидентной паре проверяет `ui_fast`, а не пропускает тест из-за остановленного `primary`.
+
 Успех требует `active_reader_threads=0` и `stuck_reader_threads=0`; скрипт не запускает и не останавливает модель самостоятельно.
 
 ## Критерий завершения изменения
