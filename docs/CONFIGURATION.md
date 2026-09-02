@@ -39,6 +39,8 @@
 
 `assistant`, `researcher`, `developer`, `planner`, `heavy_brain` — функциональные роли. `ui_butler`, `research_fast`, `candidate`, `reasoning`, `generalist` — семантические идентификаторы профилей GGUF. Функция назначается только через `capability_roles`; исполняемый код не делает выводов из имени файла, семейства модели или размера параметров. Текущее соответствие: быстрый разговор → UI-Mate, web → Agents-A1, исполнение → Ornith Compact, усиленный план → Qwen, редкий long-context → Laguna XS.
 
+`runtime_routing.assistant_mode` принимает `fast` или `thinking`. В `thinking` роли пары и request modes берутся из декларативного `runtime_routing.ui_deliberation`: reviewer Agents-A1 анализирует запрос, proposer UI-Mate формирует окончательный ответ. Пользовательский выбор атомарно сохраняется только как имя режима, без дублирования путей или имён GGUF.
+
 ## Каталоги моделей без машинного хардкода
 
 ```json

@@ -16,7 +16,7 @@ from butler.agent import (
     StatusCallback,
 )
 from butler.chat import ChatError, complete_chat
-from butler.config import ConfigError, Settings
+from butler.config import ConfigError, Settings, set_user_assistant_mode
 from butler.diagnostics import bind_trace_context
 from butler.diagnostics import event as diagnostic_event
 from butler.diagnostics import exception as diagnostic_exception
@@ -98,6 +98,28 @@ DIRECT_CONVERSATION_BLOCKERS = (
     "включ",
     "выключ",
 )
+
+
+def assistant_mode_command(text: str) -> str | None:
+    normalized = " ".join(text.casefold().replace("ё", "е").split())
+    thinking = (
+        "включи режим рассуждения",
+        "включи режим мышления",
+        "включи thinking",
+        "режим thinking",
+    )
+    fast = (
+        "включи быстрый режим",
+        "переключись в быстрый режим",
+        "выключи режим рассуждения",
+        "выключи режим мышления",
+        "выключи thinking",
+    )
+    if any(phrase in normalized for phrase in thinking):
+        return "thinking"
+    if any(phrase in normalized for phrase in fast):
+        return "fast"
+    return None
 
 PLANNING_TOOLS = {
     "list_procedures",
@@ -191,6 +213,7 @@ class RoutedAgentSession:
         self.research = ResearchCoordinator(settings, self._research_model())
         self.handoffs = RoleHandoffStore(settings.runtime_dir)
         self.trusted_tasks = TrustedTaskStore(settings)
+        self._assistant_mode_override: str | None = None
         diagnostic_event(self.settings, "orchestrator", "session_ready")
 
     def clear_memory(self) -> None:
@@ -255,7 +278,43 @@ class RoutedAgentSession:
                 on_status("Запускаю быстрый уровень")
             manager.start(assistant_model)
         profile = self.settings.model(assistant_model)
+        assistant_mode = self._assistant_mode_override or self.settings.assistant_mode()
         request_mode = self.settings.assistant_request_mode(assistant_model)
+        advisory = ""
+        pair = self.settings.ui_deliberation()
+        if assistant_mode == "thinking":
+            if pair is None or pair.proposer_model != assistant_model:
+                raise ConfigError("Thinking-режим требует настроенную пару резидентных моделей.")
+            if on_status:
+                on_status("Рассуждаем вместе")
+            reviewer = self.settings.model(pair.reviewer_model)
+            reviewer_mode = reviewer.request_mode(pair.review_mode)
+            response = complete_chat(
+                self.settings,
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Ты — аналитическая половина пары локального ассистента. "
+                            "Тщательно проанализируй вопрос, отметь неоднозначности и факты, "
+                            "но не обращайся к пользователю и не утверждай, что выполняла действия. "
+                            "Дай компактные рекомендации второй модели для итогового ответа."
+                        ),
+                    },
+                    {"role": "user", "content": text},
+                ],
+                temperature=reviewer_mode.temperature,
+                max_tokens=pair.review_max_tokens,
+                checkpoint=control.checkpoint if control is not None else None,
+                service=self.settings.model_service(reviewer.service_name),
+                request_mode=reviewer_mode,
+            )
+            advisory = str(
+                response.get("choices", [{}])[0].get("message", {}).get("content") or ""
+            ).strip()
+            if not advisory:
+                raise ChatError("Вторая модель пары не сформировала анализ.")
+            request_mode = profile.request_mode(pair.proposal_mode)
         diagnostic_event(
             self.settings,
             "orchestrator",
@@ -265,6 +324,8 @@ class RoutedAgentSession:
             model_role=assistant_model,
             model_service=profile.service_name,
             request_mode=(request_mode.name if request_mode is not None else "default"),
+            assistant_mode=assistant_mode,
+            pair_reviewer=(pair.reviewer_model if assistant_mode == "thinking" and pair else ""),
         )
         try:
             reply = self.session.ask(
@@ -279,6 +340,7 @@ class RoutedAgentSession:
                 reset_tool_state=False,
                 service=self.settings.model_service(profile.service_name),
                 request_mode=request_mode,
+                conversation_advisory=advisory,
             )
         except Exception as exc:
             diagnostic_exception(
@@ -952,6 +1014,19 @@ class RoutedAgentSession:
                 text,
                 metadata={"durable_task": True},
             )
+        requested_mode = assistant_mode_command(text)
+        if requested_mode is not None:
+            set_user_assistant_mode(self.settings.root, requested_mode)
+            self._assistant_mode_override = requested_mode
+            answer = (
+                "Thinking-режим включён. UI-Mate и Agents-A1 будут рассуждать вместе."
+                if requested_mode == "thinking"
+                else "Быстрый режим включён. Обе модели остаются загружены, ответ формирует UI-Mate."
+            )
+            self.session.record_exchange(text, answer)
+            if on_final_delta is not None:
+                on_final_delta(answer)
+            return AgentReply(answer, ())
         fast_reply = fast_intent_reply(text)
         routing = self.settings.raw.get("routing", {})
         fast_lookup_signals = routing.get("fast_lookup_signals", ())

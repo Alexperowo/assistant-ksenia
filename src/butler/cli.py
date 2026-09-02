@@ -24,6 +24,7 @@ from butler.config import (
     reasoning_label,
     response_budget_label,
     set_user_capability_model,
+    set_user_assistant_mode,
     set_user_headset_control,
     set_user_microphone,
     set_user_reasoning,
@@ -689,6 +690,30 @@ def _configure_reasoning(settings, speech: SpeechAnnouncer) -> int:
     speech.say_and_wait(
         f"Режим рассуждений: {label}. Он применится при следующем запуске модели."
     )
+    return 0
+
+
+def _configure_assistant_mode(settings, speech: SpeechAnnouncer) -> int:
+    current = settings.assistant_mode()
+    print("\n=== Режим дворецкого ===")
+    print(f"Сейчас: {'Thinking — UI-Mate и Agents-A1 рассуждают вместе' if current == 'thinking' else 'быстрый — UI-Mate отвечает, обе модели загружены'}.")
+    print("1. Быстрый")
+    print("2. Thinking / рассуждение пары")
+    choice = input("Выберите 1, 2 или Enter для отмены: ").strip().casefold()
+    if not choice:
+        return 0
+    mode = {"1": "fast", "быстрый": "fast", "2": "thinking", "thinking": "thinking", "рассуждение": "thinking"}.get(choice)
+    if mode is None:
+        print("Такого режима нет.")
+        return 1
+    set_user_assistant_mode(settings.root, mode)
+    message = (
+        "Thinking-режим включён. UI-Mate и Agents-A1 будут рассуждать вместе."
+        if mode == "thinking"
+        else "Быстрый режим включён. Обе модели останутся загружены."
+    )
+    print(message)
+    speech.say_and_wait(message)
     return 0
 
 
@@ -1674,7 +1699,7 @@ def _menu(settings, speech: SpeechAnnouncer) -> int:
             "12. Показать все микрофоны\n"
             "13. Показать найденные модели\n"
             "14. Назначить модельный профиль функциональной роли\n"
-            "15. Настроить глубину рассуждений\n"
+            "15. Переключить быстрый / Thinking режим дворецкого\n"
             "16. Настроить длину ответа\n"
             "17. Проверить управление с наушников\n"
             "18. Доверенная задача — один запрос без подтверждений\n"
@@ -1737,7 +1762,7 @@ def _menu(settings, speech: SpeechAnnouncer) -> int:
                 _configure_capability_model(settings, speech)
                 settings = load_settings(settings.root)
             elif choice in {"15", "рассуждения", "мышление"}:
-                _configure_reasoning(settings, speech)
+                _configure_assistant_mode(settings, speech)
                 settings = load_settings(settings.root)
             elif choice in {"16", "длина ответа", "лимит ответа"}:
                 _configure_response_budget(settings, speech)

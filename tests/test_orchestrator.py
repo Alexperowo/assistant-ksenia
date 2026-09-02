@@ -17,6 +17,7 @@ from butler.handoff import RoleHandoffStore
 from butler.orchestrator import (
     PLANNING_TOOLS,
     RoutedAgentSession,
+    assistant_mode_command,
     bounded_tool_payload,
     planning_tool_schemas,
     workspace_map,
@@ -26,6 +27,11 @@ from butler.tools import ToolResult
 
 
 class OrchestratorTests(unittest.TestCase):
+    def test_assistant_mode_commands_are_explicit(self):
+        self.assertEqual(assistant_mode_command("Включи режим рассуждения"), "thinking")
+        self.assertEqual(assistant_mode_command("Переключись в быстрый режим"), "fast")
+        self.assertIsNone(assistant_mode_command("Объясни, как работает мышление"))
+
     def test_public_request_restores_task_trace_for_entire_route(self):
         session = RoutedAgentSession(load_settings())
         observed = []
@@ -192,6 +198,45 @@ class OrchestratorTests(unittest.TestCase):
         self.assertTrue(call["conversation_only"])
         self.assertEqual(call["service"].name, "ui_fast")
         self.assertEqual(call["request_mode"].name, "fast")
+        self.assertEqual(call["conversation_advisory"], "")
+
+    @patch("butler.orchestrator.complete_chat")
+    @patch("butler.orchestrator.ModelManager.for_role")
+    def test_thinking_mode_uses_both_resident_models(self, for_role, complete_chat):
+        original = load_settings()
+        raw = deepcopy(original.raw)
+        raw["runtime_routing"]["assistant_mode"] = "thinking"
+        session = RoutedAgentSession(replace(original, raw=raw))
+        manager = Mock()
+        manager.is_current.return_value = True
+        for_role.return_value = manager
+        session.residency.activate_residents = Mock(return_value={})
+        session.session.ask = Mock(return_value=AgentReply("Итог пары.", ()))
+        complete_chat.return_value = {
+            "choices": [{"message": {"content": "Независимый анализ."}}]
+        }
+
+        reply = session._ask_exclusive("Почему небо голубое?")
+
+        self.assertEqual(reply.text, "Итог пары.")
+        self.assertEqual(complete_chat.call_args.kwargs["service"].name, "research_fast")
+        self.assertEqual(complete_chat.call_args.kwargs["request_mode"].name, "deliberate")
+        call = session.session.ask.call_args.kwargs
+        self.assertEqual(call["service"].name, "ui_fast")
+        self.assertEqual(call["request_mode"].name, "deliberate")
+        self.assertEqual(call["conversation_advisory"], "Независимый анализ.")
+
+    @patch("butler.orchestrator.set_user_assistant_mode")
+    def test_voice_mode_switch_is_persisted_without_starting_a_model(self, save_mode):
+        session = RoutedAgentSession(load_settings())
+        session.session.record_exchange = Mock()
+        session.manager.start = Mock()
+
+        reply = session._ask_exclusive("Включи режим рассуждения")
+
+        self.assertIn("UI-Mate и Agents-A1", reply.text)
+        save_mode.assert_called_once_with(session.settings.root, "thinking")
+        session.manager.start.assert_not_called()
 
     def test_planner_exposes_only_read_tools(self):
         names = {

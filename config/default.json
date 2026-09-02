@@ -188,6 +188,7 @@
     ]
   },
   "runtime_routing": {
+    "assistant_mode": "fast",
     "fast_resident_models": [
       "ui_butler",
       "research_fast"

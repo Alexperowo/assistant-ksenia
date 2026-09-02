@@ -23,6 +23,7 @@ class ConfigTests(unittest.TestCase):
         settings = load_settings()
 
         self.assertEqual(settings.resident_model_roles(), ("ui_butler", "research_fast"))
+        self.assertEqual(settings.assistant_mode(), "fast")
         ui = settings.model("ui_butler")
         researcher = settings.model("research_fast")
         self.assertEqual(settings.model_service(ui.service_name).port, 18082)

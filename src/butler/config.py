@@ -738,6 +738,17 @@ class Settings:
             )
         return self.model(model_role).request_mode(raw_mode)
 
+    def assistant_mode(self) -> str:
+        """Return the user-facing mode of the resident butler pair."""
+
+        runtime_routing = self.raw.get("runtime_routing", {})
+        if not isinstance(runtime_routing, Mapping):
+            raise ConfigError("Раздел runtime_routing должен быть объектом.")
+        mode = str(runtime_routing.get("assistant_mode", "fast")).strip().casefold()
+        if mode not in {"fast", "thinking"}:
+            raise ConfigError("runtime_routing.assistant_mode должен быть fast или thinking.")
+        return mode
+
     def fast_lookup_policy(self) -> tuple[tuple[str, ...], int]:
         routing = self.raw.get("routing", {})
         if not isinstance(routing, Mapping):
@@ -1171,6 +1182,7 @@ def load_settings(root: Path | None = None) -> Settings:
     for profile_name in settings.model_roles():
         settings.model(profile_name)
     settings.resident_model_roles()
+    settings.assistant_mode()
     settings.ui_deliberation()
     settings.fast_lookup_policy()
     settings.weather_signals()
@@ -1277,6 +1289,21 @@ def set_user_reasoning(root: Path, role: str, level: str) -> Path:
         if not isinstance(profile, dict):
             raise ConfigError(f"Профиль модели {role} повреждён.")
         profile["reasoning"] = level
+
+    return _edit_user_settings(target, edit)
+
+
+def set_user_assistant_mode(root: Path, mode: str) -> Path:
+    normalized = str(mode).strip().casefold()
+    if normalized not in {"fast", "thinking"}:
+        raise ConfigError("Режим дворецкого должен быть fast или thinking.")
+    target = root.resolve() / "config" / "user.json"
+
+    def edit(value: dict[str, Any]) -> None:
+        routing = value.setdefault("runtime_routing", {})
+        if not isinstance(routing, dict):
+            raise ConfigError("Раздел runtime_routing в пользовательской конфигурации повреждён.")
+        routing["assistant_mode"] = normalized
 
     return _edit_user_settings(target, edit)
 
