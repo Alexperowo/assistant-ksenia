@@ -29,7 +29,9 @@ from butler.tools import ToolResult
 class OrchestratorTests(unittest.TestCase):
     def test_assistant_mode_commands_are_explicit(self):
         self.assertEqual(assistant_mode_command("Включи режим рассуждения"), "thinking")
+        self.assertEqual(assistant_mode_command("Включи Reasoning"), "thinking")
         self.assertEqual(assistant_mode_command("Переключись в быстрый режим"), "fast")
+        self.assertEqual(assistant_mode_command("Какой сейчас режим?"), "status")
         self.assertIsNone(assistant_mode_command("Объясни, как работает мышление"))
 
     def test_public_request_restores_task_trace_for_entire_route(self):

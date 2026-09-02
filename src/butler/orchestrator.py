@@ -106,7 +106,9 @@ def assistant_mode_command(text: str) -> str | None:
         "включи режим рассуждения",
         "включи режим мышления",
         "включи thinking",
+        "включи reasoning",
         "режим thinking",
+        "режим reasoning",
     )
     fast = (
         "включи быстрый режим",
@@ -114,7 +116,15 @@ def assistant_mode_command(text: str) -> str | None:
         "выключи режим рассуждения",
         "выключи режим мышления",
         "выключи thinking",
+        "выключи reasoning",
     )
+    status = (
+        "какой режим дворецкого",
+        "какой режим включен",
+        "какой сейчас режим",
+    )
+    if any(phrase in normalized for phrase in status):
+        return "status"
     if any(phrase in normalized for phrase in thinking):
         return "thinking"
     if any(phrase in normalized for phrase in fast):
@@ -1016,13 +1026,21 @@ class RoutedAgentSession:
             )
         requested_mode = assistant_mode_command(text)
         if requested_mode is not None:
-            set_user_assistant_mode(self.settings.root, requested_mode)
-            self._assistant_mode_override = requested_mode
-            answer = (
-                "Thinking-режим включён. UI-Mate и Agents-A1 будут рассуждать вместе."
-                if requested_mode == "thinking"
-                else "Быстрый режим включён. Обе модели остаются загружены, ответ формирует UI-Mate."
-            )
+            if requested_mode == "status":
+                active_mode = self._assistant_mode_override or self.settings.assistant_mode()
+                answer = (
+                    "Сейчас включён Thinking-режим: UI-Mate и Agents-A1 рассуждают вместе."
+                    if active_mode == "thinking"
+                    else "Сейчас включён быстрый режим: UI-Mate отвечает, обе модели загружены."
+                )
+            else:
+                set_user_assistant_mode(self.settings.root, requested_mode)
+                self._assistant_mode_override = requested_mode
+                answer = (
+                    "Thinking-режим включён. UI-Mate и Agents-A1 будут рассуждать вместе."
+                    if requested_mode == "thinking"
+                    else "Быстрый режим включён. Обе модели остаются загружены, ответ формирует UI-Mate."
+                )
             self.session.record_exchange(text, answer)
             if on_final_delta is not None:
                 on_final_delta(answer)

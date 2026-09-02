@@ -314,7 +314,7 @@
       "context_size": 16384,
       "gpu_layers": 999,
       "enabled": true,
-      "experimental": true,
+      "experimental": false,
       "reasoning": "brief",
       "reasoning_budget_tokens": 256,
       "request_modes": {
@@ -372,7 +372,7 @@
       "context_size": 16384,
       "gpu_layers": 999,
       "enabled": true,
-      "experimental": true,
+      "experimental": false,
       "reasoning": "brief",
       "reasoning_budget_tokens": 256,
       "reasoning_budget_message": "Now provide the concise final answer in the requested format.",

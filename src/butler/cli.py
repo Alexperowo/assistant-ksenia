@@ -197,14 +197,16 @@ def _status(
     checks = run_checks(settings, installation_mode=installation_mode)
     ok = _print_checks(checks)
     active: list[str] = []
+    resident_roles = set(settings.resident_model_roles())
     for service_name in settings.model_service_names():
         manager = ModelManager(settings, service_name)
         state = manager.running_state()
         if state is not None and manager.api_ready():
-            active.append(
-                f"{state.role} на сервисе {service_name}; рассуждения: "
-                f"{reasoning_label(settings.model(state.role).reasoning)}"
-            )
+            profile = settings.model(state.role)
+            detail = f"{profile.label} на сервисе {service_name}"
+            if state.role not in resident_roles:
+                detail += f"; рассуждения: {reasoning_label(profile.reasoning)}"
+            active.append(detail)
     message = (
         "Сейчас работают модели: " + "; ".join(active) + "."
         if active
@@ -212,6 +214,13 @@ def _status(
     )
     if TrustedTaskStore(settings).status() is not None:
         message += " Доверенная задача подготовлена и ожидает следующего запроса."
+    if active and resident_roles:
+        mode = settings.assistant_mode()
+        message += (
+            " Режим дворецкого: Thinking, модели рассуждают вместе."
+            if mode == "thinking"
+            else " Режим дворецкого: быстрый."
+        )
     print(f"\n{message}")
     speech.say_and_wait(message)
     return 0 if ok else 1

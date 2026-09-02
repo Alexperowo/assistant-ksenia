@@ -29,6 +29,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.model_service(ui.service_name).port, 18082)
         self.assertEqual(settings.model_service(researcher.service_name).port, 18083)
         self.assertFalse(ui.request_mode("fast").enable_thinking)
+        self.assertFalse(ui.experimental)
+        self.assertFalse(researcher.experimental)
         self.assertEqual(ui.request_mode("deliberate").strategy, "cross_review")
         self.assertTrue(researcher.request_mode("deliberate").enable_thinking)
         self.assertEqual(researcher.reasoning_budget_tokens, 256)
