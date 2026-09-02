@@ -25,7 +25,7 @@
 | `screen_capture.py` | read-only physical virtual-desktop PNG, monitor/work/DPI snapshot и normalized→physical mapping | thread Per-Monitor-V2; image/bounds обязаны совпасть; смена layout и координата в gap дают отказ; содержимое экрана не журналируется |
 | `ui_evaluation.py` | строгий manifest и оценка read-only UI proposals по допустимым альтернативам | corpus path без traversal; action/region/keys валидируются; неизвестные поля fail-closed; никакого исполнения |
 | `agent.py` | цикл tool calling одной модели | общий лимит шагов/инструментов/вопросов подтверждения, checkpoint отмены |
-| `orchestrator.py` | выбор роли, residency window, планирование и исполнение разными моделями | планировщик только читает; web research использует service своей роли; primary/residents не пересекаются; handoff сохраняется |
+| `orchestrator.py` | лестница быстрый разговор → current lookup/web → среднее исполнение → план → heavy, residency window и handoff | UI-Mate CHAT не получает tools/screen; планировщик только читает; primary/residents не пересекаются; handoff сохраняется |
 | `model_catalog.py` | безопасное перечисление GGUF | только `models_dir` и `model_search_dirs`, относительные пути от корня проекта |
 | `model_assets.py` | закреплённое происхождение, загрузка и SHA-256 GGUF | полный commit; безопасное имя; без ambient token |
 | `model_evaluation.py` | русский A/B и критерии кандидата | детерминированные проверки, недоверенные данные |
@@ -51,6 +51,7 @@
 |---|---|
 | `browser.py` | родительский безопасный API дочернего Chromium |
 | `research.py` | запрос, выбор источников, параллельное чтение в стабильном порядке и синтез через stage-specific request modes |
+| `weather.py` | текущая погода без LLM: извлечение города, проверяемые падежные кандидаты, geocoding/current JSON и русская фраза | публичный HTTPS, redirect deny, bounded JSON; неизвестный город не угадывать |
 | `windows_automation.py` | UI Automation высокого уровня |
 | `windows_bridge.py` | окна, клавиатура, указатель и низкоуровневый Win32 |
 | `scripts/browser_worker.py` | Chromium, поиск и SSRF/redirect guard в отдельном процессе |

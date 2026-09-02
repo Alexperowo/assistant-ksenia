@@ -23,6 +23,7 @@
 | `voice` | Python, Vosk, Whisper, устройство, паузы и тайм-ауты |
 | `live` | opt-in потоковая озвучка, размер фраз и предел ожидания playback |
 | `browser` | Chromium и постоянный профиль |
+| `weather` | типизированный быстрый current-weather provider, сигналы и сетевые лимиты |
 | `models` | конкретные GGUF-профили и аргументы `llama.cpp` |
 | `model_services` | независимые loopback endpoint и state-файлы процессов моделей |
 | `runtime_routing` | резидентная малая пара, research stage modes и декларативный UI review-контур |
@@ -36,7 +37,7 @@
 
 ## Роль и модель — не одно и то же
 
-`assistant`, `researcher`, `developer`, `heavy_brain` — функциональные роли. `generalist`, `reasoning`, `candidate` — семантические идентификаторы профилей GGUF. Функция назначается только через `capability_roles`; исполняемый код не делает выводов из имени файла, семейства модели или размера параметров.
+`assistant`, `researcher`, `developer`, `planner`, `heavy_brain` — функциональные роли. `ui_butler`, `research_fast`, `candidate`, `reasoning`, `generalist` — семантические идентификаторы профилей GGUF. Функция назначается только через `capability_roles`; исполняемый код не делает выводов из имени файла, семейства модели или размера параметров. Текущее соответствие: быстрый разговор → UI-Mate, web → Agents-A1, исполнение → Ornith Compact, усиленный план → Qwen, редкий long-context → Laguna XS.
 
 ## Каталоги моделей без машинного хардкода
 
@@ -57,15 +58,15 @@
 
 Текущие назначения:
 
-- `ui_butler`: UI-Mate 9B Q4_K_M + projector, официальный backend, 16K, отдельный сервис `ui_fast`, экспериментальный;
-- `research_fast`: Agents-A1 4B Q4_K_M, официальный backend, 16K, отдельный сервис `research_fast`, экспериментальный;
-- `generalist`: Laguna XS 2.1 APEX I-Quality + DFlash, PoolSide backend, 96K;
-- `reasoning`: Qwen 3.8 27B Opus Distill v2 + MTP + projector, официальный backend, 96K;
+- `ui_butler`: UI-Mate 9B Q4_K_M + projector, официальный backend, 16K, отдельный сервис `ui_fast`, рабочий быстрый дворецкий;
+- `research_fast`: Agents-A1 4B Q4_K_M, официальный backend, 16K, отдельный сервис `research_fast`, рабочий быстрый исследователь;
+- `candidate`: conFIGur8tor Ornith 1.5 35B-A3B APEX MTP Fixed, официальный backend, 16K, рабочий исполнитель с `acceleration: none`;
+- `reasoning`: Qwen 3.8 27B Opus Distill v2 + MTP + projector, официальный backend, 96K, планировщик;
+- `generalist`: Laguna XS 2.1 APEX I-Quality + DFlash, PoolSide backend, 96K, тяжёлый long-context профиль;
 - `heavy_candidate`: Laguna S 2.1 UD-IQ3_S, PoolSide backend, 96K, `experimental: true`, `enabled: false`;
-- `candidate`: conFIGur8tor Ornith 1.5 35B-A3B APEX MTP Fixed, 16K, `experimental: true`, `enabled: false`;
 - `quality_candidate`: mudler Ornith 1.5 35B-A3B APEX Quality Q6_K без MTP, 16K, `experimental: true`, `enabled: false`.
 
-У кандидатов хранится лучший измеренный режим запуска, поэтому после A/B у `heavy_candidate`, `candidate` и `quality_candidate` стоит `acceleration: none`. Наличие DFlash/MTP-артефакта не означает, что ускорение полезно. Для воспроизводимого sweep benchmark принимает явные `--acceleration-type` и `--spec-tokens`, изменяя профиль только в памяти процесса. Результаты: `docs/MODEL-RUNTIME-AB-2026-08-30.md`.
+У профилей хранится лучший измеренный режим запуска, поэтому после A/B у `heavy_candidate`, рабочего `candidate` и `quality_candidate` стоит `acceleration: none`. Наличие DFlash/MTP-артефакта не означает, что ускорение полезно. Для воспроизводимого sweep benchmark принимает явные `--acceleration-type` и `--spec-tokens`, изменяя профиль только в памяти процесса. Результаты: `docs/MODEL-RUNTIME-AB-2026-08-30.md`.
 
 Новый GGUF сначала добавляется отдельным выключенным кандидатом. Штатная команда `python scripts\model-assets.py download candidate` загружает все объявленные артефакты только из закреплённых commit и принимает их после совпадения размера и полного SHA-256. `python scripts\model-assets.py verify candidate` не обращается к сети и проверяет уже разрешённые локальные пути. PowerShell-вход `scripts\download-model-assets.ps1 -Profile candidate` использует тот же код и каталог.
 
@@ -106,6 +107,10 @@ PoolSide не притворяется официальной сборкой. Е
 Экспериментальные малые профили дополнительно содержат `request_modes`. Это перезапросная политика, а не новая модель: `enable_thinking`, `max_tokens`, `temperature` и `strategy` выбираются декларативно. У `research_fast` режим `deliberate` включает thinking при server budget 256; `runtime_routing.research_request_modes` привязывает FAST/DELIBERATE к этапам query/synthesis/verification для конкретного профиля. У `ui_butler` deliberate использует `cross_review`, поэтому собственный thinking UI-модели остаётся выключен. `runtime_routing.ui_deliberation` задаёт proposer/reviewer, имена режимов, предел одного revision и отдельный output budget reviewer-а. Код не проверяет названия GGUF.
 
 `model_services` разрешает только loopback, уникальные порты и разные относительные state-файлы внутри `runtime_dir`. Текущие 18082/18083 не заменяют основной 18080. `runtime_routing.fast_resident_models` содержит две роли на разных сервисах; `ResidentModelPool` откатывает только процессы, которые сам успел запустить, и не завершает неизвестного владельца порта.
+
+## Быстрая текущая погода
+
+`weather.enabled` включает только запрос текущих наблюдений. `signals` и `current_lookup_blockers` декларативно отделяют короткую просьбу «какая сейчас погода» от прогноза на завтра/неделю, который остаётся обычным исследованием. `geocoding_url`, `forecast_url`, `timeout_seconds` и `max_response_bytes` задают HTTPS endpoint и жёсткие сетевые пределы. Клиент запрещает редиректы, проверяет публичность адреса, JSON content type и размер ответа. Вызов является внутренним typed tool: он проходит действие `browser_read` в Permission Broker, но не добавляет новую схему в LLM prompt. Не найденный город запрашивается повторно в именительном падеже; модель не исправляет название и не выдумывает температуру.
 
 ## Устройства голоса
 

@@ -2,16 +2,17 @@
 
 ## Готово и проверено программно
 
-- [x] Одна активная GGUF-модель, проверка владельца процесса и освобождения порта.
-- [x] Четыре функциональные роли: дворецкий, исследователь, разработчик и тяжёлый мозг.
-- [x] Семантические профили без ветвлений по семействам: Laguna XS+DFlash как `generalist`, Qwen 3.8 Opus Distill v2 + MTP/mmproj как `reasoning`; Laguna S и два Ornith хранятся отдельными выключенными кандидатами без назначения ролей.
+- [x] Не более одной крупной GGUF либо измеренная резидентная пара, проверка владельца процесса и освобождения каждого порта.
+- [x] Пять функциональных ролей: быстрый дворецкий, исследователь, исполнитель, планировщик и тяжёлый мозг.
+- [x] Измеренная лестница без ветвлений по семействам: UI-Mate → Agents-A1 → Ornith Compact → Qwen 3.8 → Laguna XS; Laguna S и Ornith Quality остаются выключенными кандидатами.
 - [x] Декларативные LLM backend-ы: PoolSide для Laguna/DFlash и официальный b10621 для Qwen/Ornith; профиль выбирает runtime без семейных условий в коде.
-- [x] Экспериментальная резидентная пара UI-Mate 9B + Agents-A1 4B: разные защищённые сервисы/state, совместный 16K запуск, FAST/DELIBERATE request modes, строгий read-only UI proposal и независимый policy review с одной коррекцией.
+- [x] Рабочая резидентная пара UI-Mate 9B + Agents-A1 4B: разные защищённые сервисы/state, совместный 16K запуск, FAST/DELIBERATE request modes, короткий разговор на UI-Mate, строгий read-only UI proposal и независимый policy review с одной коррекцией.
 - [x] Residency coordinator: малая пара и primary-модель не занимают VRAM одновременно; при переходе восстанавливается точный прежний набор. Agents-A1 подключён к web research с FAST query/FAST express/DELIBERATE normal+deep режимами из конфигурации.
 - [x] Read-only ScreenCaptureService: физический virtual desktop, Per-Monitor-V2 DPI, monitor/work bounds, проверка stale layout и fail-closed mapping 0–999 без исполнения.
 - [x] Переносимый каталог всех model/draft/projector-артефактов с полным commit, размером, SHA-256 и поиском по настраиваемым корням.
 - [x] Рабочая конфигурация 96K и KV `Q8_0/Q4_0`; кандидат ограничен 16K до отдельного допуска.
-- [x] Новый Ornith APEX MTP Fixed закреплён точным commit/size/SHA-256 как выключенный 16K `candidate`; исторический A/B другого SC117-файла отделён и не переносится на него.
+- [x] Ornith APEX MTP Fixed закреплён точным commit/size/SHA-256 и принят 16K исполнителем после 7/7 A/B и полного tool-call gate; MTP выключен как измеренно более медленный.
+- [x] Текущая погода выделена из общего web research в типизированный Permission-Broker lookup без LLM; живой запрос Гусь-Хрустального сократился с 31,0 до 0,75 секунды и больше не смешивает противоречащие источники.
 - [x] Сжатие истории с голосовыми статусами и совместимостью строгих chat templates.
 - [x] Постоянная история, подтверждённые факты и передача памяти между ролями.
 - [x] Гибридный RAG: FTS5, Qwen3-Embedding-0.6B на CPU, векторы, цитаты до строк, порог уверенности, стабильный порядок и пропуск секретов.
@@ -39,7 +40,7 @@
 - [x] Полный комплект передачи проекта человеку или другой нейросети: `AGENTS.md`, архитектура, карта кода, конфигурация, данные, безопасность, тестирование, решения и журнал изменений.
 - [x] Машинные lock-файлы Python/`llama.cpp`, аппаратные профили, проверка состояния без изменений и отчёт по реальному VRAM.
 - [x] Чистый online-архив без LLM и личных данных, стадийное обновление `llama.cpp`, резервная копия и проверенный откат.
-- [x] 433 автоматических теста, контроль количества и предупреждений, три случайных порядка, полный контракт ярлыков, performance tracing, tool lifecycle/cancellation, fast resident tier, автовыбор реально открывающегося речевого микрофона, near/far PCM, fail-closed AEC/barge-in-конфигурация, точная передача streaming-пробелов, очистка legacy identity-prefix только в prompt context, runtime cache/profiles и регрессии запрета модельного/машинного хардкода.
+- [x] 444 автоматических теста, контроль количества и предупреждений, три случайных порядка, полный контракт ярлыков, performance tracing, tool lifecycle/cancellation, fast resident tier, автовыбор реально открывающегося речевого микрофона, near/far PCM, fail-closed AEC/barge-in-конфигурация, точная передача streaming-пробелов, очистка legacy identity-prefix только в prompt context, runtime cache/profiles и регрессии запрета модельного/машинного хардкода.
 
 ## Пользовательская приёмка Александра
 
@@ -64,7 +65,7 @@
 - [x] Через штатный `ModelManager` принять базовую совместимость обоих рабочих runtime: Laguna + DFlash на PoolSide и Qwen + MTP + mmproj на официальном b10621, оба при фактических 96K, с русским ответом и корректным освобождением порта.
 - [x] Выполнить полный `check.ps1` после единого near-end worker: 368 тестов, три перемешанных порядка, Doctor, LAN и Silero→Whisper CUDA зелёные. Активная LLM корректно пропущена, потому что сервер не был запущен; отдельный streaming-gate Laguna/PoolSide 96K ранее собрал полную LLM-трассу и штатно остановил сервер. RAG пропущен, потому что выключен конфигурацией.
 - [ ] Дополнить live-gate инструментами, длинным benchmark/VRAM для Laguna и настоящим image-input/plan/tool-schema для Qwen; отдельно проверить RAG при его включении.
-- [ ] Завершить fast-tier UI acceptance: строгий read-only runner и первые 3/3 шага готовы; расширить corpus до 20–30 случаев на разных приложениях/масштабах, затем выполнить один подтверждённый action только через существующие `windows_*` tools и Permission Broker. Runtime coordinator и ScreenCaptureService уже готовы. Baselines: `docs/FAST-RESIDENT-MODELS-BASELINE-2026-08-31.md`, `docs/SCREEN-CAPTURE-BASELINE-2026-08-31.md`, `docs/UI-MATE-READONLY-ACCEPTANCE-2026-08-31.md`.
+- [ ] Завершить fast-tier UI acceptance: обычный разговор уже использует UI-Mate, но не получает screenshot. Расширить read-only corpus с 3 до 20–30 случаев на разных приложениях/масштабах, подключить запросы об экране к capture → proposal → cross-review и только затем выполнить один подтверждённый action через существующие `windows_*` tools и Permission Broker. Baselines: `docs/FAST-RESIDENT-MODELS-BASELINE-2026-08-31.md`, `docs/SCREEN-CAPTURE-BASELINE-2026-08-31.md`, `docs/UI-MATE-READONLY-ACCEPTANCE-2026-08-31.md`.
 - [x] Измерить RuntimeProfile 16K/32K/48K/96K на обеих рабочих моделях: меньший context экономит память, но не TTFT; автоматическое переключение отклонено из-за reload/cache penalty. Явный `cache_prompt`, cache hit telemetry и стабильный snapshot `AGENT_FULL` внедрены. Детали: `docs/RUNTIME-OPTIMIZATION-BASELINE.md`.
 - [x] Разобрать реальную 93-секундную паузу voice→LLM: холодный A/B 16K/96K подтвердил bottleneck полного 2215-token tool prefix, а не STT/TTS или размер KV. Короткие реплики без внешнего действия переведены на стабильный `CHAT`; следующий этап — физический повтор и отдельные декларативные профили только при измеримой необходимости.
 - [ ] Production Sandbox Worker — **BLOCKED внешним prerequisite**: аудит подтвердил `VirtualizationFirmwareEnabled=False`, отсутствие WSL/container runtime и неактивный hypervisor. До включения AMD-V/SVM команды остаются выключенными. Затем живым fault-injection набором сравнить Windows Sandbox/Hyper-V worker и нативный AppContainer + Job Object; experimental `CreateProcessInSandbox` и MXC 0.8.0 не считать production boundary. Контракт и доказательства: `docs/SANDBOX-AUDIT.md`.

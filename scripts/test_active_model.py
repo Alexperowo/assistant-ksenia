@@ -21,13 +21,23 @@ from butler.model_manager import ModelManager  # noqa: E402
 
 def main() -> int:
     settings = load_settings(ROOT)
-    manager = ModelManager(settings)
-    state = manager.running_state()
+    preferred_role = settings.default_role
+    preferred_manager = ModelManager.for_role(settings, preferred_role)
+    state = preferred_manager.running_state()
+    manager = preferred_manager if state is not None and state.role == preferred_role else None
+    if manager is None:
+        for service_name in settings.model_service_names():
+            candidate = ModelManager(settings, service_name)
+            candidate_state = candidate.running_state()
+            if candidate_state is not None:
+                manager = candidate
+                state = candidate_state
+                break
     report: dict[str, object] = {
         "checked_at": datetime.now().astimezone().isoformat(),
         "active": state is not None,
     }
-    if state is None:
+    if state is None or manager is None:
         report.update({"skipped": True, "reason": "локальная модель не запущена"})
         print(json.dumps(report, ensure_ascii=False))
         return 0
@@ -56,6 +66,8 @@ def main() -> int:
             temperature=0.0,
             max_tokens=24,
             checkpoint=lambda: None,
+            service=manager.service,
+            request_mode=settings.assistant_request_mode(state.role),
         )
     message = response["choices"][0].get("message", {})
     answer = str(message.get("content") or "").strip()
@@ -67,6 +79,7 @@ def main() -> int:
             "skipped": False,
             "passed": passed,
             "role": state.role,
+            "service": manager.service.name,
             "pid": state.pid,
             "trace_id": trace_id,
             "answer": answer,

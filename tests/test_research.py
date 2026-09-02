@@ -11,6 +11,7 @@ from butler.research import (
     _page_is_usable,
     _select_sources,
     _source_limit_for_request,
+    is_fast_lookup_request,
     is_web_research_request,
     select_research_mode,
 )
@@ -77,6 +78,44 @@ class ResearchTests(unittest.TestCase):
         self.assertTrue(is_web_research_request("Сравни реальные цены в магазинах"))
         self.assertFalse(is_web_research_request("Найди файл конфигурации в проекте"))
         self.assertFalse(is_web_research_request("Отправь сообщение через интернет"))
+
+    def test_configured_short_weather_lookup_uses_fast_research(self):
+        settings = load_settings()
+        routing = settings.raw["routing"]
+        signals = routing["fast_lookup_signals"]
+        max_chars = routing["fast_lookup_max_chars"]
+
+        request = "Какая сегодня погода в Гусь-Хрустальном?"
+        self.assertTrue(
+            is_fast_lookup_request(request, signals=signals, max_chars=max_chars)
+        )
+        self.assertTrue(
+            is_web_research_request(
+                request,
+                fast_lookup_signals=signals,
+                fast_lookup_max_chars=max_chars,
+            )
+        )
+        self.assertEqual(
+            select_research_mode(
+                request,
+                fast_lookup_signals=signals,
+                fast_lookup_max_chars=max_chars,
+            ).name,
+            "fast",
+        )
+
+    def test_detailed_weather_research_keeps_explicit_deep_mode(self):
+        settings = load_settings()
+        routing = settings.raw["routing"]
+        self.assertEqual(
+            select_research_mode(
+                "Тщательно исследуй погоду и климат города за десять лет",
+                fast_lookup_signals=routing["fast_lookup_signals"],
+                fast_lookup_max_chars=routing["fast_lookup_max_chars"],
+            ).name,
+            "deep",
+        )
 
     def test_mode_is_explicit_and_bounded(self):
         self.assertEqual(select_research_mode("Быстро найди новости").name, "fast")

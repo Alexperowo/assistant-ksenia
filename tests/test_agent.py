@@ -365,7 +365,10 @@ class AgentTests(unittest.TestCase):
         }
         settings = SimpleNamespace(
             raw={
-                "assistant": {"name": "Тестовый ассистент"},
+                "assistant": {
+                    "name": "Тестовый ассистент",
+                    "user_name": "Тестовый пользователь",
+                },
                 "memory": {"compression_enabled": False},
                 "agent": {
                     "conversation_history_messages": 4,
@@ -393,7 +396,9 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(deltas, ["Я Ксения."])
         self.assertLessEqual(len(complete.call_args.args[1]), 5)
         prompt = complete.call_args.args[1][0]["content"]
-        self.assertIn("по имени Тестовый ассистент", prompt)
+        self.assertIn("Ты — Тестовый ассистент", prompt)
+        self.assertIn("Пользователя зовут Тестовый пользователь", prompt)
+        self.assertIn("Не путай роли", prompt)
         self.assertIn("Не представляйся", prompt)
         self.assertIn("сразу начинай с ответа по существу", prompt)
         self.assertNotIn("Меня зовут Ксения", prompt)

@@ -40,6 +40,7 @@ from butler.windows_bridge import (
     type_text,
 )
 from butler.windows_automation import WindowsAutomation, WindowsAutomationError
+from butler.weather import WeatherClient, WeatherError
 
 
 MAX_READ_BYTES = 1_048_576
@@ -715,6 +716,53 @@ class ToolExecutor:
         """Reset information-flow state at a top-level user request boundary."""
         self._local_data_exposed = False
         self._directory_list_calls = 0
+
+    def current_weather(
+        self,
+        location: str,
+        *,
+        confirmed: bool = False,
+        checkpoint: Callable[[], None] | None = None,
+    ) -> ToolResult:
+        """Run a typed internal lookup without adding a schema to the LLM prompt."""
+
+        started = time.monotonic()
+        args = {"location": str(location)[:160]}
+        if checkpoint is not None:
+            checkpoint()
+        blocked = self._outbound_after_local_guard(confirmed) or self._authorize(
+            "browser_read", self.workspace_root, confirmed
+        )
+        try:
+            if blocked is not None:
+                result = blocked
+            elif not args["location"].strip():
+                result = ToolResult(False, "location_required", "Не указан город.")
+            else:
+                observation = WeatherClient(self.settings).current(args["location"])
+                if observation is None:
+                    result = ToolResult(
+                        False,
+                        "location_not_found",
+                        "Город не найден. Уточните его название.",
+                    )
+                else:
+                    result = ToolResult(
+                        True,
+                        "ok",
+                        "Текущая погода получена.",
+                        observation.as_dict(),
+                    )
+        except WeatherError as exc:
+            result = ToolResult(False, "weather_unavailable", str(exc))
+        self._log(
+            "current_weather",
+            args,
+            result,
+            duration_ms=round((time.monotonic() - started) * 1000),
+            confirmed=confirmed,
+        )
+        return result
 
     def mark_local_data_exposed(self) -> None:
         """Record that the current model turn received local-only information."""

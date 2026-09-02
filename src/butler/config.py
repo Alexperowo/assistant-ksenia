@@ -218,6 +218,10 @@ class Settings:
         return str(self.raw["assistant"]["name"])
 
     @property
+    def user_name(self) -> str:
+        return str(self.raw.get("assistant", {}).get("user_name", "пользователь"))
+
+    @property
     def announce_status(self) -> bool:
         return bool(self.raw["assistant"].get("announce_status", True))
 
@@ -714,6 +718,117 @@ class Settings:
             resolved[normalized_stage] = profile.request_mode(mode_name)
         return resolved
 
+    def assistant_request_mode(self, model_role: str) -> ModelRequestMode | None:
+        """Resolve the configured text-conversation mode for an assistant profile."""
+
+        runtime_routing = self.raw.get("runtime_routing", {})
+        if not isinstance(runtime_routing, Mapping):
+            raise ConfigError("Раздел runtime_routing должен быть объектом.")
+        configured = runtime_routing.get("assistant_request_modes", {})
+        if not isinstance(configured, Mapping):
+            raise ConfigError(
+                "runtime_routing.assistant_request_modes должен быть объектом."
+            )
+        raw_mode = configured.get(model_role)
+        if raw_mode is None:
+            return None
+        if not isinstance(raw_mode, str) or not raw_mode.strip():
+            raise ConfigError(
+                f"assistant_request_modes.{model_role} должен содержать имя режима."
+            )
+        return self.model(model_role).request_mode(raw_mode)
+
+    def fast_lookup_policy(self) -> tuple[tuple[str, ...], int]:
+        routing = self.raw.get("routing", {})
+        if not isinstance(routing, Mapping):
+            raise ConfigError("Раздел routing должен быть объектом.")
+        raw_signals = routing.get("fast_lookup_signals", [])
+        if not isinstance(raw_signals, list) or not all(
+            isinstance(signal, str) and signal.strip() for signal in raw_signals
+        ):
+            raise ConfigError("routing.fast_lookup_signals должен быть списком строк.")
+        signals = tuple(signal.strip() for signal in raw_signals)
+        if len(set(signal.casefold() for signal in signals)) != len(signals):
+            raise ConfigError("routing.fast_lookup_signals содержит повторы.")
+        try:
+            max_chars = int(routing.get("fast_lookup_max_chars", 180))
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("routing.fast_lookup_max_chars должен быть целым числом.") from exc
+        if not 32 <= max_chars <= 2_000:
+            raise ConfigError("routing.fast_lookup_max_chars должен быть от 32 до 2000.")
+        return signals, max_chars
+
+    def weather_signals(self) -> tuple[str, ...]:
+        weather = self.raw.get("weather")
+        if weather is None:
+            return ()
+        if not isinstance(weather, Mapping):
+            raise ConfigError("Раздел weather должен быть объектом.")
+        enabled = weather.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ConfigError("weather.enabled должен быть логическим значением.")
+        provider = str(weather.get("provider", "")).strip().casefold()
+        if enabled and provider != "open_meteo":
+            raise ConfigError("Поддерживается только weather.provider=open_meteo.")
+        for field in ("geocoding_url", "forecast_url"):
+            value = weather.get(field, "")
+            if enabled and (not isinstance(value, str) or not value.strip()):
+                raise ConfigError(f"weather.{field} должен содержать HTTPS-адрес.")
+        try:
+            timeout = float(weather.get("timeout_seconds", 8))
+            max_bytes = int(weather.get("max_response_bytes", 262_144))
+        except (TypeError, ValueError) as exc:
+            raise ConfigError("Числовые параметры weather повреждены.") from exc
+        if not 1 <= timeout <= 30:
+            raise ConfigError("weather.timeout_seconds должен быть от 1 до 30 секунд.")
+        if not 16_384 <= max_bytes <= 1_048_576:
+            raise ConfigError(
+                "weather.max_response_bytes должен быть от 16384 до 1048576."
+            )
+        country_codes = weather.get("preferred_country_codes", [])
+        if not isinstance(country_codes, list) or not all(
+            isinstance(code, str)
+            and len(code.strip()) == 2
+            and code.strip().isalpha()
+            for code in country_codes
+        ):
+            raise ConfigError(
+                "weather.preferred_country_codes должен содержать двухбуквенные коды."
+            )
+        raw_signals = weather.get("signals", [])
+        if not isinstance(raw_signals, list) or not all(
+            isinstance(signal, str) and signal.strip() for signal in raw_signals
+        ):
+            raise ConfigError("weather.signals должен быть списком строк.")
+        normalized = tuple(
+            signal.strip().casefold().replace("ё", "е") for signal in raw_signals
+        )
+        if len(set(normalized)) != len(normalized):
+            raise ConfigError("weather.signals содержит повторы.")
+        return normalized
+
+    def weather_enabled(self) -> bool:
+        if "weather" not in self.raw:
+            return False
+        self.weather_signals()
+        return bool(self.raw.get("weather", {}).get("enabled", True))
+
+    def weather_current_blockers(self) -> tuple[str, ...]:
+        weather = self.raw.get("weather")
+        if weather is None:
+            return ()
+        raw_blockers = weather.get("current_lookup_blockers", [])
+        if not isinstance(raw_blockers, list) or not all(
+            isinstance(blocker, str) and blocker.strip() for blocker in raw_blockers
+        ):
+            raise ConfigError("weather.current_lookup_blockers должен быть списком строк.")
+        normalized = tuple(
+            blocker.strip().casefold().replace("ё", "е") for blocker in raw_blockers
+        )
+        if len(set(normalized)) != len(normalized):
+            raise ConfigError("weather.current_lookup_blockers содержит повторы.")
+        return normalized
+
     def ui_deliberation(self) -> UIDeliberationProfile | None:
         runtime_routing = self.raw.get("runtime_routing", {})
         if not isinstance(runtime_routing, Mapping):
@@ -1057,6 +1172,9 @@ def load_settings(root: Path | None = None) -> Settings:
         settings.model(profile_name)
     settings.resident_model_roles()
     settings.ui_deliberation()
+    settings.fast_lookup_policy()
+    settings.weather_signals()
+    settings.weather_current_blockers()
     runtime_routing = settings.raw.get("runtime_routing", {})
     configured_research_modes = (
         runtime_routing.get("research_request_modes", {})
@@ -1069,6 +1187,22 @@ def load_settings(root: Path | None = None) -> Settings:
         )
     for model_role in configured_research_modes:
         settings.research_request_modes(str(model_role))
+    configured_assistant_modes = (
+        runtime_routing.get("assistant_request_modes", {})
+        if isinstance(runtime_routing, Mapping)
+        else {}
+    )
+    if not isinstance(configured_assistant_modes, Mapping):
+        raise ConfigError(
+            "runtime_routing.assistant_request_modes должен быть объектом."
+        )
+    for model_role in configured_assistant_modes:
+        if str(model_role) not in settings.model_roles():
+            raise ConfigError(
+                "runtime_routing.assistant_request_modes содержит неизвестную роль: "
+                f"{model_role}."
+            )
+        settings.assistant_request_mode(str(model_role))
     for capability_name in settings.capability_role_names():
         settings.capability_role(capability_name)
     settings.default_role

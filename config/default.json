@@ -1,6 +1,7 @@
 {
   "assistant": {
     "name": "Ксения",
+    "user_name": "Александр",
     "language": "ru",
     "default_role": "assistant",
     "announce_status": true
@@ -120,6 +121,28 @@
     "timeout_seconds": 45,
     "max_text_chars": 6000
   },
+  "weather": {
+    "enabled": true,
+    "provider": "open_meteo",
+    "preferred_country_codes": [
+      "RU"
+    ],
+    "signals": [
+      "погод",
+      "weather"
+    ],
+    "current_lookup_blockers": [
+      "завтра",
+      "послезавтра",
+      "на неделю",
+      "на выходных",
+      "прогноз"
+    ],
+    "geocoding_url": "https://geocoding-api.open-meteo.com/v1/search",
+    "forecast_url": "https://api.open-meteo.com/v1/forecast",
+    "timeout_seconds": 8,
+    "max_response_bytes": 262144
+  },
   "headset_controls": {
     "enabled": false,
     "activation_button": "play_pause",
@@ -145,7 +168,8 @@
     "status_heartbeat_seconds": 20,
     "tool_result_max_chars": 12000,
     "conversation_max_tokens": 768,
-    "conversation_history_messages": 6
+    "conversation_history_messages": 6,
+    "conversation_prompt_max_chars": 12000
   },
   "routing": {
     "enabled": true,
@@ -156,7 +180,12 @@
     "research_result_max_chars": 16000,
     "research_total_max_chars": 80000,
     "research_default_mode": "normal",
-    "research_evidence_max_chars": 20000
+    "research_evidence_max_chars": 20000,
+    "fast_lookup_max_chars": 180,
+    "fast_lookup_signals": [
+      "погод",
+      "weather"
+    ]
   },
   "runtime_routing": {
     "fast_resident_models": [
@@ -179,6 +208,9 @@
         "synthesis_deep": "deliberate",
         "verification": "deliberate"
       }
+    },
+    "assistant_request_modes": {
+      "ui_butler": "fast"
     }
   },
   "generation": {
@@ -211,7 +243,7 @@
     "assistant": {
       "label": "Дворецкий или ассистент",
       "purpose": "Диалог, повседневные поручения, координация и понятная связь с Александром.",
-      "primary_model": "generalist",
+      "primary_model": "ui_butler",
       "candidate_model": null,
       "enabled": true
     },
@@ -225,15 +257,22 @@
     "developer": {
       "label": "Разработчик",
       "purpose": "Работа с файлами, кодом, тестами, терминалом и инструментами агента.",
-      "primary_model": "generalist",
-      "candidate_model": "candidate",
+      "primary_model": "candidate",
+      "candidate_model": "reasoning",
+      "enabled": true
+    },
+    "planner": {
+      "label": "Усиленное рассуждение",
+      "purpose": "Планирование сложных задач перед передачей проверяемого плана исполнителю.",
+      "primary_model": "reasoning",
+      "candidate_model": null,
       "enabled": true
     },
     "heavy_brain": {
       "label": "Тяжёлый мозг",
-      "purpose": "Сложная декомпозиция, длинное планирование и независимая проверка важных решений.",
-      "primary_model": "reasoning",
-      "candidate_model": "candidate",
+      "purpose": "Редкие задачи, которым нужен тяжёлый long-context профиль и для которых допустима высокая задержка.",
+      "primary_model": "generalist",
+      "candidate_model": "heavy_candidate",
       "enabled": true
     }
   },
@@ -535,7 +574,7 @@
       ]
     },
     "candidate": {
-      "label": "Кандидат Ornith 1.5 35B-A3B APEX MTP Fixed",
+      "label": "Ornith 1.5 35B-A3B APEX — исполнитель среднего уровня",
       "backend": "official",
       "artifacts": {
         "model": {
@@ -549,8 +588,8 @@
       },
       "context_size": 16384,
       "gpu_layers": "auto",
-      "enabled": false,
-      "experimental": true,
+      "enabled": true,
+      "experimental": false,
       "reasoning": "off",
       "acceleration": {
         "type": "none",

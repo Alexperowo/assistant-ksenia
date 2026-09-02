@@ -6,12 +6,12 @@
        Vosk wake-word / Live → финальный Whisper STT
                     │
        долговечная задача и маршрутизатор
-       ┌────────────┴─────────────┐
-       │                          │
- assistant / research / dev   heavy_brain       fast resident tier
-       │                          │
- generalist: Laguna+DFlash   reasoning: Qwen+MTP+mmproj   UI-Mate + Agents-A1
-       └──────── одна активная крупная GGUF ────────┘       (2 малых, 16K)
+       ┌────────────┴──────────────────────────────┐
+       │                                           │
+ fast resident tier                         primary tier
+ UI-Mate + Agents-A1            Ornith → Qwen → Laguna XS
+ разговор / web                  исполнение / план / long-context
+       └────── два малых ИЛИ одна крупная GGUF ───┘
                     │
   инструменты + подтверждения + память + проверка
                     │
@@ -22,17 +22,20 @@
 
 `ModelManager` держит не более одной крупной GGUF-модели на primary service. Каждый профиль декларативно ссылается на backend и model service: официальный `llama.cpp` или совместимый PoolSide runtime. Перед остановкой проверяются PID и полный путь фактически запущенного `llama-server.exe`, записанный в state конкретного сервиса; неизвестный владелец порта не завершается. Primary слушает `127.0.0.1:18080`; экспериментальные малые `ui_fast/research_fast` — 18082/18083. Все требуют локальный ключ. Возможности CLI принадлежат backend-профилю, а endpoint — service-профилю; ни то ни другое не определяется по имени GGUF.
 
-`ResidentModelPool` подтвердил совместную работу UI-Mate 9B и Agents-A1 4B при 16K. `ModelResidencyCoordinator` теперь останавливает только доказанно принадлежащую Ксении primary/малую модель, ждёт освобождения порта, откатывает частичный сбой и после primary-задачи восстанавливает точный прежний набор residents. Web research использует Agents-A1; query и express synthesis идут FAST, normal/deep synthesis и verification — DELIBERATE. Выбор этапов находится в конфигурации. `ScreenCaptureService` захватывает весь физический virtual desktop в thread-scoped Per-Monitor-V2 DPI-контексте, связывает PNG с monitor/work bounds и отклоняет несовпадение/щели. UI-Mate возвращает только строго разобранный `ActionProposal`. В режиме DELIBERATE Agents-A1 независимо проверяет политику и может один раз вернуть feedback; исполнение не подключено до corpus и adapter-а в существующий Permission Broker.
+`ResidentModelPool` подтвердил совместную работу UI-Mate 9B и Agents-A1 4B при 16K. `ModelResidencyCoordinator` теперь останавливает только доказанно принадлежащую Ксении primary/малую модель, ждёт освобождения порта, откатывает частичный сбой и после primary-задачи восстанавливает точный прежний набор residents. Голосовой режим прогревает эту пару до сообщения о готовности. Короткий разговор идёт на UI-Mate без tool schemas, web research — на Agents-A1; query и express synthesis идут FAST, normal/deep synthesis и verification — DELIBERATE. Выбор этапов находится в конфигурации. `ScreenCaptureService` захватывает весь физический virtual desktop в thread-scoped Per-Monitor-V2 DPI-контексте, связывает PNG с monitor/work bounds и отклоняет несовпадение/щели. UI-Mate возвращает только строго разобранный `ActionProposal`. В режиме DELIBERATE Agents-A1 независимо проверяет политику и может один раз вернуть feedback; исполнение пока не подключено к обычному пользовательскому маршруту до расширения corpus и adapter-а в существующий Permission Broker.
 
 Функциональные роли отделены от профилей моделей:
 
-- `assistant`, `researcher`, `developer` → профиль `generalist`, Laguna XS 2.1 APEX I-Quality с отдельным DFlash GGUF;
-- `heavy_brain` → профиль `reasoning`, Qwen 3.8 27B Opus Distill v2 с MTP и multimodal projector;
-- профили `heavy_candidate`, `candidate` и `quality_candidate` не назначены рабочим ролям и по умолчанию выключены.
+- `assistant` → `ui_butler`: быстрый разговор на UI-Mate без инструментов и без ложного доступа к экрану;
+- `researcher` → `research_fast`: Agents-A1 для веб-поиска;
+- `developer` → `candidate`: Ornith conFIGur8tor Compact как средний инструментальный исполнитель;
+- `planner` → `reasoning`: Qwen 3.8 27B Opus Distill v2 с MTP/mmproj для усиленного плана;
+- `heavy_brain` → `generalist`: Laguna XS+DFlash только для редкого long-context режима;
+- `heavy_candidate` Laguna S и `quality_candidate` Ornith Quality по-прежнему выключены.
 
-Дата и время отвечаются без LLM. Короткий бытовой разговор использует компактную историю без схемы инструментов. Явный веб-запрос идёт в отдельный исследовательский маршрут, но модель выбирается через функциональную роль, а не по имени семейства. Сложная задача может сначала получить план профиля `reasoning` в режиме чтения; затем он выгружается, `generalist` перепроверяет факты и исполняет план. При отказе тяжёлого мозга исполнитель продолжает сам и получает явное сообщение об ошибке.
+Дата и время отвечаются без LLM. Текущая погода идёт через типизированный внутренний lookup, Permission Broker, проверку города и Open-Meteo; ответ формируется без LLM и в живом замере занял 0,75 секунды. Короткий бытовой разговор использует UI-Mate, компактную историю и не получает инструменты, изображение экрана или состояние Windows. Явный веб-запрос идёт на Agents-A1. Обычная инструментальная задача использует Ornith. Сложная задача может сначала получить read-only план Qwen, затем Ornith проверяет факты и исполняет его. Laguna XS не является дворецким по умолчанию и сохраняется как тяжёлый long-context профиль. При отказе планировщика исполнитель продолжает сам и получает явное сообщение об ошибке.
 
-Оба рабочих профиля запрашивают 98304 токена и KV `K=q8_0`, `V=q4_0`. `generalist` объявляет `draft-dflash` и отдельный draft-артефакт; `reasoning` — встроенный `draft-mtp`, два speculative token и projector. Выключенные кандидаты хранят лучший измеренный default, сейчас `acceleration: none`: MTP conFIGur8tor и DFlash Laguna S на одинаковом smoke-корпусе замедлили ответы. Экспериментальный benchmark может явно включить тип и число speculative tokens только в памяти процесса; это не меняет конфигурацию и роли. Подробности: `docs/MODEL-RUNTIME-AB-2026-08-30.md`.
+UI-Mate, Agents-A1 и Ornith используют 16K. Qwen и Laguna XS сохраняют верхнюю ёмкость 98304 токена и KV `K=q8_0`, `V=q4_0`; уменьшение их окна не ускорило cold TTFT достаточно, чтобы окупить reload и потерю KV. `generalist` объявляет `draft-dflash`, `reasoning` — встроенный `draft-mtp`, два speculative token и projector. Ornith работает без MTP, потому что n=1/2/4 замедлили одинаковый корпус. Выключенные Laguna S и Ornith Quality хранят лучший измеренный безопасный default `acceleration: none`. Подробности: `docs/MODEL-RUNTIME-AB-2026-08-30.md`.
 
 Каталог профилей в `config/default.json` является единственным местом, где назначены backend, названия файлов, источники, commit, размеры, SHA-256 и аргументы конкретной модели. `config/engine.lock.json` отдельно закрепляет происхождение и проверяемые бинарные признаки каждого runtime. `config/user.json` хранит только локальные корни и персональные overrides. Python-ядро и эксплуатационные скрипты не ветвятся по словам Laguna, Qwen, Ornith или имени прежней модели и не содержат абсолютных путей конкретного компьютера.
 

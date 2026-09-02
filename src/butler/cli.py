@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, TypeVar
 
-from butler.chat import ChatError, SentenceChunker, stream_chat
+from butler.chat import ChatError
 from butler.approval import approval_explanation
 from butler.atomic_io import atomic_write_text
 from butler.audio_capture import AudioCaptureService, AudioCaptureServiceError
@@ -39,7 +39,11 @@ from butler.diagnostic_report import format_summary, summarize
 from butler.instance_lock import SingleInstance
 from butler.lan import run_lan_server
 from butler.live import ConversationCoordinator
-from butler.model_manager import ModelManager, ModelManagerError
+from butler.model_manager import (
+    ModelManager,
+    ModelManagerError,
+    ModelResidencyCoordinator,
+)
 from butler.model_catalog import find_models
 from butler.media_buttons import (
     BUTTON_LABELS,
@@ -191,13 +195,19 @@ def _status(
 ) -> int:
     checks = run_checks(settings, installation_mode=installation_mode)
     ok = _print_checks(checks)
-    manager = ModelManager(settings)
-    state = manager.running_state()
+    active: list[str] = []
+    for service_name in settings.model_service_names():
+        manager = ModelManager(settings, service_name)
+        state = manager.running_state()
+        if state is not None and manager.api_ready():
+            active.append(
+                f"{state.role} на сервисе {service_name}; рассуждения: "
+                f"{reasoning_label(settings.model(state.role).reasoning)}"
+            )
     message = (
-        f"Сейчас работает модель роли {state.role}; рассуждения: "
-        f"{reasoning_label(settings.model(state.role).reasoning)}."
-        if state
-        else "Ядро модели сейчас не запущено."
+        "Сейчас работают модели: " + "; ".join(active) + "."
+        if active
+        else "Ядра моделей сейчас не запущены."
     )
     if TrustedTaskStore(settings).status() is not None:
         message += " Доверенная задача подготовлена и ожидает следующего запроса."
@@ -283,68 +293,30 @@ def _setup(settings) -> int:
 
 
 def _chat(settings, speech: SpeechAnnouncer) -> int:
-    manager = ModelManager(settings)
-    print(
-        "\n=== Диалог с Ксенией ===\n"
-        "Введите сообщение и нажмите Enter. Для выхода напишите: выход\n"
-    )
-    speech.say("Диалог готов. Введите сообщение.")
-    messages: list[dict[str, str]] = [
-        {
-            "role": "system",
-            "content": (
-                "Ты локальный дворецкий-разработчик Александра. Отвечай по-русски, "
-                "ясно и без лишнего многословия. Александр слабовидящий, поэтому ответы "
-                "должны хорошо восприниматься на слух. Не используй таблицы без необходимости."
-            ),
-        }
-    ]
+    """Compatibility entry point; all conversations use the routed agent path."""
 
-    while True:
-        try:
-            user_text = input("Александр: ").strip()
-        except EOFError:
-            return 0
-        if not user_text:
-            continue
-        if user_text.lower() in {"выход", "выйти", "стоп", "/exit", "/quit"}:
-            speech.say_and_wait("Диалог завершён.")
-            return 0
+    return _agent_chat(settings, speech)
 
-        messages.append({"role": "user", "content": user_text})
-        print("Ксения: ", end="", flush=True)
-        chunker = SentenceChunker()
-        answer_parts: list[str] = []
-        try:
-            with SingleInstance(settings.root, "agent-task") as acquired:
-                if not acquired:
-                    raise ChatError(
-                        "Ксения уже выполняет другую задачу. Дождитесь сообщения «Готово»."
-                    )
-                if not manager.is_current(settings.default_role):
-                    print("Модель запускается. Это может занять некоторое время...")
-                    speech.say_and_wait(
-                        "Запускаю локальную модель. Это может занять около минуты."
-                    )
-                    manager.start(settings.default_role)
-                for token in stream_chat(settings, messages):
-                    print(token, end="", flush=True)
-                    answer_parts.append(token)
-                    for phrase in chunker.feed(token):
-                        speech.say(phrase)
-        except (ChatError, ModelManagerError) as exc:
-            print(f"\nОшибка: {exc}")
-            speech.say(spoken_agent_error(exc))
-            messages.pop()
-            continue
 
-        tail = chunker.finish()
-        if tail:
-            speech.say(tail)
-        answer = "".join(answer_parts).strip()
-        print("\n")
-        if answer:
-            messages.append({"role": "assistant", "content": answer})
+def _start_model_role(settings, role: str, *, switch: bool = False):
+    """Start a declared profile without assuming that it belongs to primary."""
+
+    coordinator = ModelResidencyCoordinator(settings)
+    if role in settings.resident_model_roles():
+        states = coordinator.activate_residents()
+        return states[role]
+    coordinator.suspend_residents_for_primary()
+    manager = ModelManager.for_role(settings, role)
+    return manager.switch(role) if switch else manager.start(role)
+
+
+def _stop_all_model_services(settings) -> bool:
+    """Stop only verified Ksenia-owned model services."""
+
+    stopped = False
+    for service_name in reversed(settings.model_service_names()):
+        stopped = ModelManager(settings, service_name).stop() or stopped
+    return stopped
 
 
 def _wake_test(settings, speech: SpeechAnnouncer) -> int:
@@ -919,6 +891,25 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
         device=recognition_device,
         compute_type=recognizer_info.get("compute_type", ""),
     )
+    assistant_model = settings.capability_model("assistant")
+    if assistant_model in settings.resident_model_roles():
+        print("Подготавливаю быстрый уровень моделей.", flush=True)
+        resident_started = time.monotonic()
+        diagnostic_event(
+            settings,
+            "voice_agent",
+            "resident_prepare_started",
+            model_role=assistant_model,
+        )
+        states = ModelResidencyCoordinator(settings).activate_residents()
+        diagnostic_event(
+            settings,
+            "voice_agent",
+            "resident_ready",
+            duration_ms=round((time.monotonic() - resident_started) * 1000),
+            model_role=assistant_model,
+            resident_count=len(states),
+        )
     device_phrase = "на видеокарте" if recognition_device == "cuda" else "на процессоре"
     speech.say_and_wait(
         f"Голосовой режим готов. Распознавание работает {device_phrase}. "
@@ -1662,7 +1653,6 @@ def _agent_chat(settings, speech: SpeechAnnouncer) -> int:
 
 
 def _menu(settings, speech: SpeechAnnouncer) -> int:
-    manager = ModelManager(settings)
     speech.say_and_wait(
         f"{settings.assistant_name} готова к управлению. "
         "Можно ввести: статус, диалог, микрофон, модели, сеть или выход."
@@ -1671,7 +1661,7 @@ def _menu(settings, speech: SpeechAnnouncer) -> int:
         print(
             "\n=== Локальный дворецкий ===\n"
             "1. Состояние системы\n"
-            "2. Запустить основную модель\n"
+            "2. Запустить быстрый уровень\n"
             "3. Переключиться на модель сложного планирования\n"
             "4. Остановить модель\n"
             "5. Проверить голос\n"
@@ -1694,23 +1684,27 @@ def _menu(settings, speech: SpeechAnnouncer) -> int:
         try:
             if choice in {"1", "статус", "состояние"}:
                 _status(settings, speech)
-            elif choice in {"2", "разработчик"}:
+            elif choice in {"2", "дворецкий", "быстрый"}:
                 profile = settings.capability_model("assistant")
-                state = _model_control(settings, lambda: manager.start(profile))
-                message = f"Основная модель запущена. PID {state.pid}."
+                state = _model_control(
+                    settings, lambda: _start_model_role(settings, profile)
+                )
+                message = f"Быстрый дворецкий запущен. PID {state.pid}."
                 print(message)
                 speech.say(message)
             elif choice in {"3", "планировщик"}:
                 profile = settings.capability_model(
-                    "heavy_brain", fallback="researcher"
+                    "planner", fallback="heavy_brain"
                 )
-                state = _model_control(settings, lambda: manager.switch(profile))
+                state = _model_control(
+                    settings, lambda: _start_model_role(settings, profile, switch=True)
+                )
                 message = f"Модель сложного планирования запущена. PID {state.pid}."
                 print(message)
                 speech.say(message)
             elif choice in {"4", "стоп", "остановить"}:
-                stopped = _model_control(settings, manager.stop)
-                message = "Модель остановлена." if stopped else "Запущенная модель не найдена."
+                stopped = _model_control(settings, lambda: _stop_all_model_services(settings))
+                message = "Модели остановлены." if stopped else "Запущенные модели не найдены."
                 print(message)
                 speech.say(message)
             elif choice in {"5", "голос"}:
@@ -1721,7 +1715,6 @@ def _menu(settings, speech: SpeechAnnouncer) -> int:
             elif choice in {"7", "настройка"}:
                 _setup(settings)
                 settings = load_settings(settings.root)
-                manager = ModelManager(settings)
             elif choice in {"8", "активация", "слушать"}:
                 _wake_test(settings, speech)
             elif choice in {"9", "сеть", "панель"}:
@@ -1743,15 +1736,12 @@ def _menu(settings, speech: SpeechAnnouncer) -> int:
             elif choice in {"14", "выбрать модель", "настроить планировщик"}:
                 _configure_capability_model(settings, speech)
                 settings = load_settings(settings.root)
-                manager = ModelManager(settings)
             elif choice in {"15", "рассуждения", "мышление"}:
                 _configure_reasoning(settings, speech)
                 settings = load_settings(settings.root)
-                manager = ModelManager(settings)
             elif choice in {"16", "длина ответа", "лимит ответа"}:
                 _configure_response_budget(settings, speech)
                 settings = load_settings(settings.root)
-                manager = ModelManager(settings)
             elif choice in {"17", "наушники", "кнопки наушников"}:
                 _headset_controls_test(settings, speech)
                 settings = load_settings(settings.root)
@@ -1865,7 +1855,6 @@ def main(argv: list[str] | None = None) -> int:
         )
         command = args.command or "menu"
         diagnostic_event(settings, "cli", "command_started", command_name=command)
-        manager = ModelManager(settings)
         if command == "menu":
             return _menu(settings, speech)
         if command in {"status", "doctor"}:
@@ -1923,16 +1912,18 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if command == "start":
             role = args.role or settings.default_role
-            state = _model_control(settings, lambda: manager.start(role))
+            state = _model_control(settings, lambda: _start_model_role(settings, role))
             print(f"Модель {role} запущена. PID {state.pid}.")
             return 0
         if command == "switch":
-            state = _model_control(settings, lambda: manager.switch(args.role))
+            state = _model_control(
+                settings, lambda: _start_model_role(settings, args.role, switch=True)
+            )
             print(f"Активная роль: {state.role}. PID {state.pid}.")
             return 0
         if command == "stop":
-            stopped = _model_control(settings, manager.stop)
-            print("Модель остановлена." if stopped else "Запущенная модель не найдена.")
+            stopped = _model_control(settings, lambda: _stop_all_model_services(settings))
+            print("Модели остановлены." if stopped else "Запущенные модели не найдены.")
             return 0
         parser.error(f"Неизвестная команда: {command}")
     except (ConfigError, ModelManagerError) as exc:

@@ -415,30 +415,45 @@ def run_checks(settings: Settings, *, installation_mode: bool = False) -> list[C
                 ),
             )
         )
-    manager = ModelManager(settings)
-    running = manager.running_state()
+    active_services: list[tuple[str, ModelManager, object]] = []
+    for service_name in settings.model_service_names():
+        service_manager = ModelManager(settings, service_name)
+        service_state = service_manager.running_state()
+        if service_state is not None:
+            active_services.append((service_name, service_manager, service_state))
+    running_details = []
+    all_ready = True
+    for service_name, service_manager, service_state in active_services:
+        ready = service_manager.api_ready()
+        all_ready = all_ready and ready
+        running_details.append(
+            f"{service_name}: роль={service_state.role}, PID={service_state.pid}, "
+            f"контекст={service_state.actual_context or service_manager.model_metadata().get('n_ctx', '?')} "
+            f"из запрошенных {service_state.requested_context or settings.model(service_state.role).context_size}"
+        )
     checks.append(
         Check(
-            "Сервер модели",
-            bool(running and manager.api_ready()),
-            (
-                f"роль={running.role}, PID={running.pid}, "
-                f"контекст={running.actual_context or manager.model_metadata().get('n_ctx', '?')} "
-                f"из запрошенных {running.requested_context or settings.model(running.role).context_size}"
-                if running
-                else "не запущен"
-            ),
+            "Серверы моделей",
+            bool(active_services and all_ready),
+            "; ".join(running_details) if running_details else "не запущены",
             required=False,
         )
     )
-    if running and manager.api_ready():
-        actual_context = running.actual_context or int(manager.model_metadata().get("n_ctx", 0) or 0)
-        requested_context = running.requested_context or settings.model(running.role).context_size
+    for service_name, service_manager, service_state in active_services:
+        if not service_manager.api_ready():
+            continue
+        actual_context = service_state.actual_context or int(
+            service_manager.model_metadata().get("n_ctx", 0) or 0
+        )
+        requested_context = (
+            service_state.requested_context
+            or settings.model(service_state.role).context_size
+        )
         checks.append(
             Check(
-                "Контекст модели",
+                f"Контекст модели {service_state.role}",
                 actual_context >= requested_context,
-                f"фактически {actual_context}, запрошено {requested_context}",
+                f"сервис={service_name}, фактически {actual_context}, запрошено {requested_context}",
                 required=False,
             )
         )

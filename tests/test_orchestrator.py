@@ -108,6 +108,9 @@ class OrchestratorTests(unittest.TestCase):
                 "Проверь настройки голосового режима"
             )
         )
+        self.assertFalse(
+            session._is_direct_conversation("Что ты видишь у меня на экране?")
+        )
 
     def test_date_fast_path_does_not_start_model(self):
         session = RoutedAgentSession(load_settings())
@@ -137,16 +140,58 @@ class OrchestratorTests(unittest.TestCase):
         research_manager.start.assert_not_called()
         session.research.run.assert_called_once()
 
+    def test_weather_request_uses_deterministic_internal_route(self):
+        session = RoutedAgentSession(load_settings())
+        session.session.tools.current_weather = Mock(
+            return_value=ToolResult(
+                True,
+                "ok",
+                "Текущая погода получена.",
+                {"summary": "Плюс пять."},
+            )
+        )
+        session._run_primary_route = Mock()
+        session.research.run = Mock()
+
+        reply = session._ask_exclusive("Какая погода в Гусь-Хрустальном?")
+
+        self.assertEqual(reply.text, "Плюс пять.")
+        session.session.tools.current_weather.assert_called_once()
+        session.research.run.assert_not_called()
+        session._run_primary_route.assert_not_called()
+
     def test_primary_route_is_wrapped_in_residency_window(self):
         session = RoutedAgentSession(load_settings())
         session.residency.primary_window = Mock(return_value=nullcontext())
         session._run_primary_route = Mock(return_value=AgentReply("Готово", ()))
 
-        reply = session._ask_exclusive("Выполни локальную задачу")
+        reply = session._ask_exclusive("Проверь настройки голосового режима")
 
         self.assertEqual(reply.text, "Готово")
         session.residency.primary_window.assert_called_once_with()
         session._run_primary_route.assert_called_once()
+
+    @patch("butler.orchestrator.ModelManager.for_role")
+    def test_short_conversation_uses_resident_butler_service(self, for_role):
+        session = RoutedAgentSession(load_settings())
+        manager = Mock()
+        manager.is_current.return_value = True
+        for_role.return_value = manager
+        session.residency.activate_residents = Mock(return_value={})
+        session.session.ask = Mock(return_value=AgentReply("Короткий ответ.", ()))
+        session.residency.primary_window = Mock()
+
+        reply = session._ask_exclusive("Почему небо голубое?")
+
+        self.assertEqual(reply.text, "Короткий ответ.")
+        for_role.assert_called_once_with(session.settings, "ui_butler")
+        session.residency.activate_residents.assert_called_once_with()
+        manager.start.assert_not_called()
+        session.residency.primary_window.assert_not_called()
+        call = session.session.ask.call_args.kwargs
+        self.assertTrue(call["conversation_only"])
+        self.assertEqual(call["service"].name, "ui_fast")
+        self.assertEqual(call["request_mode"].name, "fast")
 
     def test_planner_exposes_only_read_tools(self):
         names = {
@@ -260,6 +305,7 @@ class OrchestratorTests(unittest.TestCase):
         session._needs_plan = Mock(return_value=True)
         session._make_plan = Mock(side_effect=TaskCancelled("остановлено"))
         session.manager.start = Mock()
+        session.residency.primary_window = Mock(return_value=nullcontext())
 
         with self.assertRaises(TaskCancelled):
             session._ask_exclusive("Проведи аудит проекта")
@@ -272,6 +318,7 @@ class OrchestratorTests(unittest.TestCase):
         session._needs_plan = Mock(return_value=True)
         session._make_plan = Mock(return_value="План.")
         session.manager.start = Mock()
+        session.residency.primary_window = Mock(return_value=nullcontext())
         session.session.ask = Mock(return_value=AgentReply("Готово.", ()))
 
         session._ask_exclusive("Проведи аудит проекта")

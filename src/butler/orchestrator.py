@@ -10,6 +10,7 @@ from typing import Any
 from butler.agent import (
     AgentReply,
     AgentSession,
+    AgentToolEvent,
     ConfirmationCallback,
     FinalDeltaCallback,
     StatusCallback,
@@ -28,7 +29,12 @@ from butler.model_manager import (
     ModelManagerError,
     ModelResidencyCoordinator,
 )
-from butler.research import ResearchCoordinator, is_web_research_request
+from butler.research import (
+    ResearchCoordinator,
+    is_fast_lookup_request,
+    is_web_research_request,
+    select_research_mode,
+)
 from butler.tasking import TaskCancelled, TaskControl
 from butler.tools import ToolResult, tool_schemas
 from butler.trusted_task import (
@@ -36,6 +42,7 @@ from butler.trusted_task import (
     TRUSTED_TASK_STARTED,
     TrustedTaskStore,
 )
+from butler.weather import extract_weather_location
 
 
 PLANNING_HINTS = (
@@ -69,6 +76,9 @@ DIRECT_CONVERSATION_BLOCKERS = (
     "отправ",
     "компьютер",
     "окно",
+    "экран",
+    "видишь",
+    "что открыто",
     "сайт",
     "запомни",
     "удали",
@@ -171,7 +181,7 @@ def bounded_tool_payload(result: ToolResult, *, max_chars: int) -> str:
 
 
 class RoutedAgentSession:
-    """Plan on the large profile, unload it, then execute on the developer profile."""
+    """Route one shared session through resident, research and primary model tiers."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -210,14 +220,153 @@ class RoutedAgentSession:
 
     def _planning_model(self) -> str:
         try:
-            heavy = self.settings.capability_role("heavy_brain")
-            if heavy.enabled and heavy.primary_model:
-                profile = self.settings.model(heavy.primary_model)
+            planner = self.settings.capability_role("planner")
+            if planner.enabled and planner.primary_model:
+                profile = self.settings.model(planner.primary_model)
                 if profile.enabled:
-                    return heavy.primary_model
+                    return planner.primary_model
         except ConfigError:
             pass
-        return self._capability_model("researcher")
+        try:
+            return self._capability_model("heavy_brain", "researcher")
+        except ConfigError:
+            return self._capability_model("researcher")
+
+    def _run_resident_conversation(
+        self,
+        text: str,
+        *,
+        assistant_model: str,
+        confirmed: bool,
+        max_steps: int,
+        on_status: StatusCallback | None,
+        on_confirmation: ConfirmationCallback | None,
+        control: TaskControl | None,
+        on_final_delta: FinalDeltaCallback | None,
+        task_id: str | None,
+        request_started: float,
+    ) -> AgentReply:
+        """Answer ordinary conversation on the configured warm assistant service."""
+
+        manager = ModelManager.for_role(self.settings, assistant_model)
+        self.residency.activate_residents()
+        if not manager.is_current(assistant_model):
+            if on_status:
+                on_status("Запускаю быстрый уровень")
+            manager.start(assistant_model)
+        profile = self.settings.model(assistant_model)
+        request_mode = self.settings.assistant_request_mode(assistant_model)
+        diagnostic_event(
+            self.settings,
+            "orchestrator",
+            "execution_started",
+            plan_used=False,
+            conversation_only=True,
+            model_role=assistant_model,
+            model_service=profile.service_name,
+            request_mode=(request_mode.name if request_mode is not None else "default"),
+        )
+        try:
+            reply = self.session.ask(
+                text,
+                confirmed=confirmed,
+                max_steps=max_steps,
+                on_status=on_status,
+                on_confirmation=on_confirmation,
+                control=control,
+                conversation_only=True,
+                on_final_delta=on_final_delta,
+                reset_tool_state=False,
+                service=self.settings.model_service(profile.service_name),
+                request_mode=request_mode,
+            )
+        except Exception as exc:
+            diagnostic_exception(
+                self.settings,
+                "orchestrator",
+                "execution_failed",
+                exc,
+                duration_ms=round((time.monotonic() - request_started) * 1000),
+                plan_used=False,
+                conversation_only=True,
+                model_role=assistant_model,
+            )
+            raise
+        if task_id:
+            self.handoffs.append(
+                task_id,
+                "assistant",
+                "result",
+                reply.text,
+                metadata={
+                    "model_role": assistant_model,
+                    "plan_used": False,
+                    "tool_event_count": len(reply.tool_events),
+                },
+            )
+        diagnostic_event(
+            self.settings,
+            "orchestrator",
+            "execution_completed",
+            duration_ms=round((time.monotonic() - request_started) * 1000),
+            plan_used=False,
+            conversation_only=True,
+            model_role=assistant_model,
+            answer=reply.text,
+            tool_event_count=len(reply.tool_events),
+        )
+        return reply
+
+    def _run_current_weather(
+        self,
+        text: str,
+        *,
+        confirmed: bool,
+        control: TaskControl | None,
+        on_final_delta: FinalDeltaCallback | None,
+        task_id: str | None,
+    ) -> AgentReply:
+        location = extract_weather_location(text)
+        if not location:
+            answer = "Назовите, пожалуйста, город, для которого нужна текущая погода."
+            self.session.record_exchange(text, answer)
+            if on_final_delta is not None:
+                on_final_delta(answer)
+            return AgentReply(answer, ())
+        result = self.session.tools.current_weather(
+            location,
+            confirmed=confirmed,
+            checkpoint=control.checkpoint if control is not None else None,
+        )
+        if result.ok:
+            answer = str(result.data.get("summary", "")).strip()
+        elif result.status == "location_not_found":
+            answer = (
+                f"Я не смогла однозначно найти город «{location}». "
+                "Повторите, пожалуйста, его название в именительном падеже."
+            )
+        else:
+            answer = result.message
+        self.session.record_exchange(text, answer)
+        if on_final_delta is not None:
+            on_final_delta(answer)
+        event = AgentToolEvent("current_weather", {"location": location}, result)
+        if task_id:
+            self.handoffs.append(
+                task_id,
+                "researcher",
+                "result",
+                answer,
+                metadata={"route": "current_weather", "tool_event_count": 1},
+            )
+        diagnostic_event(
+            self.settings,
+            "orchestrator",
+            "current_weather_completed",
+            location_found=result.ok,
+            outcome=result.status,
+        )
+        return AgentReply(answer, (event,))
 
     def _planner_available(self) -> bool:
         try:
@@ -328,7 +477,7 @@ class RoutedAgentSession:
                 {
                     "role": "user",
                     "content": (
-                        f"Задача Александра:\n{text}\n\n"
+                        f"Задача пользователя {self.settings.user_name}:\n{text}\n\n"
                         f"Контекст предыдущего диалога:\n"
                         f"{self.session.context_snapshot()}\n\n"
                         f"Карта проекта:\n{workspace_map(self.settings)}"
@@ -721,7 +870,7 @@ class RoutedAgentSession:
         request = text
         if plan:
             request = (
-                f"Исходная задача Александра:\n{text}\n\n"
+                f"Исходная задача пользователя {self.settings.user_name}:\n{text}\n\n"
                 f"План усиленной модели:\n{plan}\n\n"
                 "Проверь план по фактическому состоянию, затем выполни задачу и проверь результат."
             )
@@ -804,7 +953,34 @@ class RoutedAgentSession:
                 metadata={"durable_task": True},
             )
         fast_reply = fast_intent_reply(text)
-        web_research = is_web_research_request(text)
+        routing = self.settings.raw.get("routing", {})
+        fast_lookup_signals = routing.get("fast_lookup_signals", ())
+        fast_lookup_max_chars = int(routing.get("fast_lookup_max_chars", 180))
+        web_research = is_web_research_request(
+            text,
+            fast_lookup_signals=fast_lookup_signals,
+            fast_lookup_max_chars=fast_lookup_max_chars,
+        )
+        normalized_text = text.casefold().replace("ё", "е")
+        current_weather = bool(
+            self.settings.weather_enabled()
+            and any(signal in normalized_text for signal in self.settings.weather_signals())
+            and not any(
+                blocker in normalized_text
+                for blocker in self.settings.weather_current_blockers()
+            )
+            and is_fast_lookup_request(
+                text,
+                signals=fast_lookup_signals,
+                max_chars=fast_lookup_max_chars,
+            )
+            and select_research_mode(
+                text,
+                fast_lookup_signals=fast_lookup_signals,
+                fast_lookup_max_chars=fast_lookup_max_chars,
+            ).name
+            == "fast"
+        )
         planner_available = self._planner_available()
         needs_plan = self._needs_plan(text)
         direct_conversation = self._is_direct_conversation(text)
@@ -822,6 +998,7 @@ class RoutedAgentSession:
             direct_conversation=direct_conversation,
             fast_intent=fast_reply is not None,
             web_research=web_research,
+            current_weather=current_weather,
             assistant_model=assistant_model,
             research_model=research_model,
             execution_model=execution_model,
@@ -842,6 +1019,14 @@ class RoutedAgentSession:
                 answer=fast_reply,
             )
             return AgentReply(fast_reply, ())
+        if current_weather:
+            return self._run_current_weather(
+                text,
+                confirmed=confirmed,
+                control=control,
+                on_final_delta=on_final_delta,
+                task_id=task_id,
+            )
         if web_research:
             research_manager = ModelManager.for_role(self.settings, research_model)
             primary_lease = None
@@ -887,6 +1072,22 @@ class RoutedAgentSession:
             finally:
                 if primary_lease is not None:
                     self.residency.restore_after_primary(primary_lease)
+        if (
+            direct_conversation
+            and assistant_model in self.settings.resident_model_roles()
+        ):
+            return self._run_resident_conversation(
+                text,
+                assistant_model=assistant_model,
+                confirmed=confirmed,
+                max_steps=max_steps,
+                on_status=on_status,
+                on_confirmation=on_confirmation,
+                control=control,
+                on_final_delta=on_final_delta,
+                task_id=task_id,
+                request_started=request_started,
+            )
         with self.residency.primary_window():
             return self._run_primary_route(
                 text,

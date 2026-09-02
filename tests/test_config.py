@@ -520,14 +520,17 @@ class ConfigTests(unittest.TestCase):
             settings = load_settings(root)
 
             developer = settings.capability_role("developer")
+            planner = settings.capability_role("planner")
             heavy_brain = settings.capability_role("heavy_brain")
 
-            self.assertEqual(developer.primary_model, "generalist")
-            self.assertEqual(developer.candidate_model, "candidate")
+            self.assertEqual(developer.primary_model, "candidate")
+            self.assertEqual(developer.candidate_model, "reasoning")
             self.assertTrue(developer.enabled)
-            self.assertEqual(heavy_brain.primary_model, "reasoning")
+            self.assertEqual(planner.primary_model, "reasoning")
+            self.assertEqual(heavy_brain.primary_model, "generalist")
             self.assertTrue(heavy_brain.enabled)
-            self.assertEqual(settings.default_role, "generalist")
+            self.assertEqual(settings.default_role, "ui_butler")
+            self.assertIn("ui_butler", settings.resident_model_roles())
             execution = settings.raw["developer"]["execution"]
             self.assertEqual(execution["backend"], "disabled")
             self.assertEqual(execution["unsafe_host_acknowledgement"], "")
@@ -540,7 +543,7 @@ class ConfigTests(unittest.TestCase):
                 live["minimum_phrase_chars"], live["maximum_phrase_chars"]
             )
 
-    def test_candidate_is_reproducible_conservative_and_disabled(self):
+    def test_measured_ornith_executor_is_reproducible_and_enabled(self):
         root = Path(__file__).resolve().parents[1]
         defaults = json.loads(
             (root / "config" / "default.json").read_text(encoding="utf-8")
@@ -569,8 +572,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(candidate["context_size"], 16_384)
         self.assertEqual(candidate["acceleration"]["type"], "none")
         self.assertEqual(candidate["acceleration"]["max_tokens"], 0)
-        self.assertFalse(candidate["enabled"])
-        self.assertTrue(candidate["experimental"])
+        self.assertTrue(candidate["enabled"])
+        self.assertFalse(candidate["experimental"])
 
     def test_working_profiles_are_generic_pinned_and_have_declared_capabilities(self):
         settings = load_settings()
