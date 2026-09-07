@@ -18,6 +18,79 @@ from butler.config import load_settings
 
 
 class BrowserSafetyTests(unittest.TestCase):
+    def assert_stalled_dns_is_reaped(self, outcome):
+        from butler.tasking import TaskCancelled
+        from butler.processes import process_image_path
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            worker = scripts / "dns_worker.py"
+            project_scripts = str(Path(__file__).resolve().parents[1] / "scripts")
+            worker.write_text(
+                "import asyncio,os,sys,time\n"
+                "from pathlib import Path\n"
+                "from unittest.mock import patch\n"
+                f"sys.path.insert(0,{project_scripts!r})\n"
+                "import browser_worker\n"
+                "def stalled_dns(*args,**kwargs):\n"
+                "    Path('dns.pid').write_text(str(os.getpid()))\n"
+                "    time.sleep(60)\n"
+                "    return []\n"
+                "with patch('browser_worker.socket.getaddrinfo',side_effect=stalled_dns):\n"
+                "    asyncio.run(browser_worker.run())\n",
+                encoding="utf-8",
+            )
+            reader = object.__new__(BrowserReader)
+            reader.settings = SimpleNamespace(raw={"diagnostics": {"enabled": False}})
+            reader.python = Path(sys.executable)
+            reader.executable = Path(sys.executable)
+            reader.profile_dir = root / "profile"
+            reader.headless = True
+            reader.worker = worker
+            reader.timeout = 3 if outcome == "timeout" else 10
+            reader.max_text = 100
+            reader.persistent = False
+            marker = root / "dns.pid"
+
+            def checkpoint():
+                if outcome == "cancel" and marker.exists() and marker.read_text():
+                    raise TaskCancelled("Cancel blocked DNS")
+
+            # Any parent-side resolution would make this test fail immediately.
+            with patch("butler.browser.socket.getaddrinfo", side_effect=AssertionError("Parent DNS")):
+                with self.assertRaises(TaskCancelled if outcome == "cancel" else BrowserError):
+                    reader.read("open", "https://blocked.example.test/", checkpoint=checkpoint)
+            self.assertTrue(marker.is_file(), "Worker must reach real DNS validation")
+            self.assertIsNone(process_image_path(int(marker.read_text())))
+
+    @unittest.skipUnless(os.name == "nt", "Windows DNS cancellation integration")
+    def test_cancel_reaps_worker_blocked_in_dns(self):
+        self.assert_stalled_dns_is_reaped("cancel")
+
+    @unittest.skipUnless(os.name == "nt", "Windows DNS timeout integration")
+    def test_timeout_reaps_worker_blocked_in_dns(self):
+        self.assert_stalled_dns_is_reaped("timeout")
+
+    def test_read_only_dns_is_not_resolved_in_parent(self):
+        reader = object.__new__(BrowserReader)
+        reader.settings = SimpleNamespace(raw={"diagnostics": {"enabled": False}})
+        reader.persistent = True
+        reader._validate = Mock()
+        reader._read_once = Mock(return_value={"text": "validated by worker"})
+        with patch("butler.browser.socket.getaddrinfo", side_effect=AssertionError("Parent DNS must not block")):
+            self.assertEqual(reader.read("open", "https://example.test/")["text"], "validated by worker")
+        reader._read_once.assert_called_once_with("open", "https://example.test/")
+
+    def test_active_browser_keeps_parent_private_address_guard(self):
+        reader = object.__new__(BrowserReader)
+        reader._validate = Mock()
+        reader._read_persistent = Mock()
+        with self.assertRaises(BrowserError):
+            reader.read("interact", json.dumps({"url": "http://127.0.0.1/"}))
+        reader._read_persistent.assert_not_called()
+
     def test_worker_environment_has_no_machine_specific_browser_path(self):
         reader = BrowserReader(load_settings())
         with patch.dict("os.environ", {}, clear=True):

@@ -54,7 +54,7 @@
 | `weather.py` | текущая погода без LLM: извлечение города, проверяемые падежные кандидаты, geocoding/current JSON и русская фраза | публичный HTTPS, redirect deny, bounded JSON; неизвестный город не угадывать |
 | `windows_automation.py` | UI Automation высокого уровня |
 | `windows_bridge.py` | окна, клавиатура, указатель и низкоуровневый Win32 |
-| `scripts/browser_worker.py` | Chromium, поиск и SSRF/redirect guard; one-shot worker вступает в private job до импорта Playwright |
+| `scripts/browser_worker.py` | Chromium, поиск и SSRF/redirect guard; one-shot worker вступает в private job, затем делает DNS admission `open` до импорта Playwright |
 | `scripts/windows_uia_worker.py` | изоляция потенциально зависающей UI Automation |
 
 ## Голос

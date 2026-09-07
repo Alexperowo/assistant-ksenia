@@ -16,8 +16,13 @@ AUDIT. Read-only browser subprocess теперь получает checkpoint в�
 и private Windows Job Object: worker вступает в него до запуска Playwright,
 родитель завершает своё дерево и ожидает нулевое число процессов. Это проверено
 на настоящих Windows-процессах и отдельном Chromium smoke, но не является sandbox.
-Далее нужны общий research deadline (включая родительский DNS и LLM), остальные
-fault-сценарии и отдельная отмена активного persistent browser-control.
+DNS admission read-only страницы теперь выполняется внутри job до Chromium:
+блокирующий resolver проверен реальным worker при timeout/отмене, а private/mixed
+DNS отвергается до запуска Playwright. Следующий открытый участок —
+`chat.complete_chat`: `urlopen(timeout=600)` ждёт заголовки до отменяемого reader.
+Нужны управление этим ожиданием, затем общий research budget, остальные
+fault-сценарии и отдельная отмена активного persistent browser-control. Не вводить
+таймер только между этапами и не выдавать его за сквозной deadline.
 
 Актуальное состояние после исправления ролевой лестницы описано в `docs/AUDIT.md`, `docs/CONFIGURATION.md` и верхних записях `CHANGELOG.md`. Исторический checkpoint backend-ов: [`TRANSFER-2026-08-29.md`](TRANSFER-2026-08-29.md). Если сведения расходятся, код и текущий аудит имеют приоритет, а фактическое состояние процессов следует перепроверить на компьютере.
 

@@ -1,5 +1,14 @@
 # История изменений
 
+## 7 сентября 2026 — DNS чтения страниц внутри отменяемого worker
+
+- Fixed: родитель больше не блокируется на DNS admission read-only страницы;
+  полная проверка выполняется в owned worker до запуска Playwright. Timeout и
+  отмена охватывают зависший resolver; SSRF/redirect guards сохранены.
+- Tests: два native DNS-fault сценария, отсутствие parent DNS для `open`,
+  сохранение parent guard для `interact`, отказ небезопасных URL/DNS до Chromium.
+- Pending: ожидание HTTP-заголовков LLM и общий research deadline ещё открыты.
+
 ## 7 сентября 2026 — остановка read-only browser worker
 
 - Fixed: cancellation проходит внутрь ожидающего browser search/read; private

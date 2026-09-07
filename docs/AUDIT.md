@@ -1,5 +1,37 @@
 # Аудит проекта
 
+## Дополнение 7 сентября 2026 — отменяемый DNS read-only страницы
+
+Исходная точка: `c06472b`. Подтверждено, что `BrowserReader.read(open)` выполнял
+`socket.getaddrinfo` в основном потоке до `_read_once`: timeout/отмена worker
+не охватывали это ожидание. Полная URL/DNS admission теперь выполняется внутри
+owned worker до импорта Playwright; локальные адреса, credentials, пустой,
+смешанный public/private DNS и ошибки resolver по-прежнему отвергаются.
+Guard каждого запроса и перенаправления сохранён. Parent admission отдельного
+`interact` не изменён. Политика разрешений не ослаблена, новых dependencies нет.
+
+Пять новых тестов: отсутствие parent DNS для `open`, сохранение guard `interact`,
+отказ небезопасных адресов до Playwright и два native Windows сценария блокировки
+resolver на 60 с. Настоящий `browser_worker.run` в этих сценариях завершается
+по отмене или timeout 3 с; DNS инъецирован, сеть не используется, PID после
+возврата отсутствует. До изменения тест родителя падал на попытке DNS, а тест
+worker доходил до запуска Playwright вместо раннего отказа. Отдельное настоящее
+чтение `https://docs.python.org/3/` вернуло заголовок и 1441 символ за 2,859 с
+(один smoke, не SLA).
+
+Полный `scripts/check.ps1`: exit 0, 475/475 и порядки 17/73/211 без ошибок,
+пропусков и warnings; release/dependencies/Doctor/LAN и Silero→Whisper CUDA
+успешны (`landmark_recall=1.0`). Active LLM/cancellation явно skipped, серверы
+не запущены; RAG выключен. Копия результата:
+`runtime/audit/checkpoints/2026-09-07-reliability-start/after-c1-browser-dns.txt`.
+Личная конфигурация сохранила SHA-256
+`9E3F6CCD5098877B787548F26612098A57444F7DDEBA0136230588DAD74ED223`.
+
+Общий deadline исследования НЕ завершён: `chat.complete_chat` вызывает
+`urlopen(timeout=600)` до входа в отменяемый stream reader. Следующий этап —
+воспроизведение задержки HTTP-заголовков локальным тестовым сервером и безопасное
+управление этим ожиданием, затем общий бюджет. Непрерывный Live не менялся.
+
 ## Дополнение 7 сентября 2026 — отмена browser worker, C1 частично
 
 Исходная точка: `638e6f8`. Старый `subprocess.run(timeout=...)` завершал

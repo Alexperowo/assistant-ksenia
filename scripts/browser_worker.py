@@ -568,6 +568,10 @@ async def run() -> int:
     join_process_job(os.environ.get("KSENIA_BROWSER_JOB", ""))
     args = parse_args()
     value = sys.stdin.read() if args.value_stdin else str(args.value or "")
+    # Run DNS admission inside the owned job, not the caller's thread. Reject
+    # before starting Chromium; per-request/redirect guards below remain active.
+    if args.mode == "open" and not public_http_url(value):
+        raise ValueError("Чтение разрешено только для публичных HTTP(S) адресов.")
     from playwright.async_api import async_playwright
 
     async with async_playwright() as playwright:

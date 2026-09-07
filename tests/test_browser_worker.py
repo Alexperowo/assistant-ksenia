@@ -1,10 +1,13 @@
 import sys
+import asyncio
+import io
 import socket
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request
 from unittest.mock import patch
+from types import SimpleNamespace
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -15,10 +18,40 @@ from browser_worker import (  # noqa: E402
     parse_duckduckgo_results,
     public_http_url as worker_public_http_url,
     search_provider_url,
+    run,
 )
 
 
 class BrowserOfferExtractionTests(unittest.TestCase):
+    def test_open_rejects_unsafe_destinations_before_starting_playwright(self):
+        private_dns = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.7", 443))]
+        public_dns = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+        cases = [
+            ("file:///private.txt", public_dns),
+            ("http://127.1/", public_dns),
+            ("https://user:secret@example.test/", public_dns),
+            ("https://private.example.test/", private_dns),
+            ("https://mixed.example.test/", public_dns + private_dns),
+            ("https://empty.example.test/", []),
+            ("https://failed.example.test/", OSError("DNS failed")),
+        ]
+        for url, addresses in cases:
+            with (
+                self.subTest(url=url),
+                patch("butler.processes.join_process_job"),
+                patch("browser_worker.parse_args", return_value=SimpleNamespace(mode="open", value_stdin=True)),
+                patch("browser_worker.sys.stdin", io.StringIO(url)),
+                patch("browser_worker.socket.getaddrinfo") as dns,
+                patch("playwright.async_api.async_playwright") as launch,
+            ):
+                if isinstance(addresses, Exception):
+                    dns.side_effect = addresses
+                else:
+                    dns.return_value = addresses
+                with self.assertRaises(ValueError):
+                    asyncio.run(run())
+                launch.assert_not_called()
+
     def test_worker_rejects_ambiguous_numeric_and_private_dns_hosts(self):
         self.assertFalse(worker_public_http_url("http://2130706433/"))
         self.assertFalse(worker_public_http_url("http://127.1/"))

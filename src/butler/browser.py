@@ -410,7 +410,10 @@ class BrowserReader:
                 destination = str(payload.get("url", "")) if isinstance(payload, dict) else ""
             except json.JSONDecodeError:
                 destination = ""
-        if mode in {"open", "interact"} and not public_http_url(destination):
+        # Read-only destinations are resolved inside the owned one-shot worker,
+        # before Playwright starts. Parent DNS would evade timeout/cancellation.
+        # Persistent active control keeps its separate parent-side admission.
+        if mode == "interact" and not public_http_url(destination):
             raise BrowserError(
                 "Браузеру разрешены только публичные http/https адреса. "
                 "Локальные файлы, localhost и домашняя сеть запрещены."
