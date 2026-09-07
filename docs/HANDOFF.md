@@ -12,8 +12,12 @@
 
 Следующее дополнение C1: типизированные ошибки исследования и безопасные голосовые
 объяснения, без лишнего уточняющего повтора после отказа. Сводка — в верхней записи
-AUDIT. Далее нужны общий research deadline, отмена browser subprocess и остальные
-fault-сценарии; не путать проверки перед вызовом с отменой внутри уже запущенного tool.
+AUDIT. Read-only browser subprocess теперь получает checkpoint во время ожидания
+и private Windows Job Object: worker вступает в него до запуска Playwright,
+родитель завершает своё дерево и ожидает нулевое число процессов. Это проверено
+на настоящих Windows-процессах и отдельном Chromium smoke, но не является sandbox.
+Далее нужны общий research deadline (включая родительский DNS и LLM), остальные
+fault-сценарии и отдельная отмена активного persistent browser-control.
 
 Актуальное состояние после исправления ролевой лестницы описано в `docs/AUDIT.md`, `docs/CONFIGURATION.md` и верхних записях `CHANGELOG.md`. Исторический checkpoint backend-ов: [`TRANSFER-2026-08-29.md`](TRANSFER-2026-08-29.md). Если сведения расходятся, код и текущий аудит имеют приоритет, а фактическое состояние процессов следует перепроверить на компьютере.
 
@@ -41,7 +45,7 @@ fault-сценарии; не путать проверки перед вызов
 - Live v1 как отдельный opt-in контур: Vosk partial transcripts → hybrid turn detector → финальный faster-whisper, безопасные дельты LLM, отслеживаемые фразы TTS, barge-in state machine и раздельные generated/spoken ответы. Произвольная человеческая речь теперь останавливает TTS/LLM и становится полным следующим ходом без wake-фразы; переносимый default выключен до серии 20–30 ходов.
 - Сквозной performance harness: `trace_id/turn_id/task_id/request_id`, voice→STT→LLM→TTS milestones, cancellation latency, p50/p95 и явные неполные traces без отдельной telemetry-службы.
 - HTTP reader cancellation проверена живьём: socket shutdown не задерживает agent loop синхронным close, cleanup остаётся измеримым до нулевых active/stuck counters.
-- Tool execution имеет коррелированный lifecycle `PLANNED/APPROVED/STARTED/COMPLETED/FAILED/CANCELLED`; workspace search и RAG получили cooperative cancellation в безопасных точках. Mid-operation остановка браузера, Windows UI и будущих sandbox-процессов остаётся следующим слоем, без ложного обещания rollback.
+- Tool execution имеет коррелированный lifecycle `PLANNED/APPROVED/STARTED/COMPLETED/FAILED/CANCELLED`; workspace search и RAG получили cooperative cancellation в безопасных точках, read-only browser worker — отмену с завершением собственного дерева. Mid-operation остановка persistent browser-control, Windows UI и будущих sandbox-процессов остаётся следующим слоем, без ложного обещания rollback.
 - Аудиотракт получил единый near/far worker: один процесс владеет input, wake/STT/stop подписываются на near PCM, а opt-in Silero PCM публикует только принятые output stream far frames. `pywebrtc-audio` 0.1.0 закреплён точным wheel hash/source revision и интегрирован как opt-in AEC3/NS backend. На Tour One M3 Xenia PCM прошла без SAPI, отмена — 7,2 мс; человеческая речь сохранилась поверх TTS и дважды продолжила диалог без wake-фразы. Portable defaults не включались; детали в `docs/AUDIO-FULL-DUPLEX-AUDIT.md`.
 - Production sandbox проаудирован отдельно: безопасный backend остаётся `disabled`; на текущем ПК AMD-V/SVM выключен, WSL/container runtime отсутствуют. Windows Sandbox/Hyper-V поэтому требуют действия Александра и перезагрузки, а experimental `CreateProcessInSandbox` и MXC не выдаются за production boundary. Полный контракт — в `docs/SANDBOX-AUDIT.md`.
 - Runtime baseline завершён на обеих рабочих моделях при 16K/32K/48K/96K: меньший context заметно освобождает RAM/VRAM, но не уменьшает TTFT, а reload 7–11 секунд уничтожает prefix cache. Поэтому рабочие 96K сохранены; transport явно закрепляет `cache_prompt=true`, пишет numeric cache hit, а `AGENT_FULL` schemas снимаются один раз на задачу. Детали — в `docs/RUNTIME-OPTIMIZATION-BASELINE.md`.

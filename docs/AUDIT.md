@@ -1,5 +1,40 @@
 # Аудит проекта
 
+## Дополнение 7 сентября 2026 — отмена browser worker, C1 частично
+
+Исходная точка: `638e6f8`. Старый `subprocess.run(timeout=...)` завершал
+непосредственный процесс, но не обеспечивал остановку потомков Chromium и
+не проверял cancellation во время ожидания. На Windows venv добавляет
+launcher перед настоящим интерпретатором, поэтому одного `Popen.kill()` мало.
+
+Read-only search/open теперь получают checkpoint через research/tool executor.
+`BrowserReader._read_once` владеет private `OwnedProcessJob`; worker вступает
+в него до импорта Playwright и создания потомков. При отмене, timeout и обычном
+выходе родитель завершает своё дерево, ожидает нулевое число процессов и
+освобождает launcher/pipes. Ошибки Windows API преобразуются в recoverable
+`BrowserError`, а не успешное завершение. Чужие PID не перебираются. Это НЕ
+production sandbox; разрешения, SSRF и fail-closed developer execution сохранены.
+
+Восемь новых тестов проверяют реальные Windows worker/child при cancel,
+timeout и success, независимость двух jobs, отказ подготовки job и Windows API,
+передачу checkpoint; существующий research-тест дополнен этой проверкой.
+Настоящий Chromium search вернул 10 результатов за 3,609 с. В отдельном smoke
+отмена при 10 активных процессах job вернула управление за 15 мс, после
+`ActiveProcesses=0`; все job handles закрыты. Это единичные измерения, не p95/SLA.
+
+Повторный полный `scripts/check.ps1` завершился с кодом 0: 470/470 тестов,
+порядки 17/73/211 без ошибок/пропусков/warnings, release/dependency/Doctor/LAN,
+Silero→Whisper CUDA (`landmark_recall=1.0`). Active LLM/cancellation пропущены:
+модели не запущены; RAG выключен. Отчёт: `runtime/audit/latest.txt`; копия:
+`runtime/audit/checkpoints/2026-09-07-reliability-start/after-c1-browser-cancellation.txt`.
+SHA-256 `config/user.json` остался
+`9E3F6CCD5098877B787548F26612098A57444F7DDEBA0136230588DAD74ED223`.
+
+Остаются открытыми общий research deadline (синхронный DNS в родителе и LLM),
+отмена persistent browser-control, остальные C1 fault-сценарии, непрерывный Live
+и фоновые задачи. Polling 100 мс относится к ожиданию worker, не к полному
+пользовательскому пути. Runtime, модели, загрузки и личные настройки не менялись.
+
 ## Дополнение 7 сентября 2026 — причины отказа поиска, C1 частично
 
 Исходная точка: `c05ad26`. Подтверждено тестами, что ошибочный результат

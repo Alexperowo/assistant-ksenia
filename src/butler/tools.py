@@ -1365,12 +1365,18 @@ class ToolExecutor:
                 blocked = self._outbound_after_local_guard(confirmed) or self._authorize(
                     "browser_read", self.workspace_root, confirmed
                 )
-                result = blocked or ToolResult(True, "ok", "Поиск выполнен.", self.browser.read("search", str(args.get("query", ""))))
+                result = blocked or ToolResult(True, "ok", "Поиск выполнен.", self.browser.read(
+                    "search", str(args.get("query", "")),
+                    **({"checkpoint": checkpoint} if checkpoint is not None else {}),
+                ))
             elif name == "browser_read_page":
                 blocked = self._outbound_after_local_guard(confirmed) or self._authorize(
                     "browser_read", self.workspace_root, confirmed
                 )
-                result = blocked or ToolResult(True, "ok", "Страница прочитана.", self.browser.read("open", str(args.get("url", ""))))
+                result = blocked or ToolResult(True, "ok", "Страница прочитана.", self.browser.read(
+                    "open", str(args.get("url", "")),
+                    **({"checkpoint": checkpoint} if checkpoint is not None else {}),
+                ))
             elif name == "browser_interact":
                 if not self._browser_active_control_enabled:
                     result = ToolResult(

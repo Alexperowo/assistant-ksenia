@@ -8,6 +8,17 @@ LLM никогда не является субъектом разрешения
 
 ## Сетевые границы
 
+One-shot browser worker использует private Windows Job Object с
+`KILL_ON_JOB_CLOSE`, без breakaway. Он присоединяется до импорта Playwright и
+закрывает свой job handle; временем жизни владеет родитель. Отмена и timeout
+завершают только это дерево по handle, без поиска процессов по имени/PID.
+Ошибка подготовки job запрещает запуск неуправляемого worker. API-ошибка cleanup
+сообщается как ошибка запроса, а не успешная остановка. Механизм основан на
+[Windows Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects).
+Это управление временем жизни доверенных процессов, НЕ изоляция файлов/сети
+и НЕ production sandbox для Python/Node. Permission Broker и SSRF-проверки
+сохраняются независимо; persistent browser-control этим механизмом не заменён.
+
 - LLM и embeddings привязаны только к loopback и защищены локальным ключом.
 - LAN-панель — отдельный HTTP-сервис для доверенной домашней сети с PIN, сессией и rate limit.
 - LAN нельзя публиковать в интернет; TLS пока отсутствует.

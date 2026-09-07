@@ -12,12 +12,13 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from butler.config import Settings
 from butler.diagnostics import event as diagnostic_event
 from butler.diagnostics import exception as diagnostic_exception
+from butler.processes import OwnedProcessJob
 
 
 class BrowserError(RuntimeError):
@@ -153,31 +154,77 @@ class BrowserReader:
             "PYTHONUTF8": "1",
         }
 
-    def _read_once(self, mode: str, value: str) -> dict[str, Any]:
+    def _read_once(
+        self, mode: str, value: str, *, checkpoint: Callable[[], None] | None = None
+    ) -> dict[str, Any]:
+        if checkpoint is not None:
+            checkpoint()
+        started = time.monotonic()
         try:
-            result = subprocess.run(
-                [
-                    str(self.python), "-u", str(self.worker),
-                    "--mode", mode, "--value-stdin",
-                    "--executable", str(self.executable),
-                    "--profile", str(self.profile_dir),
-                    "--headless", "true" if self.headless else "false",
-                    "--max-text", str(self.max_text),
-                ],
-                input=value,
-                cwd=str(self.worker.parent.parent),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=self.timeout,
-                env=self._environment(),
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+            with OwnedProcessJob() as job:
+                environment = self._environment()
+                environment["KSENIA_BROWSER_JOB"] = job.name
+                environment["PYTHONPATH"] = os.pathsep.join(filter(None, (
+                    str(self.worker.parent.parent / "src"), environment.get("PYTHONPATH", "")
+                )))
+                process = subprocess.Popen(
+                    [
+                        str(self.python), "-u", str(self.worker),
+                        "--mode", mode, "--value-stdin",
+                        "--executable", str(self.executable),
+                        "--profile", str(self.profile_dir),
+                        "--headless", "true" if self.headless else "false",
+                        "--max-text", str(self.max_text),
+                    ],
+                    cwd=str(self.worker.parent.parent),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=environment,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                try:
+                    pending_input = value
+                    while True:
+                        if checkpoint is not None:
+                            checkpoint()
+                        remaining = self.timeout - (time.monotonic() - started)
+                        if remaining <= 0:
+                            raise subprocess.TimeoutExpired(process.args, self.timeout)
+                        try:
+                            stdout, stderr = process.communicate(
+                                input=pending_input, timeout=min(0.1, remaining)
+                            )
+                            break
+                        except subprocess.TimeoutExpired:
+                            pending_input = None
+                    result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+                finally:
+                    # Kill by the private job handle, not by a re-used PID or
+                    # executable name. The venv launcher itself may be outside it.
+                    cleanup_started = time.monotonic()
+                    try:
+                        job.terminate()
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                        try:
+                            process.communicate(timeout=5)
+                        finally:
+                            for stream in (process.stdin, process.stdout, process.stderr):
+                                if stream is not None:
+                                    stream.close()
+                    diagnostic_event(
+                        self.settings, "browser", "worker_tree_stopped",
+                        duration_ms=round((time.monotonic() - cleanup_started) * 1000),
+                    )
         except subprocess.TimeoutExpired as exc:
             raise BrowserError("Браузер не ответил вовремя.") from exc
         except OSError as exc:
-            raise BrowserError(f"Не удалось запустить браузер: {exc}") from exc
+            raise BrowserError(f"Не удалось выполнить или завершить браузерный запрос: {exc}") from exc
         if result.returncode != 0:
             raise BrowserError((result.stderr or result.stdout).strip() or "Браузер завершился с ошибкой.")
         try:
@@ -350,7 +397,11 @@ class BrowserReader:
             raise BrowserError("Браузерный сервис вернул ответ неверного формата.")
         return payload
 
-    def read(self, mode: str, value: str) -> dict[str, Any]:
+    def read(
+        self, mode: str, value: str, *, checkpoint: Callable[[], None] | None = None
+    ) -> dict[str, Any]:
+        if checkpoint is not None:
+            checkpoint()
         self._validate(mode)
         destination = value
         if mode == "interact":
@@ -385,7 +436,9 @@ class BrowserReader:
                     level="warning",
                     mode=mode,
                 )
-                payload = self._read_once(mode, value)
+                payload = self._read_once(mode, value, **(
+                    {"checkpoint": checkpoint} if checkpoint is not None else {}
+                ))
         except Exception as exc:
             diagnostic_exception(
                 self.settings,

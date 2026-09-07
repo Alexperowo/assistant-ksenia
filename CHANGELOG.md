@@ -1,5 +1,17 @@
 # История изменений
 
+## 7 сентября 2026 — остановка read-only browser worker
+
+- Fixed: cancellation проходит внутрь ожидающего browser search/read; private
+  Windows Job Object завершает собственное дерево Playwright/Chromium при
+  отмене, timeout и штатном выходе, включая случай venv redirector.
+- Safety: чужие процессы не перебираются и не завершаются; отказ Windows API
+  не выдаётся за успешную очистку. Новых зависимостей и sandbox fallback нет.
+- Tests: native Windows lifecycle/isolation, ошибки API и checkpoint forwarding.
+  Точные результаты полного gate и границы — в верхней записи `docs/AUDIT.md`.
+- Pending: общий research deadline, persistent browser-control cancellation,
+  непрерывный Live и фоновое исследование не объявляются завершёнными.
+
 ## 7 сентября 2026 — отказ поиска без лишнего повтора
 
 - Fixed: уточняющий поиск больше не повторяет неудачный вызов после ошибки

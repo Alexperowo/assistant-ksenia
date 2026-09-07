@@ -3,6 +3,8 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+import uuid
+import time
 from ctypes import wintypes
 from pathlib import Path
 
@@ -11,6 +13,72 @@ PROCESS_TERMINATE = 0x0001
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 SYNCHRONIZE = 0x00100000
 WAIT_OBJECT_0 = 0x00000000
+
+
+class OwnedProcessJob:
+    """Own only cooperating child workers; no PID enumeration or host sandbox claim."""
+
+    def __init__(self) -> None:
+        self.name = "Local\\KseniaRequest-" + uuid.uuid4().hex
+        self.handle = None
+
+    def __enter__(self):
+        if os.name != "nt":
+            raise OSError("Process-tree ownership requires Windows.")
+        try:
+            import win32job
+
+            self.handle = win32job.CreateJobObject(None, self.name)
+            info = win32job.QueryInformationJobObject(
+                self.handle, win32job.JobObjectExtendedLimitInformation
+            )
+            info["BasicLimitInformation"]["LimitFlags"] = win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            win32job.SetInformationJobObject(
+                self.handle, win32job.JobObjectExtendedLimitInformation, info
+            )
+        except BaseException as exc:
+            if self.handle is not None:
+                self.handle.Close()
+                self.handle = None
+            if isinstance(exc, Exception):
+                raise OSError("Could not create owned process tree.") from exc
+            raise
+        return self
+
+    def terminate(self) -> None:
+        if self.handle is not None:
+            try:
+                import win32job
+
+                win32job.TerminateJobObject(self.handle, 1)
+                deadline = time.monotonic() + 5
+                while win32job.QueryInformationJobObject(
+                    self.handle, win32job.JobObjectBasicAccountingInformation
+                )["ActiveProcesses"]:
+                    if time.monotonic() >= deadline:
+                        raise OSError("Owned process tree did not terminate in time.")
+                    time.sleep(0.01)
+            except Exception as exc:
+                raise OSError("Could not terminate owned process tree.") from exc
+
+    def __exit__(self, *_exc) -> None:
+        if self.handle is not None:
+            self.handle.Close()
+            self.handle = None
+
+
+def join_process_job(name: str) -> None:
+    """Join before spawning children; close our handle so the owner controls lifetime."""
+    if os.name != "nt" or not name.startswith("Local\\KseniaRequest-"):
+        raise OSError("Missing supported process-tree owner.")
+    import win32api
+    import win32job
+
+    handle = win32job.OpenJobObject(win32job.JOB_OBJECT_ASSIGN_PROCESS, False, name)
+    try:
+        win32job.AssignProcessToJobObject(handle, win32api.GetCurrentProcess())
+    finally:
+        handle.Close()
 
 
 def _kernel32():

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import ipaddress
 import json
+import os
 import re
 import socket
 import sys
@@ -560,6 +561,11 @@ async def process_request(context, mode: str, value: str, max_text: int) -> dict
 
 
 async def run() -> int:
+    # Attach the actual interpreter (including a venv redirector's child) before
+    # importing Playwright or starting any child process. Failure is fail-closed.
+    from butler.processes import join_process_job
+
+    join_process_job(os.environ.get("KSENIA_BROWSER_JOB", ""))
     args = parse_args()
     value = sys.stdin.read() if args.value_stdin else str(args.value or "")
     from playwright.async_api import async_playwright

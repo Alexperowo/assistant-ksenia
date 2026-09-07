@@ -608,7 +608,9 @@ class ResearchCoordinator:
         def execute(name: str, arguments: dict[str, Any]) -> AgentToolEvent:
             if control is not None:
                 control.checkpoint()
-            result = session.tools.execute(name, arguments, confirmed=confirmed)
+            result = session.tools.execute(name, arguments, confirmed=confirmed, **(
+                {"checkpoint": control.checkpoint} if control is not None else {}
+            ))
             return AgentToolEvent(name, arguments, result)
 
         ordered_search_events: list[AgentToolEvent | None] = [None] * len(queries)

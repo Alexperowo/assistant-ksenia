@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import socket
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -84,15 +85,91 @@ class BrowserSafetyTests(unittest.TestCase):
             reader.max_text = 1000
             reader.persistent = False
             secret_query = "очень личный поисковый запрос"
-            completed = __import__("subprocess").CompletedProcess(
-                args=[], returncode=0, stdout=json.dumps({"results": []}), stderr=""
-            )
-            with patch("butler.browser.subprocess.run", return_value=completed) as run:
+            process = Mock(returncode=0, args=[])
+            process.poll.return_value = 0
+            process.communicate.return_value = (json.dumps({"results": []}), "")
+            with (
+                patch("butler.browser.OwnedProcessJob"),
+                patch("butler.browser.subprocess.Popen", return_value=process) as run,
+            ):
                 reader.read("search", secret_query)
             command = run.call_args.args[0]
             self.assertNotIn(secret_query, command)
             self.assertIn("--value-stdin", command)
-            self.assertEqual(run.call_args.kwargs["input"], secret_query)
+            self.assertEqual(process.communicate.call_args_list[0].kwargs["input"], secret_query)
+
+    def assert_worker_tree_reaped(self, outcome):
+        from butler.tasking import TaskCancelled
+        from butler.processes import process_image_path
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            worker = scripts / "worker.py"
+            marker = root / "child.pid"
+            # A real cooperating worker and child, but no network or user browser.
+            worker.write_text(
+                "import os,sys,subprocess,time\n"
+                "from pathlib import Path\n"
+                "from butler.processes import join_process_job,current_process_image_path\n"
+                "join_process_job(os.environ['KSENIA_BROWSER_JOB'])\n"
+                "sys.stdin.read()\n"
+                "child=subprocess.Popen([str(current_process_image_path()),'-c','import time; time.sleep(60)'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+                "Path('child.pid').write_text(str(child.pid))\n"
+                + ("print('{}')\n" if outcome == "success" else "time.sleep(60)\n"),
+                encoding="utf-8",
+            )
+            reader = object.__new__(BrowserReader)
+            reader.settings = SimpleNamespace(raw={"diagnostics": {"enabled": False}})
+            reader.python = Path(sys.executable)
+            reader.executable = Path(sys.executable)
+            reader.profile_dir = root / "profile"
+            reader.headless = True
+            reader.worker = worker
+            reader.timeout = 3 if outcome == "timeout" else 10
+            reader.max_text = 100
+            child_pid = []
+
+            def checkpoint():
+                if marker.exists():
+                    text = marker.read_text()
+                    if text:
+                        child_pid.append(int(text))
+                        if outcome == "cancel":
+                            raise TaskCancelled("Cancel owned request")
+
+            if outcome == "success":
+                self.assertEqual(reader._read_once("search", "query", checkpoint=checkpoint), {})
+            else:
+                with self.assertRaises(TaskCancelled if outcome == "cancel" else BrowserError):
+                    reader._read_once("search", "query", checkpoint=checkpoint)
+            if not child_pid and marker.exists():
+                child_pid.append(int(marker.read_text()))
+            self.assertTrue(child_pid)
+            self.assertIsNone(process_image_path(child_pid[0]))
+
+    @unittest.skipUnless(os.name == "nt", "Windows process-tree integration")
+    def test_cancelled_request_reaps_worker_and_descendant(self):
+        self.assert_worker_tree_reaped("cancel")
+
+    @unittest.skipUnless(os.name == "nt", "Windows process-tree integration")
+    def test_timed_out_request_reaps_worker_and_descendant(self):
+        self.assert_worker_tree_reaped("timeout")
+
+    @unittest.skipUnless(os.name == "nt", "Windows process-tree integration")
+    def test_completed_request_reaps_leftover_descendant(self):
+        self.assert_worker_tree_reaped("success")
+
+    def test_tree_setup_failure_does_not_launch_unmanaged_worker(self):
+        reader = object.__new__(BrowserReader)
+        with (
+            patch("butler.browser.OwnedProcessJob", side_effect=OSError("Job unavailable")),
+            patch("butler.browser.subprocess.Popen") as launch,
+        ):
+            with self.assertRaises(BrowserError):
+                reader._read_once("search", "query")
+        launch.assert_not_called()
 
     def test_send_button_is_not_a_normal_browser_action(self):
         risk = BrowserReader._action_risk(

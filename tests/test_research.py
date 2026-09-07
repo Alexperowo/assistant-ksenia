@@ -93,6 +93,7 @@ class ResearchTests(unittest.TestCase):
         with self.assertRaises(TaskCancelled):
             coordinator.run("Найди новости", session, control=control, on_status=on_status)
         self.assertEqual(session.tools.execute.call_count, 1)
+        self.assertEqual(session.tools.execute.call_args.kwargs["checkpoint"], control.checkpoint)
         session.record_exchange.assert_not_called()
 
     @patch("butler.research.complete_chat")

@@ -42,19 +42,19 @@
 | `developer.py` | fail-closed выбор command backend, проверка argv/workspace и явно небезопасный legacy host-runner | неизвестный backend не запускается; `unsafe_host` требует точного признания риска; shell запрещён |
 | `journal.py` | сериализованная транзакция mutation + undo-record, резервная копия, SHA-256 и безопасная отмена файлов |
 | `sensitive_data.py` | запрет секретных путей и расширений |
-| `processes.py` | идентификация и подтверждённое завершение Windows-процесса |
+| `processes.py` | идентификация Windows-процесса; `OwnedProcessJob`/`join_process_job` для владения деревом отдельного browser worker, без претензии на sandbox |
 | `procedures.py` | чтение проверенных процедур без traversal |
 
 ## Интернет и Windows
 
 | Файл | Ответственность |
 |---|---|
-| `browser.py` | родительский безопасный API дочернего Chromium |
+| `browser.py` | родительский API Chromium; read-only checkpoint, timeout и завершение собственного дерева worker |
 | `research.py` | запрос, выбор источников, параллельное чтение в стабильном порядке и синтез через stage-specific request modes |
 | `weather.py` | текущая погода без LLM: извлечение города, проверяемые падежные кандидаты, geocoding/current JSON и русская фраза | публичный HTTPS, redirect deny, bounded JSON; неизвестный город не угадывать |
 | `windows_automation.py` | UI Automation высокого уровня |
 | `windows_bridge.py` | окна, клавиатура, указатель и низкоуровневый Win32 |
-| `scripts/browser_worker.py` | Chromium, поиск и SSRF/redirect guard в отдельном процессе |
+| `scripts/browser_worker.py` | Chromium, поиск и SSRF/redirect guard; one-shot worker вступает в private job до импорта Playwright |
 | `scripts/windows_uia_worker.py` | изоляция потенциально зависающей UI Automation |
 
 ## Голос

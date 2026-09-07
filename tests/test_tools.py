@@ -12,6 +12,27 @@ from butler.windows_bridge import WindowsBridgeError
 
 
 class ToolExecutorTests(unittest.TestCase):
+    def test_readonly_browser_receives_task_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = load_settings()
+            raw = copy.deepcopy(original.raw)
+            raw["developer"]["workspace_dir"] = "workspace"
+            executor = ToolExecutor(replace(original, root=root, raw=raw, runtime_dir=root / "runtime"))
+            checkpoint = MagicMock()
+            with patch.object(executor.browser, "read", return_value={"results": []}) as read:
+                for name, arguments in (
+                    ("browser_search", {"query": "public documentation"}),
+                    ("browser_read_page", {"url": "https://example.test/page"}),
+                ):
+                    with self.subTest(tool=name):
+                        result = executor.execute(name, arguments, checkpoint=checkpoint)
+                        self.assertTrue(result.ok)
+                        self.assertIs(read.call_args.kwargs["checkpoint"], checkpoint)
+                read.side_effect = TaskCancelled("Cancelled inside browser")
+                with self.assertRaises(TaskCancelled):
+                    executor.execute("browser_search", {"query": "query"}, checkpoint=checkpoint)
+
     def test_workspace_search_observes_cooperative_cancellation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
