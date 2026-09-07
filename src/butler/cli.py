@@ -1443,7 +1443,7 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                 ):
                     speech.say_and_wait("Задача отменена.")
             continue
-        except ChatError as exc:
+        except (ChatError, ModelManagerError) as exc:
             if live_output is not None:
                 with trace_scope(
                     trace_id=trace_id,
@@ -1455,6 +1455,8 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                     live_snapshot.generated_text,
                     live_snapshot.spoken_text,
                 )
+            else:
+                speech.stop()
             diagnostic_exception(
                 settings,
                 "voice_agent",
@@ -1476,6 +1478,7 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                     live_snapshot.spoken_text if live_snapshot is not None else None
                 ),
                 error=str(exc),
+                confirmation=None,
                 resumable=True,
             )
             print(f"Ошибка агента: {exc}")
@@ -1625,11 +1628,13 @@ def _agent_chat(settings, speech: SpeechAnnouncer) -> int:
         except TaskCancelled:
             print("Задача отменена.\n")
             speech.say("Задача отменена.")
-        except ChatError as exc:
+        except (ChatError, ModelManagerError) as exc:
             if "task" in locals():
                 task_store.transition(
-                    task.id, TaskState.FAILED, "Ошибка", error=str(exc), resumable=True
+                    task.id, TaskState.FAILED, "Ошибка", error=str(exc),
+                    confirmation=None, resumable=True,
                 )
+            speech.stop()
             print(f"Ошибка агента: {exc}")
             speech.say(_spoken_agent_error(exc))
 
