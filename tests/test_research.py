@@ -16,10 +16,111 @@ from butler.research import (
     select_research_mode,
 )
 from butler.config import load_settings
+from butler.chat import ChatError
+from butler.tasking import TaskCancelled
 from butler.tools import ToolResult
+from butler.user_messages import spoken_agent_error
 
 
 class ResearchTests(unittest.TestCase):
+    def failed_search(self, results, *, control=None):
+        settings = SimpleNamespace(raw={"diagnostics": {"enabled": False}})
+        coordinator = ResearchCoordinator(settings)
+        coordinator._queries = Mock(return_value=["planned query"])
+        session = SimpleNamespace(tools=Mock(), record_exchange=Mock())
+        session.tools.execute.side_effect = results
+        statuses = []
+        with patch("butler.research.complete_chat") as llm:
+            with self.assertRaises(ChatError) as failure:
+                coordinator.run("Найди новости", session, on_status=statuses.append, control=control)
+            llm.assert_not_called()
+        session.record_exchange.assert_not_called()
+        return failure.exception, session.tools.execute, statuses
+
+    def test_unavailable_search_is_not_retried_as_bad_query(self):
+        failed = ToolResult(False, "error", "timeout https://host/?token=secret")
+        error, execute, statuses = self.failed_search([failed, failed])
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(error.code, "search_unavailable")
+        self.assertNotIn("Уточняю поиск", " ".join(statuses))
+        self.assertNotIn("уточните", str(error).casefold())
+        self.assertNotIn("secret", spoken_agent_error(error))
+        self.assertIn("не сработал", spoken_agent_error(error))
+
+    def test_search_policy_failure_is_not_retried_or_called_empty(self):
+        for status in ("denied", "confirmation_required"):
+            with self.subTest(status=status):
+                failed = ToolResult(False, status, "private policy detail")
+                error, execute, statuses = self.failed_search([failed, failed])
+                self.assertEqual(execute.call_count, 1)
+                self.assertEqual(error.code, status)
+                self.assertNotIn("private", spoken_agent_error(error))
+                self.assertNotIn("Уточняю поиск", " ".join(statuses))
+
+    def test_empty_valid_search_has_one_relevance_retry(self):
+        empty = ToolResult(True, "ok", "done", {"results": []})
+        error, execute, _ = self.failed_search([empty, empty])
+        self.assertEqual(execute.call_count, 2)
+        self.assertEqual(error.code, "no_sources")
+        self.assertIn("уточните", spoken_agent_error(error).casefold())
+
+    def test_failed_relevance_retry_is_not_reported_as_empty_search(self):
+        empty = ToolResult(True, "ok", "done", {"results": []})
+        error, execute, _ = self.failed_search([empty, ToolResult(False, "error", "timeout")])
+        self.assertEqual(execute.call_count, 2)
+        self.assertEqual(error.code, "search_unavailable")
+
+    def test_malformed_search_payload_is_not_an_empty_result(self):
+        for payload in (None, {}, {"results": "invalid"}):
+            with self.subTest(payload=payload):
+                malformed = ToolResult(True, "ok", "done", payload)
+                error, execute, _ = self.failed_search([malformed, malformed])
+                self.assertEqual(execute.call_count, 1)
+                self.assertEqual(error.code, "search_unavailable")
+
+    def test_cancellation_prevents_relevance_retry(self):
+        settings = SimpleNamespace(raw={"diagnostics": {"enabled": False}})
+        coordinator = ResearchCoordinator(settings)
+        coordinator._queries = Mock(return_value=["planned query"])
+        session = SimpleNamespace(tools=Mock(), record_exchange=Mock())
+        session.tools.execute.return_value = ToolResult(True, "ok", "done", {"results": []})
+        control = Mock()
+
+        def on_status(status):
+            if status.startswith("Проверяю другой поисковый запрос"):
+                control.checkpoint.side_effect = TaskCancelled("Cancelled before retry")
+
+        with self.assertRaises(TaskCancelled):
+            coordinator.run("Найди новости", session, control=control, on_status=on_status)
+        self.assertEqual(session.tools.execute.call_count, 1)
+        session.record_exchange.assert_not_called()
+
+    @patch("butler.research.complete_chat")
+    def test_one_failed_query_does_not_discard_other_sources(self, llm):
+        settings = SimpleNamespace(raw={"diagnostics": {"enabled": False}})
+        coordinator = ResearchCoordinator(settings)
+        coordinator._queries = Mock(return_value=["failed", "working"])
+        session = SimpleNamespace(tools=Mock(), record_exchange=Mock())
+
+        def execute(name, arguments, confirmed=False):
+            if name == "browser_search":
+                if arguments["query"] == "failed":
+                    return ToolResult(False, "error", "timeout")
+                return ToolResult(True, "ok", "done", {"results": [
+                    {"title": "Новости", "url": "https://news.test/a"},
+                ]})
+            return ToolResult(True, "ok", "done", {
+                "url": arguments["url"], "text": "Проверенные новости. " * 30,
+            })
+
+        session.tools.execute.side_effect = execute
+        llm.return_value = {"choices": [{"message": {"content": "Итог по доступному источнику."}}]}
+        reply = coordinator.run("Найди новости", session)
+        self.assertEqual(reply.text, "Итог по доступному источнику.")
+        self.assertEqual(session.tools.execute.call_count, 3)
+        self.assertEqual(llm.call_count, 1)
+        session.record_exchange.assert_called_once()
+
     def test_fast_research_profile_resolves_stage_service_and_reasoning_mode(self):
         coordinator = ResearchCoordinator(load_settings(), "research_fast")
 

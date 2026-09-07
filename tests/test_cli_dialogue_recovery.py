@@ -13,6 +13,7 @@ from butler.cli import _agent_chat, _voice_agent_active
 from butler.config import ConfigError, load_settings
 from butler.model_manager import ModelManagerError
 from butler.orchestrator import RoutedAgentSession
+from butler.research import ResearchError
 from butler.tasking import DurableTaskStore, TaskState
 from butler.user_messages import spoken_agent_error
 from butler.wake import WakeListenerCancelled
@@ -100,6 +101,12 @@ class CliDialogueRecoveryTests(unittest.TestCase):
 
     def test_voice_clears_failed_chat_state_before_next_turn(self):
         self.assert_recovers(ChatError("Search unavailable"), voice=True)
+
+    def test_voice_continues_after_search_unavailable(self):
+        self.assert_recovers(ResearchError("search_unavailable"), voice=True)
+
+    def test_console_continues_after_search_permission_refusal(self):
+        self.assert_recovers(ResearchError("confirmation_required"), voice=False)
 
     def test_console_does_not_hide_invalid_configuration(self):
         with self.assertRaises(ConfigError):

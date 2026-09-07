@@ -19,6 +19,45 @@ from butler.diagnostics import exception as diagnostic_exception
 from butler.tasking import TaskControl
 
 
+class ResearchError(ChatError):
+    """Known research outcomes with fixed, safe messages for every interface."""
+
+    _MESSAGES = {
+        "search_unavailable": (
+            "Поиск сейчас не сработал. Можно повторить позже или задать другой вопрос."
+        ),
+        "no_sources": "Подходящие источники не найдены. Уточните запрос или задайте другой вопрос.",
+        "denied": "Поиск остановлен: действие запрещено настройками безопасности.",
+        "confirmation_required": (
+            "Поиск не выполнен: внешний запрос требует отдельного подтверждения."
+        ),
+    }
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(self._MESSAGES[code])
+
+
+def _search_payload_valid(event: AgentToolEvent) -> bool:
+    result = event.result
+    return (
+        result.ok
+        and isinstance(result.data, dict)
+        and isinstance(result.data.get("results"), list)
+    )
+
+
+def _search_failure_code(events: list[AgentToolEvent]) -> str:
+    statuses = {event.result.status for event in events if not event.result.ok}
+    if "denied" in statuses:
+        return "denied"
+    if "confirmation_required" in statuses:
+        return "confirmation_required"
+    if not events or not all(_search_payload_valid(event) for event in events):
+        return "search_unavailable"
+    return "no_sources"
+
+
 _WEB_SIGNALS = (
     "в интернете",
     "в сети",
@@ -567,6 +606,8 @@ class ResearchCoordinator:
         source_limit = _source_limit_for_request(request, mode)
 
         def execute(name: str, arguments: dict[str, Any]) -> AgentToolEvent:
+            if control is not None:
+                control.checkpoint()
             result = session.tools.execute(name, arguments, confirmed=confirmed)
             return AgentToolEvent(name, arguments, result)
 
@@ -585,12 +626,13 @@ class ResearchCoordinator:
             event.result.data
             for event in events
             if event.name == "browser_search"
-            and event.result.ok
-            and isinstance(event.result.data, dict)
+            and _search_payload_valid(event)
         ]
         sources = _select_sources(search_payloads, source_limit, request)
         minimum_sources = min(2, source_limit)
-        if len(sources) < minimum_sources:
+        # A relevance retry is meaningful only after valid search responses.
+        # Transport/policy failures must not cause another round of the same wait.
+        if len(sources) < minimum_sources and all(_search_payload_valid(event) for event in events):
             # A model-generated query can be ambiguous (for example, VR may be
             # interpreted as a bank abbreviation). One deterministic retry is
             # faster and safer than asking the LLM to reason over irrelevant pages.
@@ -600,14 +642,16 @@ class ResearchCoordinator:
                     "virtual reality VR Meta Quest spatial computing metaverse latest news"
                 )
             if fallback_query not in queries:
-                announce("Уточняю поиск: первые результаты оказались неточными")
+                announce("Проверяю другой поисковый запрос: источников недостаточно")
                 retry_event = execute("browser_search", {"query": fallback_query[:300]})
                 events.append(retry_event)
-                if retry_event.result.ok and isinstance(retry_event.result.data, dict):
+                if _search_payload_valid(retry_event):
                     search_payloads.append(retry_event.result.data)
                 sources = _select_sources(search_payloads, source_limit, request)
         if not sources:
-            raise ChatError("Поиск не вернул доступных источников. Попробуйте уточнить запрос.")
+            code = _search_failure_code(events)
+            diagnostic_event(self.settings, "research", "search_failed", reason=code)
+            raise ResearchError(code)
 
         announce(
             "Открываю параллельно "

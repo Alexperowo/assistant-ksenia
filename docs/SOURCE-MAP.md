@@ -12,7 +12,7 @@
 | `atomic_io.py` | атомарная запись/копирование, fsync и межпроцессные file locks | persistent JSON, журналы, диагностика и файловые транзакции |
 | `schema_validation.py` | строгая проверка вложенных аргументов tools до Permission Broker и executor | `agent`, `tools` |
 | `instance_lock.py` | запрет второго экземпляра критического интерфейса | CLI/LAN/voice |
-| `user_messages.py` | безопасные короткие сообщения об ошибках | CLI и голос |
+| `user_messages.py` | безопасные короткие сообщения об ошибках; фиксированные причины `ResearchError` без внутреннего текста browser exception | CLI и голос |
 
 ## Модели и агентность
 
