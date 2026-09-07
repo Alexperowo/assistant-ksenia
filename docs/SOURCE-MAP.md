@@ -19,7 +19,7 @@
 | Файл | Ответственность | Критические инварианты |
 |---|---|---|
 | `model_manager.py` | одна активная крупная LLM на primary service, независимые малые model services, resident pool/coordinator, команда DFlash/MTP/mmproj, PID, порт и целостность всех нужных GGUF | неизвестный процесс не завершать; loopback; уникальный endpoint/state; API-key; primary/residents взаимоисключены; восстановить только точный прежний набор; size + полный SHA-256 до первого Popen |
-| `chat.py` | OpenAI-совместимый HTTP, явный model service/request mode, stream, tokenizer, system normalization и отменяемое чтение ответа | один первый system; timeout; локальный ключ; request policy из конфигурации; checkpoint даже при зависшем socket read |
+| `chat.py` | OpenAI-совместимый HTTP, model service/request mode, SSE/tokenizer; controlled completion headers и polling socket reader | один первый system; timeout; локальный ключ; checkpoint headers/body в controlled completion; legacy openers требуют отдельной проверки |
 | `ui_mate.py` | screenshot → строго типизированное предложение одного GUI-действия без исполнения | разрешённый XML protocol; один tool; coordinate 0–999; неизвестные/лишние параметры fail-closed; не генерировать Python-код |
 | `ui_deliberation.py` | независимая policy-проверка UI-действия второй резидентной моделью и максимум одна коррекция | reviewer ничего не исполняет; битый JSON блокирует действие; approval не заменяет Permission Broker и не подтверждает координаты |
 | `screen_capture.py` | read-only physical virtual-desktop PNG, monitor/work/DPI snapshot и normalized→physical mapping | thread Per-Monitor-V2; image/bounds обязаны совпасть; смена layout и координата в gap дают отказ; содержимое экрана не журналируется |
@@ -100,6 +100,7 @@
 | `performance.py` | чтение ротированного JSONL, trace waterfall, completeness и статистики p50/p95 |
 | `scripts/performance-report.py` | человеко- и машиночитаемый отчёт реальных задержек |
 | `scripts/test_model_cancellation.py` | живой gate отмены LLM-stream и фактического завершения HTTP reader |
+| `tests/test_chat_connection.py` | настоящий loopback HTTP: delayed/partial headers, pre-cancel, body cancel, HTTP errors, redirects, proxy и reader cleanup |
 | `scripts/runtime_context_benchmark.py` | безопасный временный sweep context, load/TTFT/cache/RAM/VRAM и восстановление исходной модели |
 | `scripts/benchmark_audio_full_duplex.py` | физический A/B Xenia/AEC, near-end WAV и RMS-метрики без изменения пользовательской конфигурации |
 | `scripts/check.ps1` | объединённый quality gate |

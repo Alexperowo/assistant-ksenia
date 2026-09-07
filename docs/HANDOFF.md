@@ -6,8 +6,9 @@
 в верхней записи `AUDIT.md`. Это НЕ исправление непрерывного Live: wake после
 обычного ответа всё ещё требуется, фоновое исследование пока блокирует разговор.
 Далее закончить реестр C0 и оставшиеся fault-сценарии C1, затем C2/C3/C4.
-Не считать старые зелёные runtime-gates свежими: текущий повтор без запущенных
-моделей явно пропускает active LLM/cancellation, а также выключенный RAG.
+Не считать старые зелёные runtime-gates свежими. Последний gate прошёл 484 теста,
+active UI-Mate completion, LLM cancellation и голос/LAN; RAG явно пропущен.
+Временная модель после проверки остановлена; точные условия — наверху AUDIT.
 Временные доказательства — в существующем `runtime/audit`, не в новых корневых папках.
 
 Следующее дополнение C1: типизированные ошибки исследования и безопасные голосовые
@@ -18,9 +19,11 @@ AUDIT. Read-only browser subprocess теперь получает checkpoint в�
 на настоящих Windows-процессах и отдельном Chromium smoke, но не является sandbox.
 DNS admission read-only страницы теперь выполняется внутри job до Chromium:
 блокирующий resolver проверен реальным worker при timeout/отмене, а private/mixed
-DNS отвергается до запуска Playwright. Следующий открытый участок —
-`chat.complete_chat`: `urlopen(timeout=600)` ждёт заголовки до отменяемого reader.
-Нужны управление этим ожиданием, затем общий research budget, остальные
+DNS отвергается до запуска Playwright. `chat.complete_chat` с checkpoint теперь
+проверяет отмену до отправки и во время заголовков, закрывает socket/reader,
+не ждёт тело HTTP-ошибки. Проверки — в `tests/test_chat_connection.py`.
+Нужны общий research budget, остальные connect/send fault-сценарии и аудит
+старых opener-путей (`stream_chat`, tokenizer, отсутствие checkpoint), остальные
 fault-сценарии и отдельная отмена активного persistent browser-control. Не вводить
 таймер только между этапами и не выдавать его за сквозной deadline.
 

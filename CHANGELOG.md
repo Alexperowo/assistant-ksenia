@@ -1,5 +1,17 @@
 # История изменений
 
+## 7 сентября 2026 — отмена completion до HTTP-заголовков
+
+- Fixed: `complete_chat` с checkpoint не отправляет уже отменённый запрос,
+  проверяет отмену во время заголовков и не читает зависающее тело HTTP-ошибки.
+- Transport: owned loopback socket, Windows polling reader с сохранением
+  частичных строк, прежний HTTP/SSE parser, без новых зависимостей. В этом пути
+  исключены proxy/redirect; reader diagnostics различают connect_headers/body.
+- Tests: девять loopback HTTP сценариев, включая десять отмен подряд, late body
+  cancellation, fragmented headers и bounded header timeout.
+- Scope: общий research deadline, connect/send fault coverage и legacy opener
+  в других API остаются открытыми; непрерывный Live не объявляется завершённым.
+
 ## 7 сентября 2026 — DNS чтения страниц внутри отменяемого worker
 
 - Fixed: родитель больше не блокируется на DNS admission read-only страницы;

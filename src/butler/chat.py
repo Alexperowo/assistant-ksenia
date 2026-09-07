@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import http.client
+import io
 import queue
 import re
 import socket
@@ -11,6 +13,7 @@ import urllib.request
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from butler.config import ModelRequestMode, ModelService, Settings
 from butler.diagnostics import current_trace_fields
@@ -47,9 +50,10 @@ _STUCK_READER_THREADS = 0
 
 
 class _ReaderObservation:
-    def __init__(self, diagnostics_source: object, request_id: str) -> None:
+    def __init__(self, diagnostics_source: object, request_id: str, *, stage: str = "body") -> None:
         self.diagnostics_source = diagnostics_source
         self.request_id = request_id
+        self.stage = stage
         self.trace_fields = current_trace_fields()
         self.started = time.monotonic()
         self.finished = threading.Event()
@@ -80,6 +84,7 @@ def _reader_started(observation: _ReaderObservation) -> None:
             observation.diagnostics_source,
             "chat",
             "reader_thread_started",
+            stage=observation.stage,
             request_id=observation.request_id,
             **observation.trace_fields,
             **counts,
@@ -103,6 +108,7 @@ def _reader_finished(observation: _ReaderObservation) -> None:
             observation.diagnostics_source,
             "chat",
             "reader_thread_finished",
+            stage=observation.stage,
             request_id=observation.request_id,
             duration_ms=round((time.monotonic() - observation.started) * 1000),
             cancelled=observation.cancelled,
@@ -116,6 +122,7 @@ def _cancel_reader(
     response: object,
     *,
     wait_seconds: float = 0.1,
+    response_socket: socket.socket | None = None,
 ) -> None:
     global _CANCELLED_STREAMS, _STUCK_READER_THREADS
     cancel_started = time.monotonic()
@@ -128,7 +135,11 @@ def _cancel_reader(
     except (AttributeError, TypeError):
         pass
     raw = getattr(getattr(response, "fp", None), "raw", None)
-    response_socket = getattr(raw, "_sock", None)
+    reader_cancelled = getattr(raw, "cancelled", None)
+    if isinstance(reader_cancelled, threading.Event):
+        reader_cancelled.set()
+    if response_socket is None:
+        response_socket = getattr(raw, "_sock", None)
     socket_shutdown = False
     if response_socket is not None:
         try:
@@ -163,6 +174,7 @@ def _cancel_reader(
             observation.diagnostics_source,
             "chat",
             "reader_shutdown_observed",
+            stage=observation.stage,
             level="info" if stopped else "warning",
             request_id=observation.request_id,
             reader_shutdown_latency_ms=round(
@@ -191,6 +203,152 @@ def _close_response_if_owned(response: object | None) -> None:
     ):
         return
     _close_response(response)
+
+
+class _CompletionSocketFile(io.RawIOBase):
+    """Preserve partial HTTP lines while polling an owned socket for cancellation."""
+
+    def __init__(self, source: socket.socket, cancelled: threading.Event):
+        super().__init__()
+        self.timeout = source.gettimeout()
+        self._sock = None
+        try:
+            self._sock = source.dup()
+            self._sock.settimeout(0.05)
+        except BaseException:
+            self.close()
+            raise
+        self.cancelled = cancelled
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        deadline = time.monotonic() + self.timeout if self.timeout is not None else None
+        while not self.cancelled.is_set():
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("Local model response read timed out.")
+            try:
+                return self._sock.recv_into(buffer)
+            except TimeoutError:
+                # No bytes were consumed on this recv; BufferedReader retains
+                # prior fragments, unlike retrying a timed-out socket.makefile.
+                continue
+        raise OSError("Completion socket read cancelled.")
+
+    def close(self):
+        try:
+            if self._sock is not None:
+                self._sock.close()
+        finally:
+            super().close()
+
+
+class _CompletionReadSocket:
+    def __init__(self, source: socket.socket, cancelled: threading.Event):
+        self.source = source
+        self.cancelled = cancelled
+
+    def makefile(self, mode):
+        if mode != "rb":
+            raise ValueError("Completion response only supports binary reading.")
+        return io.BufferedReader(_CompletionSocketFile(self.source, self.cancelled))
+
+
+def _open_completion_response(
+    request: urllib.request.Request,
+    *,
+    checkpoint: Callable[[], None] | None,
+    timeout: float,
+    diagnostics_source: object,
+    request_id: str,
+):
+    """Own a loopback socket before connect/send/headers, not only the body."""
+    if checkpoint is None:
+        return urllib.request.urlopen(request, timeout=timeout)
+    checkpoint()
+    parsed = urlsplit(request.full_url)
+    host = parsed.hostname
+    if parsed.scheme != "http" or host not in {"127.0.0.1", "localhost", "::1"}:
+        raise OSError("Completion transport requires a loopback HTTP endpoint.")
+    if parsed.username or parsed.password:
+        raise OSError("Credentials in the model endpoint URL are forbidden.")
+    # localhost is pinned to loopback IPv4, with no DNS/proxy/redirect machinery.
+    host = "127.0.0.1" if host == "localhost" else host
+    port = parsed.port or 80
+    connection = http.client.HTTPConnection(host, port, timeout=timeout)
+    owned_socket = socket.socket(socket.AF_INET6 if host == "::1" else socket.AF_INET, socket.SOCK_STREAM)
+    owned_socket.settimeout(timeout)
+    connection.sock = owned_socket
+    connection.auto_open = 0  # Never reconnect after cancellation closes our socket.
+    observation = _ReaderObservation(diagnostics_source, request_id, stage="connect_headers")
+    messages: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+    cancelled = threading.Event()
+    received = []
+    connection.response_class = lambda sock, **kwargs: http.client.HTTPResponse(
+        _CompletionReadSocket(sock, cancelled), **kwargs
+    )
+
+    def open_response() -> None:
+        response = None
+        try:
+            owned_socket.connect((host, port))
+            if cancelled.is_set():
+                raise OSError("Completion request cancelled before send.")
+            headers = dict(request.header_items())
+            headers["Connection"] = "close"
+            connection.request(request.get_method(), request.selector, request.data, headers)
+            response = connection.getresponse()
+            received.append(response)
+            # The response file owns a duplicate socket handle. The connection
+            # releases its original handle; the body reader owns the remaining one.
+            if connection.sock is not None:
+                connection.sock.close()
+                connection.sock = None
+            messages.put(("response", response))
+        except BaseException as exc:
+            messages.put(("error", exc))
+        finally:
+            if response is None or cancelled.is_set():
+                if response is not None:
+                    response.close()
+                connection.close()
+            _reader_finished(observation)
+
+    _reader_started(observation)
+    worker = threading.Thread(target=open_response, daemon=True)
+    deadline = time.monotonic() + timeout
+    try:
+        worker.start()
+    except BaseException:
+        connection.close()
+        _reader_finished(observation)
+        raise
+    try:
+        while True:
+            checkpoint()
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Local model did not send HTTP headers in time.")
+            try:
+                kind, value = messages.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if kind == "error":
+                if isinstance(value, http.client.HTTPException):
+                    raise OSError("Invalid HTTP response from local model.") from value
+                raise value
+            checkpoint()
+            response = value
+            break
+    except BaseException:
+        cancelled.set()
+        _cancel_reader(observation, connection, response_socket=owned_socket)
+        if observation.finished.is_set() and received:
+            _close_response(received[0])
+        raise
+    if not 200 <= response.status < 300:
+        raise urllib.error.HTTPError(request.full_url, response.status, response.reason, response.headers, response)
+    return response
 
 
 def _optional_nonnegative_int(value: object) -> int | None:
@@ -723,7 +881,10 @@ def complete_chat(
         )
 
     try:
-        response = urllib.request.urlopen(request, timeout=600)
+        response = _open_completion_response(
+            request, checkpoint=checkpoint, timeout=600,
+            diagnostics_source=settings, request_id=request_id,
+        )
         try:
             if not streaming:
                 value = json.loads(response.read().decode("utf-8", errors="replace"))
@@ -789,6 +950,11 @@ def complete_chat(
             duration_ms=round((time.monotonic() - started) * 1000),
             request_id=request_id,
         )
+        if checkpoint is not None:
+            # An error body can stall too. Status is enough for a safe user error;
+            # do not start a second unbounded read after receiving failure headers.
+            exc.close()
+            raise ChatError(f"Сервер модели вернул ошибку {exc.code}.") from exc
         detail = exc.read().decode("utf-8", errors="replace")
         raise ChatError(f"Сервер модели вернул ошибку {exc.code}: {detail}") from exc
     except json.JSONDecodeError as exc:

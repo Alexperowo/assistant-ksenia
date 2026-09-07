@@ -20,6 +20,11 @@ One-shot browser worker использует private Windows Job Object с
 сохраняются независимо; persistent browser-control этим механизмом не заменён.
 
 - LLM и embeddings привязаны только к loopback и защищены локальным ключом.
+- Управляемый opener `complete_chat(checkpoint=...)` дополнительно проверяет
+  loopback HTTP endpoint, не использует environment proxy, не следует redirect
+  и не отправляет запрос при уже установленной отмене. Авторизация и payload
+  остаются прежними; тело HTTP-ошибки не читается/не озвучивается. Это свойство
+  именно управляемого completion-пути, не всех HTTP-клиентов проекта.
 - LAN-панель — отдельный HTTP-сервис для доверенной домашней сети с PIN, сессией и rate limit.
 - LAN нельзя публиковать в интернет; TLS пока отсутствует.
 - Browser worker запрещает `file://`, localhost, приватные/link-local IP, `.local` и URL с учётными данными.

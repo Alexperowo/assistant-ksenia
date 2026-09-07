@@ -22,9 +22,11 @@
   реальные дочерние процессы Windows и отдельный Chromium smoke.
 - [x] Перенести DNS admission чтения страницы внутрь owned worker: зависший DNS
   отменяется/завершается по timeout; запреты SSRF проверяются до Chromium.
-- [ ] Общий research deadline остаётся открытым: `complete_chat` может ждать
-  HTTP-заголовки до 600 с до входа в отменяемый stream reader. Нужны отдельный
-  управляемый транспортный этап и общий бюджет, а не только таймер между tools.
+- [x] `complete_chat` с checkpoint: отмена до отправки и во время HTTP-заголовков,
+  native loopback regression, отказ без чтения зависшего тела HTTP-ошибки.
+- [ ] Общий research deadline остаётся открытым. Нужны общий бюджет этапов,
+  остальные connect/send fault-сценарии и аудит legacy HTTP opener-путей
+  (`stream_chat`, tokenizer, вызовы без checkpoint), не таймер только между tools.
   Persistent browser-control и другие активные действия требуют
   отдельного контракта остановки без обещания rollback.
 - [ ] Исправить Fast/Thinking и универсальные пользовательские настройки (C2).

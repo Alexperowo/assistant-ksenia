@@ -10,6 +10,16 @@
 
 ## Уровни
 
+`tests/test_chat_connection.py` использует настоящий временный loopback HTTPServer,
+без загрузки модели. Девять сценариев покрывают десять последовательных отмен
+задержанных headers с нулевыми active/stuck readers, pre-cancel без отправки,
+передачу SSE, fragmented headers с паузами больше poll, отмену после первого
+токена, header timeout, 503 без ожидания error body, запрет redirect/remote endpoint
+и обход влияния environment proxy. Сервер/потоки закрываются в finally. Порог
+одна секунда — regression ceiling на искусственном сбое, не SLA Live.
+Для допуска нужен также `test_active_model.py`: он вызывает именно
+`complete_chat` с checkpoint и проверяет настоящий llama.cpp SSE/авторизацию.
+
 Для read-only браузера `tests/test_browser.py` запускает настоящий временный
 Windows worker с дочерним процессом: отмена, timeout и успешный ответ должны
 убирать оставшегося потомка. `tests/test_processes.py` проверяет независимость

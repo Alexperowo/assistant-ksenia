@@ -1,5 +1,48 @@
 # Аудит проекта
 
+## Дополнение 7 сентября 2026 — управляемое ожидание completion headers
+
+Исходная точка: `280a637`. Настоящий временный loopback HTTPServer подтвердил
+четыре отказа старого completion-пути: отмена до заголовков ждала сервер 2,032 с;
+чтение тела HTTP 503 — 2,016 с; pre-cancel всё равно отправлял POST; 302 приводил
+к попытке перехода на другой endpoint. Тестовые запросы не содержали личных данных,
+серверы принадлежали проверке. Внешние адреса не использовались.
+
+`complete_chat(checkpoint=...)` получил private loopback socket до connect/send,
+проверку отмены при ожидании headers и передачу ответа прежнему SSE parser.
+Первый вариант с одним socket.shutdown не прошёл Windows cleanup-test: reader
+оставался активным до ответа сервера. Он не принят. Принятый `RawIOBase` adapter
+владеет duplicate socket handle, опрашивает recv с интервалом 50 мс и сохраняет
+частичные строки через BufferedReader; HTTP framing по-прежнему выполняет
+`http.client.HTTPResponse`. Исходный idle timeout сохраняется. Протокольные API:
+[HTTPConnection/HTTPResponse](https://docs.python.org/3/library/http.client.html)
+и [socket](https://docs.python.org/3/library/socket.html). Новых зависимостей нет.
+
+В управляемом пути pre-cancel запрещает отправку, proxy/redirect исключены,
+HTTP error body не читается; журнал различает reader `connect_headers`/`body`.
+Девять новых тестов покрывают десять последовательных header-cancel с нулевыми
+active/stuck counters, header deadline, частичные заголовки с паузами, отмену
+после первого токена, SSE, HTTP 503, redirect, proxy и запрет remote endpoint.
+
+Полный gate: exit 0, 484/484 и shuffled 17/73/211 без ошибок/пропусков/warnings;
+release/dependencies/Doctor/LAN и Silero→Whisper CUDA (`landmark_recall=1.0`).
+Для настоящей проверки временно запущен UI-Mate `ui_butler/ui_fast`, PID 7876:
+`test_active_model.py` прошёл именно новый completion-путь (ответ «Ксения»,
+0,734 с, context 16384). Штатный отдельный stream cancellation gate также прошёл:
+отмена назначена на 500 мс, возврат/cleanup 532 мс, active/stuck readers 0.
+Последний gate проверяет существующий `stream_chat`, не имитирует зависшие headers.
+RAG остаётся выключенным и явно пропущен. После gate остановлен только проверенный
+собственный PID 7876; запущенных моделей осталось 0. Личная конфигурация не менялась
+(SHA-256 `9E3F6CCD5098877B787548F26612098A57444F7DDEBA0136230588DAD74ED223`).
+Копия отчёта: `runtime/audit/checkpoints/2026-09-07-reliability-start/after-c1-completion-headers.txt`.
+
+Границы: общего research budget ещё нет. Native fault-тесты здесь проверяют
+headers/body, не все connect/send условия. `complete_chat` без checkpoint,
+`stream_chat` и tokenizer сохраняют прежний opener; для них pre-header/proxy/
+redirect-контракт требует отдельного аудита. `localhost` нового пути закреплён
+за IPv4 loopback; IPv6 требует явного адреса и отдельной проверки URL-builder.
+Непрерывный Live, фоновые задачи и пользовательская приёмка не завершены.
+
 ## Дополнение 7 сентября 2026 — отменяемый DNS read-only страницы
 
 Исходная точка: `c06472b`. Подтверждено, что `BrowserReader.read(open)` выполнял
