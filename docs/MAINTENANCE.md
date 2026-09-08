@@ -7,6 +7,8 @@
 - `engine.lock.json` — official/PoolSide backend-ы, commit, CUDA-вариант, patch provenance и SHA-256 распространяемых архивов/runtime-файлов;
 - `runtime-assets.lock.json` — Python, pip, верхнеуровневые библиотеки и голосовые веса;
 - `requirements/*.lock.txt` — точное проверенное Python-окружение;
+- `requirements/ci.lock.txt` — небольшой pinned-набор зависимостей чистого GitHub
+  Actions gate; он не устанавливает модели, CUDA Torch или браузерные веса;
 - `release-manifest.json` — версия проекта и обязательный состав архива.
 
 `UPDATE.cmd` приводит установленную среду к этим одобренным версиям. Чтобы получить новую upstream-версию, сначала выпускается новый архив проекта с обновлёнными lock-файлами и доказательствами совместимости.

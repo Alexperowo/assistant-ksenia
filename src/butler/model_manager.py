@@ -376,8 +376,6 @@ class ModelManager:
                 self.settings, "model_manager", "profile_disabled", level="error", role=role
             )
             raise ModelManagerError(f"Профиль «{role}» отключён в конфигурации.")
-        if not server.is_file():
-            raise ModelManagerError(f"Не найден llama-server backend-а профиля {role}: {server}")
         artifacts = (
             (
                 "model",
@@ -474,6 +472,9 @@ class ModelManager:
                 f"Порт локальной модели {self.service.host}:{self.service.port} уже занят "
                 "неизвестным процессом. Ксения не будет его останавливать."
             )
+
+        if not server.is_file():
+            raise ModelManagerError(f"Не найден llama-server backend-а профиля {role}: {server}")
 
         logs = self.settings.runtime_dir / "logs"
         logs.mkdir(parents=True, exist_ok=True)

@@ -10,6 +10,21 @@
 
 ## Уровни
 
+### GitHub Actions: чистый Windows-контракт
+
+`Windows tests` создаёт чистую Python 3.12.10 среду и перед запуском устанавливает
+только `requirements/ci.lock.txt`. В этом отдельном pinned-наборе есть библиотеки,
+которые нужны самому переносимому тестовому контракту (`numpy`, Pillow, Playwright,
+pywin32 и Hugging Face client), но нет Torch, голосовых/LLM весов, установленного
+Chromium и локальных `llama.cpp` backend-ов. Поэтому CI не выдаёт наличие GPU или
+моделей владельца за проверку, но обязан проверять import, Windows Job Object,
+release contract и весь unit/integration слой в чистом runner.
+
+Перед изменением workflow тестовый набор запускался без зависимостей и красный
+результат не был доказательством дефекта Ксении. Любая новая библиотека, которая
+импортируется тестами, должна попасть в этот CI lock с точной версией либо быть
+устранена из portable test path; не полагаться на предустановленный образ runner.
+
 Research budget: `test_research_budget.py` проверяет общий срок параллельных
 ожиданий, отсутствие reset между этапами, запрет planner fallback и late history,
 paused checkpoint, приоритет явной отмены и валидацию конфигурации. Native

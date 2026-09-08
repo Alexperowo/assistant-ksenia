@@ -1,0 +1,9 @@
+# Minimal, pinned Python dependencies required by the portable Windows test gate.
+# This intentionally excludes Torch, voice weights, Playwright browsers and local
+# llama.cpp backends: CI validates contracts and native Windows process handling,
+# not the owner's GPU/model installation.
+huggingface_hub==1.27.0
+numpy==2.5.1
+pillow==12.3.0
+playwright==1.62.0
+pywin32==312

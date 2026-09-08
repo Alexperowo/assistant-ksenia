@@ -1,5 +1,6 @@
 import threading
 import time
+import os
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -33,10 +34,12 @@ class AtomicIoTests(unittest.TestCase):
             real_open = Path.open
             lock_path = target.with_name(f".{target.name}.lock")
             attempts = 0
+            expected_lock_path = os.path.normcase(str(lock_path.resolve(strict=False)))
 
             def transient_open(path: Path, *args, **kwargs):
                 nonlocal attempts
-                if path == lock_path and attempts == 0:
+                actual_lock_path = os.path.normcase(str(path.resolve(strict=False)))
+                if actual_lock_path == expected_lock_path and attempts == 0:
                     attempts += 1
                     raise PermissionError("transient Windows sharing denial")
                 attempts += 1
