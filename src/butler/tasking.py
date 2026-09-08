@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from butler.atomic_io import atomic_write_text, exclusive_file_lock
 from butler.processes import process_image_path
@@ -280,7 +280,10 @@ class DurableTaskStore:
             resumable=False,
         )
 
-    def checkpoint(self, task_id: str, *, poll_seconds: float = 0.2) -> None:
+    def checkpoint(
+        self, task_id: str, *, poll_seconds: float = 0.2,
+        deadline_check: Callable[[], None] | None = None,
+    ) -> None:
         while True:
             current = self.get(task_id)
             if current is None:
@@ -288,6 +291,8 @@ class DurableTaskStore:
             state = TaskState(str(current["state"]))
             if state == TaskState.CANCELLED:
                 raise TaskCancelled("Задача отменена Александром.")
+            if deadline_check is not None:
+                deadline_check()
             if state != TaskState.PAUSED:
                 return
             time.sleep(max(0.05, min(poll_seconds, 1.0)))
@@ -373,8 +378,10 @@ class TaskControl:
         self.trace_id = trace_id
         self.turn_id = turn_id
 
-    def checkpoint(self) -> None:
-        self.store.checkpoint(self.task_id)
+    def checkpoint(self, *, deadline_check: Callable[[], None] | None = None) -> None:
+        self.store.checkpoint(self.task_id, **(
+            {"deadline_check": deadline_check} if deadline_check is not None else {}
+        ))
 
     def status(self, state: TaskState, text: str) -> None:
         self.store.transition(self.task_id, state, text)

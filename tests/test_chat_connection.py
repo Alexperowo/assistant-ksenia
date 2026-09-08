@@ -76,6 +76,23 @@ def local_model(mode):
 
 
 class CompletionConnectionTests(unittest.TestCase):
+    def test_research_budget_cancels_real_header_wait_without_fallback(self):
+        from butler.research import ResearchCoordinator, ResearchError
+        from unittest.mock import Mock
+        with local_model('stalled') as (settings, _entered, requests):
+            settings.raw['routing'] = {'research_timeout_seconds': {'normal': 0.2}}
+            session = SimpleNamespace(tools=Mock(), record_exchange=Mock())
+            started = time.monotonic()
+            with self.assertRaises(ResearchError) as failure:
+                ResearchCoordinator(settings).run('Найди новости', session)
+            self.assertEqual(failure.exception.code, 'deadline_exceeded')
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertEqual(len(requests), 1)
+            session.tools.execute.assert_not_called()
+            session.record_exchange.assert_not_called()
+            self.assertEqual(_reader_counts()['active_reader_threads'], 0)
+            self.assertEqual(_reader_counts()['stuck_reader_threads'], 0)
+
     def test_cancel_while_waiting_for_headers_stops_transport_worker(self):
         # Repeated real sockets, not a mock urlopen. Old code waits two seconds
         # for the server's headers before consulting checkpoint.

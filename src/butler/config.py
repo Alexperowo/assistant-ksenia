@@ -14,6 +14,25 @@ class ConfigError(RuntimeError):
     pass
 
 
+RESEARCH_TIMEOUT_DEFAULTS = {"fast": 60.0, "normal": 180.0, "deep": 600.0}
+
+
+def research_timeout_seconds(raw: Mapping[str, Any], mode: str) -> float:
+    routing = raw.get("routing", {})
+    if not isinstance(routing, Mapping):
+        raise ConfigError("routing должен быть объектом.")
+    configured = routing.get("research_timeout_seconds", {})
+    if not isinstance(configured, Mapping) or set(configured) - RESEARCH_TIMEOUT_DEFAULTS.keys():
+        raise ConfigError("routing.research_timeout_seconds допускает только fast, normal и deep.")
+    for value in configured.values():
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not 0 < value <= 3600 or not math.isfinite(value)):
+            raise ConfigError("Лимит исследования должен быть числом секунд больше нуля и не больше 3600.")
+    if mode not in RESEARCH_TIMEOUT_DEFAULTS:
+        raise ConfigError("Неизвестный режим лимита исследования.")
+    return float(configured.get(mode, RESEARCH_TIMEOUT_DEFAULTS[mode]))
+
+
 REASONING_LEVELS = {
     "off": ("выключено", "off", None),
     "brief": ("кратко", "on", 256),
@@ -738,6 +757,22 @@ class Settings:
             )
         return self.model(model_role).request_mode(raw_mode)
 
+    def runtime_smoke_request_mode(self, model_role: str) -> ModelRequestMode:
+        """A short direct request independent of an assistant/research role."""
+        profile = self.model(model_role)
+        for mode in profile.request_modes:
+            if not mode.enable_thinking:
+                return ModelRequestMode(
+                    name="runtime_smoke",
+                    enable_thinking=False,
+                    max_tokens=max(64, min(128, mode.max_tokens)),
+                    temperature=0.0,
+                    strategy="direct",
+                )
+        # Older profiles may intentionally have no request_modes. llama.cpp's
+        # OpenAI chat-template flag still gives the smoke a direct path.
+        return ModelRequestMode("runtime_smoke", False, 64, 0.0)
+
     def assistant_mode(self) -> str:
         """Return the user-facing mode of the resident butler pair."""
 
@@ -1187,6 +1222,7 @@ def load_settings(root: Path | None = None) -> Settings:
     settings.fast_lookup_policy()
     settings.weather_signals()
     settings.weather_current_blockers()
+    research_timeout_seconds(settings.raw, "normal")
     runtime_routing = settings.raw.get("runtime_routing", {})
     configured_research_modes = (
         runtime_routing.get("research_request_modes", {})
@@ -1215,6 +1251,8 @@ def load_settings(root: Path | None = None) -> Settings:
                 f"{model_role}."
             )
         settings.assistant_request_mode(str(model_role))
+    for model_role in settings.model_roles():
+        settings.runtime_smoke_request_mode(model_role)
     for capability_name in settings.capability_role_names():
         settings.capability_role(capability_name)
     settings.default_role

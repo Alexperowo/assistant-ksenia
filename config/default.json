@@ -180,6 +180,7 @@
     "research_result_max_chars": 16000,
     "research_total_max_chars": 80000,
     "research_default_mode": "normal",
+    "research_timeout_seconds": {"fast": 60, "normal": 180, "deep": 600},
     "research_evidence_max_chars": 20000,
     "fast_lookup_max_chars": 180,
     "fast_lookup_signals": [

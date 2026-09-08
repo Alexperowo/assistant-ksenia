@@ -21,6 +21,8 @@ class BrowserSafetyTests(unittest.TestCase):
     def assert_stalled_dns_is_reaped(self, outcome):
         from butler.tasking import TaskCancelled
         from butler.processes import process_image_path
+        from butler.research import ResearchError, _ResearchBudget
+        import time
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -53,14 +55,18 @@ class BrowserSafetyTests(unittest.TestCase):
             reader.max_text = 100
             reader.persistent = False
             marker = root / "dns.pid"
+            budget = _ResearchBudget(None, time.monotonic(), 1)
 
             def checkpoint():
+                if outcome == "budget":
+                    budget.checkpoint()
                 if outcome == "cancel" and marker.exists() and marker.read_text():
                     raise TaskCancelled("Cancel blocked DNS")
 
             # Any parent-side resolution would make this test fail immediately.
             with patch("butler.browser.socket.getaddrinfo", side_effect=AssertionError("Parent DNS")):
-                with self.assertRaises(TaskCancelled if outcome == "cancel" else BrowserError):
+                expected_error = ResearchError if outcome == "budget" else TaskCancelled if outcome == "cancel" else BrowserError
+                with self.assertRaises(expected_error):
                     reader.read("open", "https://blocked.example.test/", checkpoint=checkpoint)
             self.assertTrue(marker.is_file(), "Worker must reach real DNS validation")
             self.assertIsNone(process_image_path(int(marker.read_text())))
@@ -72,6 +78,10 @@ class BrowserSafetyTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows DNS timeout integration")
     def test_timeout_reaps_worker_blocked_in_dns(self):
         self.assert_stalled_dns_is_reaped("timeout")
+
+    @unittest.skipUnless(os.name == "nt", "Windows research budget integration")
+    def test_research_budget_reaps_worker_blocked_in_dns(self):
+        self.assert_stalled_dns_is_reaped("budget")
 
     def test_read_only_dns_is_not_resolved_in_parent(self):
         reader = object.__new__(BrowserReader)

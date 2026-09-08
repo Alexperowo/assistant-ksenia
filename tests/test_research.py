@@ -93,7 +93,8 @@ class ResearchTests(unittest.TestCase):
         with self.assertRaises(TaskCancelled):
             coordinator.run("Найди новости", session, control=control, on_status=on_status)
         self.assertEqual(session.tools.execute.call_count, 1)
-        self.assertEqual(session.tools.execute.call_args.kwargs["checkpoint"], control.checkpoint)
+        checkpoint = session.tools.execute.call_args.kwargs["checkpoint"]
+        self.assertIs(checkpoint.__self__.control, control)
         session.record_exchange.assert_not_called()
 
     @patch("butler.research.complete_chat")
@@ -103,7 +104,7 @@ class ResearchTests(unittest.TestCase):
         coordinator._queries = Mock(return_value=["failed", "working"])
         session = SimpleNamespace(tools=Mock(), record_exchange=Mock())
 
-        def execute(name, arguments, confirmed=False):
+        def execute(name, arguments, confirmed=False, checkpoint=None):
             if name == "browser_search":
                 if arguments["query"] == "failed":
                     return ToolResult(False, "error", "timeout")
@@ -297,7 +298,7 @@ class ResearchTests(unittest.TestCase):
             }
         )
 
-        def execute(name, arguments, confirmed=False):
+        def execute(name, arguments, confirmed=False, checkpoint=None):
             if name == "browser_search":
                 return ToolResult(
                     True,
@@ -364,7 +365,7 @@ class ResearchTests(unittest.TestCase):
             }
         )
 
-        def execute(name, arguments, confirmed=False):
+        def execute(name, arguments, confirmed=False, checkpoint=None):
             if name == "browser_search":
                 query = arguments["query"]
                 time.sleep({"alpha": 0.03, "alpha fast": 0.0, "alpha medium": 0.01}[query])

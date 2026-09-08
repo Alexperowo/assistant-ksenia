@@ -93,6 +93,14 @@ class CliDialogueRecoveryTests(unittest.TestCase):
     def test_console_continues_after_model_start_failure(self):
         self.assert_recovers(ModelManagerError("Model start failed"), voice=False)
 
+    def test_console_continues_after_research_deadline(self):
+        from butler.research import ResearchError
+        self.assert_recovers(ResearchError("deadline_exceeded"), voice=False)
+
+    def test_voice_continues_after_research_deadline(self):
+        from butler.research import ResearchError
+        self.assert_recovers(ResearchError("deadline_exceeded"), voice=True)
+
     def test_voice_continues_after_model_start_failure(self):
         self.assert_recovers(ModelManagerError("Model start failed"), voice=True)
 

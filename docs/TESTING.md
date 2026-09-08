@@ -10,6 +10,18 @@
 
 ## Уровни
 
+Research budget: `test_research_budget.py` проверяет общий срок параллельных
+ожиданий, отсутствие reset между этапами, запрет planner fallback и late history,
+paused checkpoint, приоритет явной отмены и валидацию конфигурации. Native
+`test_browser.py` проверяет истечение того же budget в DNS worker с его завершением;
+`test_chat_connection.py` — в настоящем loopback header wait без fallback tool.
+CLI/voice recovery проверяет следующий успешный вопрос после deadline. Эти тесты
+не заменяют длинную приёмку реального интернет-исследования.
+
+Итоговая C8-приёмка должна также временно включить разрешённые отключённые
+компоненты, обязательно RAG, и пройти их живые gates. Реестр и условия — в ROADMAP.
+Обычный текущий skip выключенного компонента не считается его приёмкой.
+
 `tests/test_chat_connection.py` использует настоящий временный loopback HTTPServer,
 без загрузки модели. Девять сценариев покрывают десять последовательных отмен
 задержанных headers с нулевыми active/stuck readers, pre-cancel без отправки,

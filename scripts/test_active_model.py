@@ -64,10 +64,10 @@ def main() -> int:
             ],
             tools=None,
             temperature=0.0,
-            max_tokens=24,
+            max_tokens=64,
             checkpoint=lambda: None,
             service=manager.service,
-            request_mode=settings.assistant_request_mode(state.role),
+            request_mode=settings.runtime_smoke_request_mode(state.role),
         )
     message = response["choices"][0].get("message", {})
     answer = str(message.get("content") or "").strip()

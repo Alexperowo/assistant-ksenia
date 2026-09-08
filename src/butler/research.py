@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 from butler.agent import AgentReply, AgentSession, AgentToolEvent, StatusCallback
 from butler.chat import ChatError, complete_chat
-from butler.config import Settings
+from butler.config import Settings, research_timeout_seconds
 from butler.diagnostics import bind_trace_context
 from butler.diagnostics import event as diagnostic_event
 from butler.diagnostics import exception as diagnostic_exception
@@ -23,6 +23,10 @@ class ResearchError(ChatError):
     """Known research outcomes with fixed, safe messages for every interface."""
 
     _MESSAGES = {
+        "deadline_exceeded": (
+            "Исследование остановлено: время ожидания истекло. "
+            "Можно повторить запрос позже или задать другой вопрос."
+        ),
         "search_unavailable": (
             "Поиск сейчас не сработал. Можно повторить позже или задать другой вопрос."
         ),
@@ -36,6 +40,25 @@ class ResearchError(ChatError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(self._MESSAGES[code])
+
+
+class _ResearchBudget:
+    """One monotonic wall-clock budget shared by all stages and parallel tools."""
+
+    def __init__(self, control: TaskControl | None, started: float, seconds: float):
+        self.control = control
+        self.deadline = started + seconds
+
+    def _check_deadline(self) -> None:
+        if time.monotonic() >= self.deadline:
+            raise ResearchError("deadline_exceeded")
+
+    def checkpoint(self) -> None:
+        if self.control is not None:
+            # Task cancellation takes precedence; pause must not bypass the wall
+            # clock budget by blocking forever inside the durable checkpoint.
+            self.control.checkpoint(deadline_check=self._check_deadline)
+        self._check_deadline()
 
 
 def _search_payload_valid(event: AgentToolEvent) -> bool:
@@ -514,7 +537,7 @@ class ResearchCoordinator:
             "request_mode": request_mode,
         }
 
-    def _queries(self, request: str, mode: ResearchMode, control: TaskControl | None) -> list[str]:
+    def _queries(self, request: str, mode: ResearchMode, control: TaskControl | _ResearchBudget | None) -> list[str]:
         deterministic = _deterministic_query(request)
         if mode.name == "fast":
             return [deterministic]
@@ -556,6 +579,8 @@ class ResearchCoordinator:
                 if len(queries) >= mode.query_limit:
                     break
             return queries[: mode.query_limit]
+        except ResearchError:
+            raise
         except (ChatError, KeyError, IndexError, TypeError) as exc:
             diagnostic_exception(self.settings, "research", "query_planning_failed", exc)
         return [deterministic]
@@ -579,6 +604,8 @@ class ResearchCoordinator:
             fast_lookup_signals=fast_lookup_signals,
             fast_lookup_max_chars=fast_lookup_max_chars,
         )
+        timeout_seconds = research_timeout_seconds(self.settings.raw, mode.name)
+        budget = _ResearchBudget(control, started, timeout_seconds)
         events: list[AgentToolEvent] = []
 
         def announce(message: str) -> None:
@@ -593,24 +620,24 @@ class ResearchCoordinator:
             request=request,
             mode=mode.name,
             source_limit=mode.source_limit,
+            timeout_seconds=timeout_seconds,
         )
-        if control is not None:
-            control.checkpoint()
+        budget.checkpoint()
         announce(
             "Готовлю быстрый точный поиск"
             if mode.name == "fast"
             else "Составляю поисковые запросы"
         )
-        queries = self._queries(request, mode, control)
+        queries = self._queries(request, mode, budget)
+        budget.checkpoint()
         announce(f"Ищу источники: {_russian_count(len(queries), 'запрос', 'запроса', 'запросов')}")
         source_limit = _source_limit_for_request(request, mode)
 
         def execute(name: str, arguments: dict[str, Any]) -> AgentToolEvent:
-            if control is not None:
-                control.checkpoint()
-            result = session.tools.execute(name, arguments, confirmed=confirmed, **(
-                {"checkpoint": control.checkpoint} if control is not None else {}
-            ))
+            budget.checkpoint()
+            result = session.tools.execute(
+                name, arguments, confirmed=confirmed, checkpoint=budget.checkpoint,
+            )
             return AgentToolEvent(name, arguments, result)
 
         ordered_search_events: list[AgentToolEvent | None] = [None] * len(queries)
@@ -622,8 +649,7 @@ class ResearchCoordinator:
             for future in as_completed(search_futures):
                 ordered_search_events[search_futures[future]] = future.result()
         events.extend(event for event in ordered_search_events if event is not None)
-        if control is not None:
-            control.checkpoint()
+        budget.checkpoint()
         search_payloads = [
             event.result.data
             for event in events
@@ -674,8 +700,7 @@ class ResearchCoordinator:
                 opened[url] = event
                 ordered_page_events[index] = event
         events.extend(event for event in ordered_page_events if event is not None)
-        if control is not None:
-            control.checkpoint()
+        budget.checkpoint()
 
         evidence: list[dict[str, Any]] = []
         for source in sources:
@@ -751,10 +776,11 @@ class ResearchCoordinator:
                 tools=None,
                 temperature=0.15,
                 max_tokens=mode.final_max_tokens,
-                checkpoint=control.checkpoint if control is not None else None,
+                checkpoint=budget.checkpoint,
                 **self._model_kwargs(f"synthesis_{mode.name}"),
             )
             answer = str(response["choices"][0].get("message", {}).get("content") or "").strip()
+            budget.checkpoint()
             if not answer:
                 raise ChatError("Исследователь не сформировал итоговый ответ.")
             if mode.verify:
@@ -779,7 +805,7 @@ class ResearchCoordinator:
                     tools=None,
                     temperature=0.1,
                     max_tokens=mode.final_max_tokens,
-                    checkpoint=control.checkpoint if control is not None else None,
+                    checkpoint=budget.checkpoint,
                     **self._model_kwargs("verification"),
                 )
                 verified = str(
@@ -790,6 +816,7 @@ class ResearchCoordinator:
         finally:
             heartbeat_done.set()
             heartbeat_thread.join(timeout=0.2)
+        budget.checkpoint()
         session.record_exchange(request, answer)
         diagnostic_event(
             self.settings,

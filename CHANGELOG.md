@@ -1,5 +1,32 @@
 # История изменений
 
+## 8 сентября 2026 — общий research budget и прямой режим runtime smoke
+
+- Fixed: активная исследовательская модель больше не проверяется через режим
+  обычного ассистента, которого у неё может не быть. Универсальный
+  `runtime_smoke` отключает thinking и даёт достаточный короткий лимит вывода.
+- Result: Agents-A1 вернул «Ксения» за 0,422 с; streaming cancellation вернулась
+  за 516 мс, active/stuck reader counters равны нулю.
+- Scope: это только проверочный запрос, пользовательские роли/request modes и
+  модельные профили не меняются.
+- Reliability: один монотонный budget для planning, parallel tools, synthesis и
+  verification; pause не продлевает срок, явная отмена имеет приоритет, поздний
+  ответ/fallback не записывается. Пределы fast/normal/deep: 60/180/600 с.
+- Verification: полный gate 496/496, shuffled 17/73/211 без warnings; active
+  Agents-A1 direct smoke 0,359 с и cancellation 500 мс с нулевыми reader counters.
+  Выключенный RAG явно skipped и требует отдельной живой приёмки.
+
+## 7 сентября 2026 — единый бюджет research и приёмка выключенных функций
+
+- Reliability: единый монотонный deadline подготовки запросов, поиска, страниц,
+  synthesis и verification; общий для parallel tools, включая paused checkpoint.
+  Нет fallback после planner timeout и записи просроченного ответа; диалог жив.
+- Configuration: `routing.research_timeout_seconds`, fast/normal/deep 60/180/600 с,
+  строгая числовая валидация. Загрузка модели/cleanup имеют отдельные границы.
+- Tests: budget fault-сценарии, native HTTP/DNS cleanup и CLI/voice recovery.
+- Roadmap: C8 обязательно включает проверку отключённых компонентов, включая
+  настоящий RAG, с временными безопасными профилями и восстановлением состояния.
+
 ## 7 сентября 2026 — отмена completion до HTTP-заголовков
 
 - Fixed: `complete_chat` с checkpoint не отправляет уже отменённый запрос,

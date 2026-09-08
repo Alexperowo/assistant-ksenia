@@ -91,7 +91,7 @@ def main() -> int:
                 checkpoint=checkpoint,
                 max_tokens=4096,
                 service=manager.service,
-                request_mode=settings.assistant_request_mode(state.role),
+                request_mode=settings.runtime_smoke_request_mode(state.role),
             )
         except TaskCancelled:
             cancelled = True

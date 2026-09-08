@@ -103,8 +103,18 @@ Read-only `browser_search`/`browser_read_page` передают checkpoint че�
 DNS admission для read-only `open` выполняется внутри этого worker до запуска
 Playwright, поэтому зависший resolver также подпадает под отмену и timeout.
 Проверки каждого запроса/перенаправления остаются внутри worker. Parent-side DNS
-сохранён для отдельного persistent `interact`. Общего deadline всего исследования
-пока нет: отдельные bounded transport calls ещё не составляют общий бюджет.
+сохранён для отдельного persistent `interact`.
+
+В `ResearchCoordinator.run` создаётся один `_ResearchBudget` по выбранному режиму.
+Его checkpoint передаётся подготовке запросов, всем параллельным tools и LLM,
+проверяется перед следующими этапами и перед записью ответа. Истечение не попадает
+в обычный fallback планировщика: `ResearchError(deadline_exceeded)` доходит до
+обработчика recoverable ошибки CLI/voice. Уже запущенные tools проверяют тот же
+deadline и выполняют свой cleanup; pool дожидается их окончания, не оставляет
+брошенные задачи. `DurableTaskStore.checkpoint` получил необязательный
+`deadline_check`, включая paused loop; явная отмена имеет приоритет над timeout.
+Бюджет wall-clock включает паузу, но начинается после подготовки модели, не
+покрывает время cleanup/restore и не заменяет проверку других блокирующих вызовов.
 
 `complete_chat` с checkpoint теперь владеет loopback socket до отправки/заголовков.
 Ожидание заголовков проверяет checkpoint и исходный 600-секундный предел; ответ
