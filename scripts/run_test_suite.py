@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
 import random
 import sys
 import unittest
@@ -71,7 +72,15 @@ def _run_shuffled(root: Path, seed: int) -> tuple[bool, str]:
 def main() -> int:
     args = parse_args()
     root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(root / "src"))
+    source_root = str(root / "src")
+    sys.path.insert(0, source_root)
+    # Several native integration tests deliberately launch a fresh Python
+    # worker. Keep the repository package importable there as well; relying on
+    # a developer's shell or the GitHub runner image made that contract flaky.
+    inherited_pythonpath = os.environ.get("PYTHONPATH", "")
+    os.environ["PYTHONPATH"] = os.pathsep.join(
+        filter(None, (source_root, inherited_pythonpath))
+    )
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     if hasattr(sys.stderr, "reconfigure"):
