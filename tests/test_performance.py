@@ -153,6 +153,26 @@ class PerformanceTests(unittest.TestCase):
         self.assertEqual(milestones["audio_first_played"], 360)
         self.assertEqual(milestones["audio_finished"], 790)
 
+    def test_background_research_milestones_are_calculated_in_report(self):
+        events = [
+            _event("background_research_queued", 100),
+            _event("background_research_started", 120),
+            _event("background_research_completed", 850),
+            _event("background_research_delivered", 900),
+        ]
+        report = build_report(
+            LoadedEvents(tuple(events), 0, ()),
+            required_milestones=(
+                "background_research_queued",
+                "background_research_started",
+                "background_research_completed",
+                "background_research_delivered",
+            ),
+        )
+        self.assertEqual(report.metrics["background_queue_wait_ms"].p50, 20)
+        self.assertEqual(report.metrics["background_research_duration_ms"].p50, 730)
+        self.assertEqual(report.metrics["background_delivery_latency_ms"].p50, 50)
+
 
 if __name__ == "__main__":
     unittest.main()

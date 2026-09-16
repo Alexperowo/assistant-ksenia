@@ -395,7 +395,9 @@ class CliDialogueRecoveryTests(unittest.TestCase):
             if next_idx == 2:
                 # After "Какое сегодня число?", release research so it's ready
                 research_gate.set()
-                time.sleep(0.05)
+                for thread in threading.enumerate():
+                    if thread.name.startswith("background-research-"):
+                        thread.join(timeout=2.0)
             return {"text": inputs[next_idx]}
 
         recognizer.return_value.listen_once.side_effect = on_listen_once

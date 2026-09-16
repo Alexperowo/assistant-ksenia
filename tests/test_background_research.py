@@ -111,6 +111,7 @@ class BackgroundResearchTests(unittest.TestCase):
             self.assertEqual(len(result.tool_events), 1)
             self.assertFalse(result.cancelled)
             self.assertEqual(result.error, "")
+            self.assertTrue(result.trace_id)
 
             # Second poll returns None
             self.assertIsNone(self.manager.poll_completed_result())

@@ -940,6 +940,12 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             bg_result = session.background_research.poll_completed_result()
             if bg_result is not None:
                 if not bg_result.cancelled:
+                    diagnostic_milestone(
+                        settings,
+                        "background_research_delivered",
+                        task_id=bg_result.task_id,
+                        trace_id=bg_result.trace_id,
+                    )
                     if bg_result.error:
                         speech.say_and_wait(
                             f"Поиск по запросу «{bg_result.request}» не удался: {bg_result.error}"
@@ -1236,6 +1242,7 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                 session.background_research.start_research(
                     user_text,
                     assistant_mode=active_mode,
+                    trace_id=trace_id,
                 )
                 speech.say_and_wait(
                     "Поиск запущен. Пока могу ответить на другой вопрос."

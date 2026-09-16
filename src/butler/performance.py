@@ -33,6 +33,9 @@ MILESTONE_PAIRS = (
     ("voice_end", "audio_first_played", "voice_end_to_audio_ms"),
     ("interrupt_detected", "audio_actually_stopped", "audio_stop_latency_ms"),
     ("interrupt_detected", "llm_actually_cancelled", "llm_cancel_latency_ms"),
+    ("background_research_queued", "background_research_started", "background_queue_wait_ms"),
+    ("background_research_started", "background_research_completed", "background_research_duration_ms"),
+    ("background_research_completed", "background_research_delivered", "background_delivery_latency_ms"),
 )
 
 _LAST_MILESTONES = frozenset(
@@ -41,6 +44,8 @@ _LAST_MILESTONES = frozenset(
         "audio_finished",
         "audio_actually_stopped",
         "llm_actually_cancelled",
+        "background_research_delivered",
+        "background_research_cancelled",
     }
 )
 _DIRECT_METRIC_FIELDS = frozenset(
@@ -59,6 +64,9 @@ _DIRECT_METRIC_FIELDS = frozenset(
         "cancelled_streams",
         "reader_shutdown_latency_ms",
         "stuck_reader_threads",
+        "background_queue_wait_ms",
+        "background_research_duration_ms",
+        "background_delivery_latency_ms",
     }
 )
 

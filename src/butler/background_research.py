@@ -10,6 +10,8 @@ from typing import Any
 from butler.config import Settings
 from butler.diagnostics import event as diagnostic_event
 from butler.diagnostics import exception as diagnostic_exception
+from butler.diagnostics import milestone as diagnostic_milestone
+from butler.diagnostics import new_trace_id
 from butler.handoff import RoleHandoffStore
 from butler.research import ResearchCoordinator
 from butler.tasking import DurableTaskStore, TaskCancelled, TaskControl, TaskState
@@ -26,6 +28,7 @@ class BackgroundResearchResult:
     tool_events: tuple[Any, ...] = ()
     error: str = ""
     cancelled: bool = False
+    trace_id: str = ""
 
 
 class IsolatedResearchSession:
@@ -228,6 +231,7 @@ class BackgroundResearchManager:
         *,
         assistant_mode: str | None = None,
         on_status: StatusCallback | None = None,
+        trace_id: str | None = None,
     ) -> str:
         with self._lock:
             if (
@@ -245,10 +249,24 @@ class BackgroundResearchManager:
             self._active_task_id = task_id
             self._active_request = request
             self._latest_status = "Начинаю исследование"
+            active_trace_id = trace_id or new_trace_id()
+
+        diagnostic_milestone(
+            self.settings,
+            "background_research_queued",
+            task_id=task_id,
+            trace_id=active_trace_id,
+        )
 
         def _worker() -> None:
             started = time.monotonic()
-            control = TaskControl(self.task_store, task_id)
+            diagnostic_milestone(
+                self.settings,
+                "background_research_started",
+                task_id=task_id,
+                trace_id=active_trace_id,
+            )
+            control = TaskControl(self.task_store, task_id, trace_id=active_trace_id)
             self.handoffs.append(
                 task_id,
                 "assistant",
@@ -319,12 +337,19 @@ class BackgroundResearchManager:
                     answer_chars=len(reply.text),
                     tool_event_count=len(reply.tool_events),
                 )
+                diagnostic_milestone(
+                    self.settings,
+                    "background_research_completed",
+                    task_id=task_id,
+                    trace_id=active_trace_id,
+                )
                 self._result_queue.put(
                     BackgroundResearchResult(
                         task_id=task_id,
                         request=request,
                         answer=reply.text,
                         tool_events=tuple(reply.tool_events),
+                        trace_id=active_trace_id,
                     )
                 )
             except TaskCancelled:
@@ -334,6 +359,12 @@ class BackgroundResearchManager:
                     "cancelled",
                     task_id=task_id,
                     duration_ms=round((time.monotonic() - started) * 1000),
+                )
+                diagnostic_milestone(
+                    self.settings,
+                    "background_research_cancelled",
+                    task_id=task_id,
+                    trace_id=active_trace_id,
                 )
                 current = self.task_store.get(task_id)
                 if current and current.get("state") != TaskState.CANCELLED:
@@ -347,6 +378,7 @@ class BackgroundResearchManager:
                         request=request,
                         answer="",
                         cancelled=True,
+                        trace_id=active_trace_id,
                     )
                 )
             except Exception as exc:
@@ -357,6 +389,12 @@ class BackgroundResearchManager:
                     exc,
                     task_id=task_id,
                     duration_ms=round((time.monotonic() - started) * 1000),
+                )
+                diagnostic_milestone(
+                    self.settings,
+                    "background_research_failed",
+                    task_id=task_id,
+                    trace_id=active_trace_id,
                 )
                 err_text = str(exc) or "Не удалось завершить поиск"
                 try:
@@ -374,6 +412,7 @@ class BackgroundResearchManager:
                         request=request,
                         answer="",
                         error=err_text,
+                        trace_id=active_trace_id,
                     )
                 )
             finally:
