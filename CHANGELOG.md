@@ -1,5 +1,28 @@
 # История изменений
 
+## 16 сентября 2026 — единая политика бюджетов исследования (F05) и точность событий браузера (F07)
+
+- Fixed: Режим исследования в `ResearchCoordinator` теперь согласован с режимом
+  ассистента (F05). В `config/default.json` значение `routing.research_default_mode`
+  установлено в `"auto"`. При `assistant_mode == "fast"` исследование по умолчанию
+  выполняется в быстром режиме (`fast`: 1 детерминированный поисковый запрос без
+  лишнего LLM-планирования, лимит 3 источников, синтез `synthesis_fast` без
+  рассуждений, дедлайн 60 с). В режиме Thinking исследование по умолчанию использует
+  `normal` (LLM-планирование запросов, синтез с рассуждениями `deliberate`, дедлайн 180 с).
+- Fixed: Явный запрос глубокого исследования («исследуй подробно», «глубокий поиск»,
+  «тщательно») всегда активирует режим `deep` (8 источников, верификация, дедлайн 600 с)
+  с голосовым пояснением «Готовлю глубокое исследование с увеличенным временем ожидания».
+- Fixed: В `BrowserReader.read` устранено ложное предупреждение
+  `service_fallback_to_single_request` при обычных одноразовых запросах поиска и чтения (F07).
+  Предупреждение логируется только при фактическом отказе постоянного сервиса `interact`;
+  в события `request_completed` и `request_failed` добавлено поле `transport` (`single` / `persistent`).
+- Verified: Добавлены тесты `test_research_default_mode_policy_and_validation` в `tests/test_config.py`,
+  `test_research_mode_policy_matrix_and_deep_announcement` в `tests/test_research.py`,
+  `test_web_research_route_passes_assistant_mode_to_research` в `tests/test_orchestrator.py`,
+  `test_single_request_does_not_emit_service_fallback_warning` и
+  `test_persistent_failure_emits_service_fallback_warning` в `tests/test_browser.py`.
+  Полный прогон: 503/503 теста пройдены успешно за 25,3 с без предупреждений.
+
 ## 16 сентября 2026 — нейтральные defaults и разделение настроек пользователя (F06)
 
 - Fixed: Имя пользователя отделено от распространяемой базовой конфигурации. В

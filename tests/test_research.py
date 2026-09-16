@@ -427,6 +427,72 @@ class ResearchTests(unittest.TestCase):
             ],
         )
 
+    @patch("butler.research.complete_chat")
+    def test_research_mode_policy_matrix_and_deep_announcement(self, complete_chat):
+        complete_chat.return_value = {
+            "choices": [{"message": {"content": "Итог исследования."}}]
+        }
+        settings = load_settings()
+
+        def execute(name, arguments, confirmed=False, checkpoint=None):
+            if name == "browser_search":
+                query = str(arguments.get("query", "")).casefold()
+                topic = "рынке" if "рынк" in query else "технологий"
+                return ToolResult(
+                    True, "ok", "найдено",
+                    {"results": [
+                        {"title": f"Новости {topic}", "description": f"Свежие факты {topic}", "url": f"https://news.test/{topic}"}
+                    ]}
+                )
+            return ToolResult(
+                True, "ok", "прочитано",
+                {"title": "Заголовок", "url": arguments["url"], "text": "Текст факта", "retrieved_at": "2026-09-16"}
+            )
+
+        session = SimpleNamespace(
+            tools=SimpleNamespace(execute=execute),
+            record_exchange=Mock(),
+        )
+
+        # 1. Fast assistant mode -> defaults to fast research mode
+        statuses_fast = []
+        reply_fast = ResearchCoordinator(settings).run(
+            "Найди новости технологий", session, on_status=statuses_fast.append, assistant_mode="fast"
+        )
+        self.assertEqual(reply_fast.text, "Итог исследования.")
+        self.assertEqual(complete_chat.call_count, 1)
+        self.assertIn("Готовлю быстрый точный поиск", statuses_fast)
+
+        complete_chat.reset_mock()
+        complete_chat.side_effect = [
+            {"choices": [{"message": {"content": '{"queries":["запрос один"]}'}}]},
+            {"choices": [{"message": {"content": "Итог исследования."}}]},
+        ]
+
+        # 2. Thinking assistant mode -> defaults to normal research mode
+        statuses_thinking = []
+        reply_thinking = ResearchCoordinator(settings).run(
+            "Найди новости технологий", session, on_status=statuses_thinking.append, assistant_mode="thinking"
+        )
+        self.assertEqual(reply_thinking.text, "Итог исследования.")
+        self.assertEqual(complete_chat.call_count, 2)
+        self.assertIn("Составляю поисковые запросы", statuses_thinking)
+
+        complete_chat.reset_mock()
+        complete_chat.side_effect = [
+            {"choices": [{"message": {"content": '{"queries":["запрос один"]}'}}]},
+            {"choices": [{"message": {"content": "Черновик."}}]},
+            {"choices": [{"message": {"content": "Проверенный глубокий итог."}}]},
+        ]
+
+        # 3. Explicit deep research request -> deep mode with explanation even in fast assistant mode
+        statuses_deep = []
+        reply_deep = ResearchCoordinator(settings).run(
+            "Исследуй подробно ситуацию на рынке", session, on_status=statuses_deep.append, assistant_mode="fast"
+        )
+        self.assertEqual(reply_deep.text, "Проверенный глубокий итог.")
+        self.assertIn("Готовлю глубокое исследование с увеличенным временем ожидания", statuses_deep)
+
 
 if __name__ == "__main__":
     unittest.main()

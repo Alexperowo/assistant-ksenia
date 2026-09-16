@@ -736,6 +736,36 @@ class ConfigTests(unittest.TestCase):
             cleared = load_settings(root)
             self.assertEqual(cleared.user_name, "Пользователь")
 
+    def test_research_default_mode_policy_and_validation(self):
+        settings = load_settings()
+        self.assertEqual(settings.assistant_mode(), "fast")
+        self.assertEqual(settings.research_default_mode(), "fast")
+        self.assertEqual(settings.research_default_mode(assistant_mode="thinking"), "normal")
+        self.assertEqual(settings.research_default_mode(assistant_mode="fast"), "fast")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            defaults = json.loads(
+                (Path(__file__).resolve().parents[1] / "config" / "default.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            defaults["routing"]["research_default_mode"] = "deep"
+            (root / "config" / "default.json").write_text(
+                json.dumps(defaults), encoding="utf-8"
+            )
+            custom_settings = load_settings(root)
+            self.assertEqual(custom_settings.research_default_mode(), "deep")
+            self.assertEqual(custom_settings.research_default_mode(assistant_mode="fast"), "deep")
+
+            defaults["routing"]["research_default_mode"] = "invalid_mode"
+            (root / "config" / "default.json").write_text(
+                json.dumps(defaults), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ConfigError, "routing.research_default_mode"):
+                load_settings(root)
+
 
 if __name__ == "__main__":
     unittest.main()

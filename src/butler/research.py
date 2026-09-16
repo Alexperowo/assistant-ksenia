@@ -261,7 +261,10 @@ def select_research_mode(
     fast_lookup_max_chars: int = 180,
 ) -> ResearchMode:
     normalized = text.casefold()
-    if any(marker in normalized for marker in ("глубоко", "тщательно", "подробное исследование")):
+    if any(marker in normalized for marker in (
+        "глубоко", "тщательно", "подробное исследование", "глубокое исследование",
+        "глубокий поиск", "подробный поиск", "исследуй подробно", "подробно исследуй",
+    )):
         return MODES["deep"]
     if any(marker in normalized for marker in ("быстро", "кратко", "экспресс")):
         return MODES["fast"]
@@ -593,14 +596,28 @@ class ResearchCoordinator:
         confirmed: bool = False,
         on_status: StatusCallback | None = None,
         control: TaskControl | None = None,
+        assistant_mode: str | None = None,
+        default_mode: str | None = None,
     ) -> AgentReply:
         started = time.monotonic()
         routing = self.settings.raw.get("routing", {})
         fast_lookup_signals = routing.get("fast_lookup_signals", ())
         fast_lookup_max_chars = int(routing.get("fast_lookup_max_chars", 180))
+        if default_mode is not None:
+            effective_default = default_mode
+        elif hasattr(self.settings, "research_default_mode") and callable(self.settings.research_default_mode):
+            effective_default = self.settings.research_default_mode(assistant_mode=assistant_mode)
+        else:
+            configured = str(routing.get("research_default_mode", "normal")).strip().casefold()
+            if configured == "auto":
+                effective_default = "fast" if (assistant_mode or "fast") == "fast" else "normal"
+            elif configured in {"fast", "normal", "deep"}:
+                effective_default = configured
+            else:
+                effective_default = "normal"
         mode = select_research_mode(
             request,
-            str(routing.get("research_default_mode", "normal")),
+            effective_default,
             fast_lookup_signals=fast_lookup_signals,
             fast_lookup_max_chars=fast_lookup_max_chars,
         )
@@ -621,12 +638,17 @@ class ResearchCoordinator:
             mode=mode.name,
             source_limit=mode.source_limit,
             timeout_seconds=timeout_seconds,
+            assistant_mode=assistant_mode,
         )
         budget.checkpoint()
         announce(
             "Готовлю быстрый точный поиск"
             if mode.name == "fast"
-            else "Составляю поисковые запросы"
+            else (
+                "Готовлю глубокое исследование с увеличенным временем ожидания"
+                if mode.name == "deep"
+                else "Составляю поисковые запросы"
+            )
         )
         queries = self._queries(request, mode, budget)
         budget.checkpoint()

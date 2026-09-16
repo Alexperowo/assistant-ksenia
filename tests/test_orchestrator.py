@@ -484,6 +484,30 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(plan, "План.")
         self.assertTrue(session.session.tools.execute.call_args.kwargs["confirmed"])
 
+    @patch("butler.orchestrator.ModelManager.for_role")
+    def test_web_research_route_passes_assistant_mode_to_research(self, for_role):
+        settings = load_settings()
+        session = RoutedAgentSession(settings)
+        manager = Mock()
+        manager.is_current.return_value = True
+        for_role.return_value = manager
+        session.residency.activate_residents = Mock(return_value={})
+        session.research.run = Mock(return_value=AgentReply("Ответ исследования.", ()))
+
+        # In fast mode (default)
+        reply = session.ask("Найди в интернете актуальные новости")
+        self.assertEqual(reply.text, "Ответ исследования.")
+        session.research.run.assert_called_once()
+        self.assertEqual(session.research.run.call_args.kwargs.get("assistant_mode"), "fast")
+
+        session.research.run.reset_mock()
+        # In thinking mode
+        session._assistant_mode_override = "thinking"
+        reply = session.ask("Найди в интернете актуальные новости")
+        self.assertEqual(reply.text, "Ответ исследования.")
+        session.research.run.assert_called_once()
+        self.assertEqual(session.research.run.call_args.kwargs.get("assistant_mode"), "thinking")
+
 
 if __name__ == "__main__":
     unittest.main()

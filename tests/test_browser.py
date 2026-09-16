@@ -285,6 +285,46 @@ class BrowserSafetyTests(unittest.TestCase):
                 [{"type": "click_text", "text": "Отправить"}],
             )
 
+    def test_single_request_does_not_emit_service_fallback_warning(self):
+        reader = object.__new__(BrowserReader)
+        reader.settings = SimpleNamespace(raw={"diagnostics": {"enabled": False}})
+        reader.persistent = False
+        reader.timeout = 5.0
+        with (
+            patch.object(reader, "_validate"),
+            patch.object(reader, "_read_once", return_value={"results": []}) as read_once,
+            patch("butler.browser.diagnostic_event") as mock_diag,
+        ):
+            payload = reader.read("search", "погода")
+            self.assertEqual(payload, {"results": []})
+            read_once.assert_called_once()
+            emitted_events = [call.args[2] for call in mock_diag.call_args_list if len(call.args) > 2]
+            self.assertNotIn("service_fallback_to_single_request", emitted_events)
+            self.assertIn("request_started", emitted_events)
+            self.assertIn("request_completed", emitted_events)
+            completed_call = [call for call in mock_diag.call_args_list if len(call.args) > 2 and call.args[2] == "request_completed"][0]
+            self.assertEqual(completed_call.kwargs.get("transport"), "single")
+
+    def test_persistent_failure_emits_service_fallback_warning(self):
+        reader = object.__new__(BrowserReader)
+        reader.settings = SimpleNamespace(raw={"diagnostics": {"enabled": False}})
+        reader.persistent = True
+        reader.timeout = 5.0
+        with (
+            patch.object(reader, "_validate"),
+            patch.object(reader, "_read_persistent", return_value=None),
+            patch.object(reader, "_read_once", return_value={"results": []}) as read_once,
+            patch("butler.browser.diagnostic_event") as mock_diag,
+        ):
+            payload = reader.read("interact", json.dumps({"url": "https://example.com"}))
+            self.assertEqual(payload, {"results": []})
+            read_once.assert_called_once()
+            emitted_events = [call.args[2] for call in mock_diag.call_args_list if len(call.args) > 2]
+            self.assertIn("service_fallback_to_single_request", emitted_events)
+            completed_call = [call for call in mock_diag.call_args_list if len(call.args) > 2 and call.args[2] == "request_completed"][0]
+            self.assertEqual(completed_call.kwargs.get("transport"), "single")
+
 
 if __name__ == "__main__":
     unittest.main()
+

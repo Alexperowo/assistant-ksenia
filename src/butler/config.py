@@ -785,6 +785,26 @@ class Settings:
             raise ConfigError("runtime_routing.assistant_mode должен быть fast или thinking.")
         return mode
 
+    def research_default_mode(self, assistant_mode: str | None = None) -> str:
+        """Return default research depth mode ('fast', 'normal', or 'deep')."""
+
+        routing = self.raw.get("routing", {})
+        if not isinstance(routing, Mapping):
+            raise ConfigError("Раздел routing должен быть объектом.")
+        raw_mode = str(routing.get("research_default_mode", "auto")).strip().casefold()
+        if raw_mode not in {"auto", "fast", "normal", "deep"}:
+            raise ConfigError(
+                "routing.research_default_mode должен быть auto, fast, normal или deep."
+            )
+        if raw_mode != "auto":
+            return raw_mode
+        active_assistant_mode = (
+            assistant_mode.strip().casefold()
+            if assistant_mode is not None
+            else self.assistant_mode()
+        )
+        return "fast" if active_assistant_mode == "fast" else "normal"
+
     def fast_lookup_policy(self) -> tuple[tuple[str, ...], int]:
         routing = self.raw.get("routing", {})
         if not isinstance(routing, Mapping):
@@ -1219,6 +1239,7 @@ def load_settings(root: Path | None = None) -> Settings:
         settings.model(profile_name)
     settings.resident_model_roles()
     settings.assistant_mode()
+    settings.research_default_mode()
     settings.ui_deliberation()
     settings.fast_lookup_policy()
     settings.weather_signals()

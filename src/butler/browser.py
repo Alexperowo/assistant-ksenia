@@ -427,18 +427,22 @@ class BrowserReader:
             value=value,
             persistent=bool(getattr(self, "persistent", False)),
         )
+        transport = "single"
         try:
             payload = None
             if mode == "interact" and bool(getattr(self, "persistent", False)):
                 payload = self._read_persistent(mode, value)
+                if payload is not None:
+                    transport = "persistent"
+                else:
+                    diagnostic_event(
+                        self.settings,
+                        "browser",
+                        "service_fallback_to_single_request",
+                        level="warning",
+                        mode=mode,
+                    )
             if payload is None:
-                diagnostic_event(
-                    self.settings,
-                    "browser",
-                    "service_fallback_to_single_request",
-                    level="warning",
-                    mode=mode,
-                )
                 payload = self._read_once(mode, value, **(
                     {"checkpoint": checkpoint} if checkpoint is not None else {}
                 ))
@@ -449,6 +453,7 @@ class BrowserReader:
                 "request_failed",
                 exc,
                 mode=mode,
+                transport=transport,
                 duration_ms=round((time.monotonic() - started) * 1000),
             )
             raise
@@ -457,6 +462,7 @@ class BrowserReader:
             "browser",
             "request_completed",
             mode=mode,
+            transport=transport,
             duration_ms=round((time.monotonic() - started) * 1000),
             result_count=(
                 len(payload.get("results", []))

@@ -1062,10 +1062,10 @@ class RoutedAgentSession:
                 text,
                 metadata={"durable_task": True},
             )
+        active_mode = self._assistant_mode_override or self.settings.assistant_mode()
         requested_mode = assistant_mode_command(text)
         if requested_mode is not None:
             if requested_mode == "status":
-                active_mode = self._assistant_mode_override or self.settings.assistant_mode()
                 answer = (
                     "Сейчас включён Thinking-режим: UI-Mate и Agents-A1 рассуждают вместе."
                     if active_mode == "thinking"
@@ -1074,6 +1074,7 @@ class RoutedAgentSession:
             else:
                 set_user_assistant_mode(self.settings.root, requested_mode)
                 self._assistant_mode_override = requested_mode
+                active_mode = requested_mode
                 answer = (
                     "Thinking-режим включён. UI-Mate и Agents-A1 будут рассуждать вместе."
                     if requested_mode == "thinking"
@@ -1107,6 +1108,7 @@ class RoutedAgentSession:
             )
             and select_research_mode(
                 text,
+                default=self.settings.research_default_mode(assistant_mode=active_mode),
                 fast_lookup_signals=fast_lookup_signals,
                 fast_lookup_max_chars=fast_lookup_max_chars,
             ).name
@@ -1176,6 +1178,7 @@ class RoutedAgentSession:
                     confirmed=confirmed,
                     on_status=on_status,
                     control=control,
+                    assistant_mode=active_mode,
                 )
                 if on_final_delta is not None:
                     on_final_delta(reply.text)
