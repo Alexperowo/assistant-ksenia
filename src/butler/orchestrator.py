@@ -16,6 +16,13 @@ from butler.agent import (
     FinalDeltaCallback,
     StatusCallback,
 )
+from butler.background_research import (
+    BackgroundResearchManager,
+    is_research_cancel_command,
+    is_research_pause_command,
+    is_research_resume_command,
+    is_research_status_command,
+)
 from butler.chat import ChatError, complete_chat
 from butler.config import ConfigError, Settings, set_user_assistant_mode
 from butler.diagnostics import bind_trace_context
@@ -36,7 +43,7 @@ from butler.research import (
     is_web_research_request,
     select_research_mode,
 )
-from butler.tasking import TaskCancelled, TaskControl
+from butler.tasking import DurableTaskStore, TaskCancelled, TaskControl
 from butler.tools import ToolResult, tool_schemas
 from butler.trusted_task import (
     TRUSTED_TASK_FINISHED,
@@ -261,11 +268,17 @@ class RoutedAgentSession:
         self.research = ResearchCoordinator(settings, self._research_model())
         self.handoffs = RoleHandoffStore(settings.runtime_dir)
         self.trusted_tasks = TrustedTaskStore(settings)
+        self.background_research = BackgroundResearchManager(
+            settings, self.handoffs, DurableTaskStore(settings.runtime_dir)
+        )
         self._assistant_mode_override: str | None = None
         diagnostic_event(self.settings, "orchestrator", "session_ready")
 
     def clear_memory(self) -> None:
         self.session.clear_memory()
+
+    def record_exchange(self, user_text: str, assistant_text: str) -> None:
+        self.session.record_exchange(user_text, assistant_text)
 
     def commit_spoken_reply(self, generated_text: str, spoken_text: str) -> bool:
         return self.session.commit_spoken_reply(generated_text, spoken_text)
@@ -333,36 +346,47 @@ class RoutedAgentSession:
         if assistant_mode == "thinking":
             if pair is None or pair.proposer_model != assistant_model:
                 raise ConfigError("Thinking-режим требует настроенную пару резидентных моделей.")
-            if on_status:
-                on_status("Рассуждаем вместе")
-            reviewer = self.settings.model(pair.reviewer_model)
-            reviewer_mode = reviewer.request_mode(pair.review_mode)
-            response = complete_chat(
-                self.settings,
-                [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Ты — аналитическая половина пары локального ассистента. "
-                            "Тщательно проанализируй вопрос, отметь неоднозначности и факты, "
-                            "но не обращайся к пользователю и не утверждай, что выполняла действия. "
-                            "Дай компактные рекомендации второй модели для итогового ответа."
-                        ),
-                    },
-                    {"role": "user", "content": text},
-                ],
-                temperature=reviewer_mode.temperature,
-                max_tokens=pair.review_max_tokens,
-                checkpoint=control.checkpoint if control is not None else None,
-                service=self.settings.model_service(reviewer.service_name),
-                request_mode=reviewer_mode,
-            )
-            advisory = str(
-                response.get("choices", [{}])[0].get("message", {}).get("content") or ""
-            ).strip()
-            if not advisory:
-                raise ChatError("Вторая модель пары не сформировала анализ.")
-            request_mode = profile.request_mode(pair.proposal_mode)
+            if self.background_research.is_busy():
+                if on_status:
+                    on_status("Исследователь занят поиском, отвечаю без совместного рассуждения")
+                diagnostic_event(
+                    self.settings,
+                    "orchestrator",
+                    "deliberation_skipped_research_busy",
+                    request=text,
+                )
+                assistant_mode = "fast"
+            else:
+                if on_status:
+                    on_status("Рассуждаем вместе")
+                reviewer = self.settings.model(pair.reviewer_model)
+                reviewer_mode = reviewer.request_mode(pair.review_mode)
+                response = complete_chat(
+                    self.settings,
+                    [
+                        {
+                            "role": "system",
+                            "content": (
+                                "Ты — аналитическая половина пары локального ассистента. "
+                                "Тщательно проанализируй вопрос, отметь неоднозначности и факты, "
+                                "но не обращайся к пользователю и не утверждай, что выполняла действия. "
+                                "Дай компактные рекомендации второй модели для итогового ответа."
+                            ),
+                        },
+                        {"role": "user", "content": text},
+                    ],
+                    temperature=reviewer_mode.temperature,
+                    max_tokens=pair.review_max_tokens,
+                    checkpoint=control.checkpoint if control is not None else None,
+                    service=self.settings.model_service(reviewer.service_name),
+                    request_mode=reviewer_mode,
+                )
+                advisory = str(
+                    response.get("choices", [{}])[0].get("message", {}).get("content") or ""
+                ).strip()
+                if not advisory:
+                    raise ChatError("Вторая модель пары не сформировала анализ.")
+                request_mode = profile.request_mode(pair.proposal_mode)
         diagnostic_event(
             self.settings,
             "orchestrator",
@@ -836,6 +860,123 @@ class RoutedAgentSession:
                 on_final_delta=on_final_delta,
             )
 
+    def _is_current_weather_request(
+        self, text: str, *, active_mode: str | None = None
+    ) -> bool:
+        if not self.settings.weather_enabled():
+            return False
+        normalized_text = text.casefold().replace("ё", "е")
+        if not any(signal in normalized_text for signal in self.settings.weather_signals()):
+            return False
+        if any(
+            blocker in normalized_text
+            for blocker in self.settings.weather_current_blockers()
+        ):
+            return False
+        routing = self.settings.raw.get("routing", {})
+        fast_lookup_signals = routing.get("fast_lookup_signals", ())
+        fast_lookup_max_chars = int(routing.get("fast_lookup_max_chars", 180))
+        if not is_fast_lookup_request(
+            text, signals=fast_lookup_signals, max_chars=fast_lookup_max_chars
+        ):
+            return False
+        mode = select_research_mode(
+            text,
+            default=self.settings.research_default_mode(assistant_mode=active_mode),
+            fast_lookup_signals=fast_lookup_signals,
+            fast_lookup_max_chars=fast_lookup_max_chars,
+        )
+        return mode.name == "fast"
+
+    def _is_exclusive_task(self, text: str) -> bool:
+        if self.trusted_tasks.status() is not None:
+            return True
+        if assistant_mode_command(text) is not None:
+            return False
+        if fast_intent_reply(text) is not None:
+            return False
+        active_mode = self._assistant_mode_override or self.settings.assistant_mode()
+        if self._is_current_weather_request(text, active_mode=active_mode):
+            return False
+        if (
+            is_research_status_command(text)
+            or is_research_cancel_command(text)
+            or is_research_pause_command(text)
+            or is_research_resume_command(text)
+        ):
+            return False
+        assistant_model = self._assistant_model()
+        if (
+            self._is_direct_conversation(text)
+            and assistant_model in self.settings.resident_model_roles()
+        ):
+            return False
+        return True
+
+    def _ask_with_trusted_grant(
+        self,
+        text: str,
+        *,
+        confirmed: bool = False,
+        max_steps: int = 8,
+        on_status: StatusCallback | None = None,
+        on_confirmation: ConfirmationCallback | None = None,
+        control: TaskControl | None = None,
+        on_final_delta: FinalDeltaCallback | None = None,
+    ) -> AgentReply:
+        trusted_grant = None if confirmed else self.trusted_tasks.consume()
+        effective_confirmed = confirmed or trusted_grant is not None
+        outcome = "failed"
+
+        def emit_trusted_status(status: str) -> None:
+            if on_status is None:
+                return
+            try:
+                on_status(status)
+            except Exception as exc:
+                # This extra announcement must not fail the task after its
+                # one-shot grant has already been consumed.
+                diagnostic_exception(
+                    self.settings,
+                    "orchestrator",
+                    "trusted_status_failed",
+                    exc,
+                )
+
+        if trusted_grant is not None:
+            diagnostic_event(
+                self.settings,
+                "orchestrator",
+                "trusted_task_started",
+                grant_id=trusted_grant.grant_id,
+            )
+            emit_trusted_status(TRUSTED_TASK_STARTED)
+        try:
+            reply = self._ask_exclusive(
+                text,
+                confirmed=effective_confirmed,
+                max_steps=max_steps,
+                on_status=on_status,
+                on_confirmation=on_confirmation,
+                control=control,
+                on_final_delta=on_final_delta,
+            )
+            outcome = "completed"
+            return reply
+        except TaskCancelled:
+            outcome = "cancelled"
+            raise
+        finally:
+            if trusted_grant is not None:
+                diagnostic_event(
+                    self.settings,
+                    "orchestrator",
+                    "trusted_task_finished",
+                    grant_id=trusted_grant.grant_id,
+                    outcome=outcome,
+                )
+                emit_trusted_status(TRUSTED_TASK_FINISHED)
+
     def _ask_traced(
         self,
         text: str,
@@ -847,6 +988,29 @@ class RoutedAgentSession:
         control: TaskControl | None = None,
         on_final_delta: FinalDeltaCallback | None = None,
     ) -> AgentReply:
+        if not self._is_exclusive_task(text):
+            return self._ask_exclusive(
+                text,
+                confirmed=confirmed,
+                max_steps=max_steps,
+                on_status=on_status,
+                on_confirmation=on_confirmation,
+                control=control,
+                on_final_delta=on_final_delta,
+            )
+
+        if self.background_research.is_busy():
+            diagnostic_event(
+                self.settings,
+                "orchestrator",
+                "exclusive_rejected_research_busy",
+                level="warning",
+                request=text,
+            )
+            raise ChatError(
+                "Выполняется фоновый поиск. Дождитесь его завершения или отмените поиск перед запуском задач разработки."
+            )
+
         with SingleInstance(self.settings.root, "agent-task") as acquired:
             if not acquired:
                 diagnostic_event(
@@ -859,58 +1023,15 @@ class RoutedAgentSession:
                 raise ChatError(
                     "Ксения уже выполняет другую задачу. Дождитесь сообщения «Готово» и повторите."
                 )
-            trusted_grant = None if confirmed else self.trusted_tasks.consume()
-            effective_confirmed = confirmed or trusted_grant is not None
-            outcome = "failed"
-
-            def emit_trusted_status(status: str) -> None:
-                if on_status is None:
-                    return
-                try:
-                    on_status(status)
-                except Exception as exc:
-                    # This extra announcement must not fail the task after its
-                    # one-shot grant has already been consumed.
-                    diagnostic_exception(
-                        self.settings,
-                        "orchestrator",
-                        "trusted_status_failed",
-                        exc,
-                    )
-
-            if trusted_grant is not None:
-                diagnostic_event(
-                    self.settings,
-                    "orchestrator",
-                    "trusted_task_started",
-                    grant_id=trusted_grant.grant_id,
-                )
-                emit_trusted_status(TRUSTED_TASK_STARTED)
-            try:
-                reply = self._ask_exclusive(
-                    text,
-                    confirmed=effective_confirmed,
-                    max_steps=max_steps,
-                    on_status=on_status,
-                    on_confirmation=on_confirmation,
-                    control=control,
-                    on_final_delta=on_final_delta,
-                )
-                outcome = "completed"
-                return reply
-            except TaskCancelled:
-                outcome = "cancelled"
-                raise
-            finally:
-                if trusted_grant is not None:
-                    diagnostic_event(
-                        self.settings,
-                        "orchestrator",
-                        "trusted_task_finished",
-                        grant_id=trusted_grant.grant_id,
-                        outcome=outcome,
-                    )
-                    emit_trusted_status(TRUSTED_TASK_FINISHED)
+            return self._ask_with_trusted_grant(
+                text,
+                confirmed=confirmed,
+                max_steps=max_steps,
+                on_status=on_status,
+                on_confirmation=on_confirmation,
+                control=control,
+                on_final_delta=on_final_delta,
+            )
 
     def _run_primary_route(
         self,
@@ -1084,6 +1205,39 @@ class RoutedAgentSession:
             if on_final_delta is not None:
                 on_final_delta(answer)
             return AgentReply(answer, ())
+        if is_research_status_command(text):
+            status_text = self.background_research.get_status()
+            self.session.record_exchange(text, status_text)
+            if on_final_delta is not None:
+                on_final_delta(status_text)
+            return AgentReply(status_text, ())
+        if is_research_cancel_command(text):
+            cancelled = self.background_research.cancel_active()
+            cancel_reply = (
+                "Поиск отменён." if cancelled else "Сейчас нет активного поиска для отмены."
+            )
+            self.session.record_exchange(text, cancel_reply)
+            if on_final_delta is not None:
+                on_final_delta(cancel_reply)
+            return AgentReply(cancel_reply, ())
+        if is_research_pause_command(text):
+            paused = self.background_research.pause_active()
+            pause_reply = (
+                "Поиск приостановлен." if paused else "Сейчас нет активного поиска."
+            )
+            self.session.record_exchange(text, pause_reply)
+            if on_final_delta is not None:
+                on_final_delta(pause_reply)
+            return AgentReply(pause_reply, ())
+        if is_research_resume_command(text):
+            resumed = self.background_research.resume_active()
+            resume_reply = (
+                "Продолжаю поиск." if resumed else "Нет приостановленного поиска."
+            )
+            self.session.record_exchange(text, resume_reply)
+            if on_final_delta is not None:
+                on_final_delta(resume_reply)
+            return AgentReply(resume_reply, ())
         fast_reply = fast_intent_reply(text)
         routing = self.settings.raw.get("routing", {})
         fast_lookup_signals = routing.get("fast_lookup_signals", ())
@@ -1093,26 +1247,8 @@ class RoutedAgentSession:
             fast_lookup_signals=fast_lookup_signals,
             fast_lookup_max_chars=fast_lookup_max_chars,
         )
-        normalized_text = text.casefold().replace("ё", "е")
-        current_weather = bool(
-            self.settings.weather_enabled()
-            and any(signal in normalized_text for signal in self.settings.weather_signals())
-            and not any(
-                blocker in normalized_text
-                for blocker in self.settings.weather_current_blockers()
-            )
-            and is_fast_lookup_request(
-                text,
-                signals=fast_lookup_signals,
-                max_chars=fast_lookup_max_chars,
-            )
-            and select_research_mode(
-                text,
-                default=self.settings.research_default_mode(assistant_mode=active_mode),
-                fast_lookup_signals=fast_lookup_signals,
-                fast_lookup_max_chars=fast_lookup_max_chars,
-            ).name
-            == "fast"
+        current_weather = self._is_current_weather_request(
+            text, active_mode=active_mode
         )
         planner_available = self._planner_available()
         needs_plan = self._needs_plan(text)

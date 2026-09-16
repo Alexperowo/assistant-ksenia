@@ -50,8 +50,16 @@ from butler.media_buttons import (
     SUITABLE_ACTIVATION_BUTTONS,
     MediaButtonListener,
 )
+from butler.background_research import (
+    is_research_cancel_command,
+    is_research_pause_command,
+    is_research_resume_command,
+    is_research_status_command,
+)
+from butler.fast_intents import fast_intent_reply
 from butler.orchestrator import RoutedAgentSession
 from butler.processes import current_process_image_path
+from butler.research import is_web_research_request
 from butler.resilience import RepeatingFailurePolicy
 from butler.speech import SpeechAnnouncer
 from butler.stt import (
@@ -928,6 +936,23 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             event = pending_live_turns.get_nowait()
         except queue.Empty:
             event = None
+        if event is None:
+            bg_result = session.background_research.poll_completed_result()
+            if bg_result is not None:
+                if not bg_result.cancelled:
+                    if bg_result.error:
+                        speech.say_and_wait(
+                            f"Поиск по запросу «{bg_result.request}» не удался: {bg_result.error}"
+                        )
+                    else:
+                        speech.say_and_wait(
+                            f"Результат поиска по запросу «{bg_result.request}». {bg_result.answer}"
+                        )
+                        session.record_exchange(
+                            f"[Фоновый поиск] {bg_result.request}", bg_result.answer
+                        )
+                    dialogue_active = True
+                continue
         if event is not None:
             dialogue_active = True
             trace_id = new_trace_id()
@@ -1006,9 +1031,10 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                 continue
         else:
             print("Ожидаю фразу «Ксения слушай»...")
+            wake_timeout = 2.0 if session.background_research.is_busy() else 300
             try:
                 wake_event = wake_listener.wait_event(
-                    timeout=300,
+                    timeout=wake_timeout,
                     external_events=(
                         headset_listener.events
                         if headset_listener is not None
@@ -1152,6 +1178,70 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             capture_service.close()
             speech.say_and_wait("Голосовой диалог завершён.")
             return 0
+
+        if is_research_status_command(user_text):
+            status_text = session.background_research.get_status()
+            speech.say_and_wait(status_text)
+            dialogue_active = True
+            continue
+        if is_research_cancel_command(user_text):
+            cancelled = session.background_research.cancel_active()
+            speech.say_and_wait(
+                "Поиск отменён." if cancelled else "Сейчас нет активного поиска для отмены."
+            )
+            dialogue_active = True
+            continue
+        if is_research_pause_command(user_text):
+            paused = session.background_research.pause_active()
+            speech.say_and_wait(
+                "Поиск приостановлен." if paused else "Сейчас нет активного поиска."
+            )
+            dialogue_active = True
+            continue
+        if is_research_resume_command(user_text):
+            resumed = session.background_research.resume_active()
+            speech.say_and_wait(
+                "Продолжаю поиск." if resumed else "Нет приостановленного поиска."
+            )
+            dialogue_active = True
+            continue
+
+        routing = settings.raw.get("routing", {})
+        fast_lookup_signals = routing.get("fast_lookup_signals", ())
+        fast_lookup_max_chars = int(routing.get("fast_lookup_max_chars", 180))
+        active_mode = (
+            session._assistant_mode_override or settings.assistant_mode()
+        )
+        current_weather = session._is_current_weather_request(
+            user_text, active_mode=active_mode
+        )
+        fast_reply = fast_intent_reply(user_text)
+        if (
+            not current_weather
+            and fast_reply is None
+            and is_web_research_request(
+                user_text,
+                fast_lookup_signals=fast_lookup_signals,
+                fast_lookup_max_chars=fast_lookup_max_chars,
+            )
+        ):
+            if session.background_research.is_busy():
+                speech.say_and_wait(
+                    "Поиск уже выполняется. Вы можете спросить «что нашла» или сказать «отмени поиск»."
+                )
+            else:
+                active_mode = (
+                    session._assistant_mode_override or settings.assistant_mode()
+                )
+                session.background_research.start_research(
+                    user_text,
+                    assistant_mode=active_mode,
+                )
+                speech.say_and_wait(
+                    "Поиск запущен. Пока могу ответить на другой вопрос."
+                )
+            dialogue_active = True
+            continue
 
         trusted_task_used = False
         live_stream_started = threading.Event()

@@ -35,6 +35,14 @@ class CliDialogueRecoveryTests(unittest.TestCase):
         self.monitor_threads = []
         self.enterContext(patch("builtins.print"))
 
+    def tearDown(self):
+        for thread in getattr(self, "monitor_threads", []):
+            if thread.is_alive():
+                thread.join(timeout=1.0)
+        for thread in threading.enumerate():
+            if thread.name.startswith("background-research-") and thread.is_alive():
+                thread.join(timeout=2.0)
+
     def run_dialogue(self, error, *, voice):
         def route(text, **kwargs):
             self.requests.append(text)
@@ -51,7 +59,7 @@ class CliDialogueRecoveryTests(unittest.TestCase):
             return AgentReply("Следующий ответ получен.", ())
 
         self.enterContext(patch.object(RoutedAgentSession, "_ask_exclusive", side_effect=route))
-        inputs = ["Найди новости", "Какое сегодня число?", "выход"]
+        inputs = ["Проверь систему", "Какое сегодня число?", "выход"]
         if not voice:
             self.enterContext(patch("builtins.input", side_effect=inputs))
             return _agent_chat(self.settings, self.speech)
@@ -81,9 +89,9 @@ class CliDialogueRecoveryTests(unittest.TestCase):
 
     def assert_recovers(self, error, *, voice):
         self.assertEqual(self.run_dialogue(error, voice=voice), 0)
-        self.assertEqual(self.requests, ["Найди новости", "Какое сегодня число?"])
+        self.assertEqual(self.requests, ["Проверь систему", "Какое сегодня число?"])
         tasks = {item["request"]: item for item in DurableTaskStore(self.settings.runtime_dir).list()}
-        failed = tasks["Найди новости"]
+        failed = tasks["Проверь систему"]
         self.assertEqual(failed["state"], TaskState.FAILED)
         self.assertEqual(failed["error"], str(error))
         self.assertIsNone(failed["confirmation"])
@@ -118,20 +126,22 @@ class CliDialogueRecoveryTests(unittest.TestCase):
         self.assert_recovers(ChatError("Search unavailable"), voice=True)
 
     def test_voice_continues_after_search_unavailable(self):
+        from butler.research import ResearchError
         self.assert_recovers(ResearchError("search_unavailable"), voice=True)
 
     def test_console_continues_after_search_permission_refusal(self):
+        from butler.research import ResearchError
         self.assert_recovers(ResearchError("confirmation_required"), voice=False)
 
     def test_console_does_not_hide_invalid_configuration(self):
         with self.assertRaises(ConfigError):
             self.run_dialogue(ConfigError("Invalid security configuration"), voice=False)
-        self.assertEqual(self.requests, ["Найди новости"])
+        self.assertEqual(self.requests, ["Проверь систему"])
 
     def test_voice_does_not_hide_invalid_configuration(self):
         with self.assertRaises(ConfigError):
             self.run_dialogue(ConfigError("Invalid security configuration"), voice=True)
-        self.assertEqual(self.requests, ["Найди новости"])
+        self.assertEqual(self.requests, ["Проверь систему"])
         self.assertTrue(all(not thread.is_alive() for thread in self.monitor_threads))
 
 
@@ -324,6 +334,133 @@ class CliDialogueRecoveryTests(unittest.TestCase):
         self.assertEqual(_voice_agent_active(self.settings, self.speech), 0)
         self.assertEqual(self.requests, ["Отменимая задача", "Новая задача"])
         self.assertEqual(self.activation_wake_calls, 1)
+
+    def test_voice_background_research_and_concurrent_dialogue(self):
+        research_gate = threading.Event()
+
+        def fake_research_run(request, session, **kwargs):
+            on_status = kwargs.get("on_status")
+            if on_status:
+                on_status("Читаю страницы")
+            research_gate.wait(timeout=2.0)
+            return AgentReply("Марсоход обнаружил древнее русло реки.", ())
+
+        self.enterContext(
+            patch(
+                "butler.background_research.ResearchCoordinator.run",
+                side_effect=fake_research_run,
+            )
+        )
+
+        def route(text, **kwargs):
+            self.requests.append(text)
+            return AgentReply(f"Ответ на {text}", ())
+
+        self.enterContext(patch.object(RoutedAgentSession, "_ask_exclusive", side_effect=route))
+
+        inputs = [
+            "Найди новости про марсоход",
+            "Какое сегодня число?",
+            "Что нашла?",
+            "выход",
+        ]
+
+        def wake_event(*, cancel_event=None, **_kwargs):
+            if cancel_event is None:
+                return {"event": "wake"}
+            self.monitor_threads.append(threading.current_thread())
+            deadline = time.monotonic() + 2
+            while not cancel_event.is_set() and time.monotonic() < deadline:
+                threading.Event().wait(0.005)
+            raise WakeListenerCancelled("Test listener cancelled")
+
+        self.enterContext(patch("butler.cli.AudioCaptureService"))
+        self.enterContext(patch("butler.cli.ModelResidencyCoordinator"))
+        listener = self.enterContext(patch("butler.cli.WakeListener"))
+        listener.return_value.wait_event.side_effect = wake_event
+        recognizer = self.enterContext(patch("butler.cli.SpeechRecognizer"))
+        recognizer.return_value.prepare.return_value = {"device": "cpu", "engine": "test"}
+        recognizer.return_value.listen_after_prompt.side_effect = [{"text": inputs[0]}]
+
+        call_idx = [1, 2, 3]
+
+        def on_listen_once(*args, **kwargs):
+            next_idx = call_idx.pop(0)
+            if next_idx == 2:
+                # After "Какое сегодня число?", release research so it's ready
+                research_gate.set()
+                time.sleep(0.05)
+            return {"text": inputs[next_idx]}
+
+        recognizer.return_value.listen_once.side_effect = on_listen_once
+
+        try:
+            self.assertEqual(_voice_agent_active(self.settings, self.speech), 0)
+        finally:
+            research_gate.set()
+
+        spoken_calls = [c.args[0] for c in self.speech.say_and_wait.call_args_list if c.args]
+        self.assertTrue(any("Поиск запущен" in text for text in spoken_calls))
+        self.assertTrue(any("Марсоход обнаружил древнее русло" in text for text in spoken_calls))
+        self.assertIn("Какое сегодня число?", self.requests)
+
+    def test_voice_background_research_cancel_command(self):
+        research_gate = threading.Event()
+
+        def fake_research_run(request, session, **kwargs):
+            control = kwargs.get("control")
+            while not research_gate.is_set():
+                if control:
+                    control.checkpoint()
+                time.sleep(0.01)
+            raise TaskCancelled("Cancelled by user")
+
+        self.enterContext(
+            patch(
+                "butler.background_research.ResearchCoordinator.run",
+                side_effect=fake_research_run,
+            )
+        )
+
+        inputs = [
+            "Найди новости про марсоход",
+            "Отмени поиск",
+            "выход",
+        ]
+
+        def wake_event(*, cancel_event=None, **_kwargs):
+            if cancel_event is None:
+                return {"event": "wake"}
+            self.monitor_threads.append(threading.current_thread())
+            deadline = time.monotonic() + 2
+            while not cancel_event.is_set() and time.monotonic() < deadline:
+                threading.Event().wait(0.005)
+            raise WakeListenerCancelled("Test listener cancelled")
+
+        self.enterContext(patch("butler.cli.AudioCaptureService"))
+        self.enterContext(patch("butler.cli.ModelResidencyCoordinator"))
+        listener = self.enterContext(patch("butler.cli.WakeListener"))
+        listener.return_value.wait_event.side_effect = wake_event
+        recognizer = self.enterContext(patch("butler.cli.SpeechRecognizer"))
+        recognizer.return_value.prepare.return_value = {"device": "cpu", "engine": "test"}
+        recognizer.return_value.listen_after_prompt.side_effect = [{"text": inputs[0]}]
+
+        pop_index = [1, 2]
+
+        def on_listen_once(*args, **kwargs):
+            research_gate.set()
+            return {"text": inputs[pop_index.pop(0)]}
+
+        recognizer.return_value.listen_once.side_effect = on_listen_once
+
+        try:
+            self.assertEqual(_voice_agent_active(self.settings, self.speech), 0)
+        finally:
+            research_gate.set()
+
+        spoken_calls = [c.args[0] for c in self.speech.say_and_wait.call_args_list if c.args]
+        self.assertTrue(any("Поиск запущен" in text for text in spoken_calls))
+        self.assertTrue(any("Поиск отмен" in text for text in spoken_calls))
 
 
 if __name__ == "__main__":
