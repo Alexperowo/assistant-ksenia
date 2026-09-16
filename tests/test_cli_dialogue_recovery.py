@@ -8,13 +8,14 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from butler.agent import AgentReply
-from butler.chat import ChatError
+from butler.chat import ChatError, _reader_counts
 from butler.cli import _agent_chat, _voice_agent_active
 from butler.config import ConfigError, load_settings
+from butler.instance_lock import SingleInstance
 from butler.model_manager import ModelManagerError
 from butler.orchestrator import RoutedAgentSession
 from butler.research import ResearchError
-from butler.tasking import DurableTaskStore, TaskState
+from butler.tasking import DurableTaskStore, TaskCancelled, TaskState
 from butler.user_messages import spoken_agent_error
 from butler.wake import WakeListenerCancelled
 
@@ -334,6 +335,11 @@ class CliDialogueRecoveryTests(unittest.TestCase):
         self.assertEqual(_voice_agent_active(self.settings, self.speech), 0)
         self.assertEqual(self.requests, ["Отменимая задача", "Новая задача"])
         self.assertEqual(self.activation_wake_calls, 1)
+        tasks = {item["request"]: item for item in DurableTaskStore(self.settings.runtime_dir).list()}
+        cancelled = tasks["Отменимая задача"]
+        self.assertEqual(cancelled["state"], TaskState.CANCELLED)
+        self.assertIsNone(cancelled["confirmation"])
+        self.assertEqual(tasks["Новая задача"]["state"], TaskState.COMPLETED)
 
     def test_voice_background_research_and_concurrent_dialogue(self):
         research_gate = threading.Event()
@@ -461,6 +467,206 @@ class CliDialogueRecoveryTests(unittest.TestCase):
         spoken_calls = [c.args[0] for c in self.speech.say_and_wait.call_args_list if c.args]
         self.assertTrue(any("Поиск запущен" in text for text in spoken_calls))
         self.assertTrue(any("Поиск отмен" in text for text in spoken_calls))
+
+    def test_console_c1_acceptance_all_four_failure_modes_and_recoveries(self):
+        failure_map = {
+            "Сбой 1 дедлайн": ResearchError("deadline_exceeded"),
+            "Сбой 2 невалидный инструмент": ChatError("Некорректный вызов инструмента: невалидный JSON аргументов"),
+            "Сбой 3 отказ подтверждения": ResearchError("confirmation_required"),
+            "Сбой 4 отмена задачи": TaskCancelled("Пользователь отменил задачу"),
+        }
+        success_map = {
+            "Какое сегодня число?": "Сегодня 16 сентября 2026 года.",
+            "Какая столица Франции?": "Париж.",
+            "Сколько будет дважды два?": "Четыре.",
+            "Ты меня слышишь?": "Да, я вас слышу.",
+        }
+        inputs = [
+            "Сбой 1 дедлайн",
+            "Какое сегодня число?",
+            "Сбой 2 невалидный инструмент",
+            "Какая столица Франции?",
+            "Сбой 3 отказ подтверждения",
+            "Сколько будет дважды два?",
+            "Сбой 4 отмена задачи",
+            "Ты меня слышишь?",
+            "выход",
+        ]
+
+        def route(text, **kwargs):
+            self.requests.append(text)
+            if text in failure_map:
+                kwargs["on_status"]("Выполняю операцию")
+                control = kwargs["control"]
+                control.store.transition(
+                    control.task_id,
+                    TaskState.WAITING_CONFIRMATION,
+                    "Ожидаю подтверждение",
+                    confirmation={"tool": "test_tool", "message": f"Подтвердите {text}"},
+                )
+                raise failure_map[text]
+            return AgentReply(success_map[text], ())
+
+        self.enterContext(patch.object(RoutedAgentSession, "_ask_exclusive", side_effect=route))
+        self.enterContext(patch("builtins.input", side_effect=inputs))
+
+        code = _agent_chat(self.settings, self.speech)
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self.requests,
+            [
+                "Сбой 1 дедлайн",
+                "Какое сегодня число?",
+                "Сбой 2 невалидный инструмент",
+                "Какая столица Франции?",
+                "Сбой 3 отказ подтверждения",
+                "Сколько будет дважды два?",
+                "Сбой 4 отмена задачи",
+                "Ты меня слышишь?",
+            ],
+        )
+
+        tasks = {item["request"]: item for item in DurableTaskStore(self.settings.runtime_dir).list()}
+        self.assertEqual(len(tasks), 8)
+
+        self.assertEqual(tasks["Сбой 1 дедлайн"]["state"], TaskState.FAILED)
+        self.assertEqual(tasks["Сбой 1 дедлайн"]["error"], str(failure_map["Сбой 1 дедлайн"]))
+        self.assertIsNone(tasks["Сбой 1 дедлайн"]["confirmation"])
+        self.assertEqual(tasks["Какое сегодня число?"]["state"], TaskState.COMPLETED)
+        self.assertEqual(tasks["Какое сегодня число?"]["answer"], "Сегодня 16 сентября 2026 года.")
+
+        self.assertEqual(tasks["Сбой 2 невалидный инструмент"]["state"], TaskState.FAILED)
+        self.assertEqual(tasks["Сбой 2 невалидный инструмент"]["error"], str(failure_map["Сбой 2 невалидный инструмент"]))
+        self.assertIsNone(tasks["Сбой 2 невалидный инструмент"]["confirmation"])
+        self.assertEqual(tasks["Какая столица Франции?"]["state"], TaskState.COMPLETED)
+        self.assertEqual(tasks["Какая столица Франции?"]["answer"], "Париж.")
+
+        self.assertEqual(tasks["Сбой 3 отказ подтверждения"]["state"], TaskState.FAILED)
+        self.assertEqual(tasks["Сбой 3 отказ подтверждения"]["error"], str(failure_map["Сбой 3 отказ подтверждения"]))
+        self.assertIsNone(tasks["Сбой 3 отказ подтверждения"]["confirmation"])
+        self.assertEqual(tasks["Сколько будет дважды два?"]["state"], TaskState.COMPLETED)
+        self.assertEqual(tasks["Сколько будет дважды два?"]["answer"], "Четыре.")
+
+        self.assertEqual(tasks["Сбой 4 отмена задачи"]["state"], TaskState.CANCELLED)
+        self.assertIsNone(tasks["Сбой 4 отмена задачи"]["confirmation"])
+        self.assertEqual(tasks["Ты меня слышишь?"]["state"], TaskState.COMPLETED)
+        self.assertEqual(tasks["Ты меня слышишь?"]["answer"], "Да, я вас слышу.")
+
+        with SingleInstance(self.settings.root, "agent-task") as acquired:
+            self.assertTrue(acquired)
+        self.assertEqual(_reader_counts()["active_reader_threads"], 0)
+        self.assertEqual(_reader_counts()["stuck_reader_threads"], 0)
+
+    def test_voice_c1_acceptance_all_four_failure_modes_and_recoveries(self):
+        failure_map = {
+            "Сбой 1 дедлайн": ResearchError("deadline_exceeded"),
+            "Сбой 2 невалидный инструмент": ChatError("Некорректный вызов инструмента: невалидный JSON аргументов"),
+            "Сбой 3 отказ подтверждения": ResearchError("confirmation_required"),
+            "Сбой 4 отмена задачи": TaskCancelled("Пользователь отменил задачу"),
+        }
+        success_map = {
+            "Какое сегодня число?": "Сегодня 16 сентября 2026 года.",
+            "Какая столица Франции?": "Париж.",
+            "Сколько будет дважды два?": "Четыре.",
+            "Ты меня слышишь?": "Да, я вас слышу.",
+        }
+        inputs = [
+            "Сбой 1 дедлайн",
+            "Какое сегодня число?",
+            "Сбой 2 невалидный инструмент",
+            "Какая столица Франции?",
+            "Сбой 3 отказ подтверждения",
+            "Сколько будет дважды два?",
+            "Сбой 4 отмена задачи",
+            "Ты меня слышишь?",
+            "выход",
+        ]
+
+        def route(text, **kwargs):
+            self.requests.append(text)
+            if text in failure_map:
+                kwargs["on_status"]("Выполняю операцию")
+                control = kwargs["control"]
+                control.store.transition(
+                    control.task_id,
+                    TaskState.WAITING_CONFIRMATION,
+                    "Ожидаю подтверждение",
+                    confirmation={"tool": "test_tool", "message": f"Подтвердите {text}"},
+                )
+                raise failure_map[text]
+            return AgentReply(success_map[text], ())
+
+        self.enterContext(patch.object(RoutedAgentSession, "_ask_exclusive", side_effect=route))
+
+        self.activation_wake_calls = 0
+
+        def wake_event(*, cancel_event=None, **_kwargs):
+            if cancel_event is None:
+                self.activation_wake_calls += 1
+                return {"event": "wake"}
+            self.monitor_threads.append(threading.current_thread())
+            deadline = time.monotonic() + 2
+            while not cancel_event.is_set() and time.monotonic() < deadline:
+                threading.Event().wait(0.005)
+            raise WakeListenerCancelled("Test listener cancelled")
+
+        self.enterContext(patch("butler.cli.AudioCaptureService"))
+        self.enterContext(patch("butler.cli.ModelResidencyCoordinator"))
+        listener = self.enterContext(patch("butler.cli.WakeListener"))
+        listener.return_value.wait_event.side_effect = wake_event
+        recognizer = self.enterContext(patch("butler.cli.SpeechRecognizer"))
+        recognizer.return_value.prepare.return_value = {"device": "cpu", "engine": "test"}
+        recognizer.return_value.listen_after_prompt.side_effect = [{"text": inputs[0]}]
+        recognizer.return_value.listen_once.side_effect = [{"text": text} for text in inputs[1:]]
+
+        code = _voice_agent_active(self.settings, self.speech)
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self.requests,
+            [
+                "Сбой 1 дедлайн",
+                "Какое сегодня число?",
+                "Сбой 2 невалидный инструмент",
+                "Какая столица Франции?",
+                "Сбой 3 отказ подтверждения",
+                "Сколько будет дважды два?",
+                "Сбой 4 отмена задачи",
+                "Ты меня слышишь?",
+            ],
+        )
+        self.assertEqual(self.activation_wake_calls, 1)
+
+        tasks = {item["request"]: item for item in DurableTaskStore(self.settings.runtime_dir).list()}
+        self.assertEqual(len(tasks), 8)
+
+        self.assertEqual(tasks["Сбой 1 дедлайн"]["state"], TaskState.FAILED)
+        self.assertEqual(tasks["Сбой 1 дедлайн"]["error"], str(failure_map["Сбой 1 дедлайн"]))
+        self.assertIsNone(tasks["Сбой 1 дедлайн"]["confirmation"])
+        self.assertEqual(tasks["Какое сегодня число?"]["state"], TaskState.COMPLETED)
+        self.assertEqual(tasks["Какое сегодня число?"]["answer"], "Сегодня 16 сентября 2026 года.")
+
+        self.assertEqual(tasks["Сбой 2 невалидный инструмент"]["state"], TaskState.FAILED)
+        self.assertEqual(tasks["Сбой 2 невалидный инструмент"]["error"], str(failure_map["Сбой 2 невалидный инструмент"]))
+        self.assertIsNone(tasks["Сбой 2 невалидный инструмент"]["confirmation"])
+        self.assertEqual(tasks["Какая столица Франции?"]["state"], TaskState.COMPLETED)
+        self.assertEqual(tasks["Какая столица Франции?"]["answer"], "Париж.")
+
+        self.assertEqual(tasks["Сбой 3 отказ подтверждения"]["state"], TaskState.FAILED)
+        self.assertEqual(tasks["Сбой 3 отказ подтверждения"]["error"], str(failure_map["Сбой 3 отказ подтверждения"]))
+        self.assertIsNone(tasks["Сбой 3 отказ подтверждения"]["confirmation"])
+        self.assertEqual(tasks["Сколько будет дважды два?"]["state"], TaskState.COMPLETED)
+        self.assertEqual(tasks["Сколько будет дважды два?"]["answer"], "Четыре.")
+
+        self.assertEqual(tasks["Сбой 4 отмена задачи"]["state"], TaskState.CANCELLED)
+        self.assertIsNone(tasks["Сбой 4 отмена задачи"]["confirmation"])
+        self.assertEqual(tasks["Ты меня слышишь?"]["state"], TaskState.COMPLETED)
+        self.assertEqual(tasks["Ты меня слышишь?"]["answer"], "Да, я вас слышу.")
+
+        with SingleInstance(self.settings.root, "agent-task") as acquired:
+            self.assertTrue(acquired)
+        self.assertEqual(_reader_counts()["active_reader_threads"], 0)
+        self.assertEqual(_reader_counts()["stuck_reader_threads"], 0)
+        self.assertTrue(all(not t.is_alive() for t in self.monitor_threads))
 
 
 if __name__ == "__main__":

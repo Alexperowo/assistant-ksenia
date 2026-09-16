@@ -1589,18 +1589,28 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                     live_snapshot.generated_text,
                     live_snapshot.spoken_text,
                 )
-                try:
-                    task_store.transition(
-                        task.id,
-                        TaskState.CANCELLED,
-                        "Отменено",
-                        generated_answer=live_snapshot.generated_text,
-                        spoken_answer=live_snapshot.spoken_text,
-                        confirmation=None,
-                        resumable=False,
-                    )
-                except (KeyError, OSError, ValueError):
-                    pass
+            else:
+                speech.stop()
+            try:
+                task_store.transition(
+                    task.id,
+                    TaskState.CANCELLED,
+                    "Отменено",
+                    generated_answer=(
+                        live_snapshot.generated_text
+                        if live_snapshot is not None
+                        else None
+                    ),
+                    spoken_answer=(
+                        live_snapshot.spoken_text
+                        if live_snapshot is not None
+                        else None
+                    ),
+                    confirmation=None,
+                    resumable=False,
+                )
+            except (KeyError, OSError, ValueError):
+                pass
             diagnostic_event(
                 settings,
                 "voice_agent",
@@ -1804,6 +1814,18 @@ def _agent_chat(settings, speech: SpeechAnnouncer) -> int:
             ):
                 speech.say(reply.text)
         except TaskCancelled:
+            if "task" in locals():
+                try:
+                    task_store.transition(
+                        task.id,
+                        TaskState.CANCELLED,
+                        "Отменено",
+                        confirmation=None,
+                        resumable=False,
+                    )
+                except (KeyError, OSError, ValueError):
+                    pass
+            speech.stop()
             print("Задача отменена.\n")
             speech.say("Задача отменена.")
         except (ChatError, ModelManagerError) as exc:

@@ -1,5 +1,11 @@
 # История изменений
 
+## 16 сентября 2026 — полная приёмка C1 и очистка состояния отмены (TaskCancelled)
+
+- Fixed: Устранена утечка незавершённых состояний задач и ожидающих подтверждений при отмене задачи `TaskCancelled`: в `_voice_agent_active` и `_agent_chat` (`src/butler/cli.py`) задача гарантированно переводится в `TaskState.CANCELLED`, поле `confirmation` очищается (`confirmation=None`), а воспроизведение речи немедленно прерывается (`speech.stop()`).
+- Added: Сквозные приёмочные тесты Этапа C1 (`test_console_c1_acceptance_all_four_failure_modes_and_recoveries` и `test_voice_c1_acceptance_all_four_failure_modes_and_recoveries` в `tests/test_cli_dialogue_recovery.py`): в единой непрерывной сессии смоделированы последовательно 4 критических сбоя (сетевой таймаут/дедлайн, невалидный вызов инструмента, отказ в подтверждении, отмена задачи), после каждого из которых следующий простой вопрос отвечает штатно и успешно завершает задачу.
+- Verified: Подтверждены ключевые инварианты: немедленная доступность `SingleInstance("agent-task")`, 0 активных и 0 зависших `reader_threads`, 0 зависших подтверждений, сохранение активного диалога (`activation_wake_calls == 1`). Тестовый набор вырос до 524 тестов, все пройдены успешно за 28,7 с без ошибок и предупреждений. `scripts/check.ps1` завершён успешно (код 0).
+
 ## 16 сентября 2026 — фоновое исследование на Agents-A1 во время непрерывного разговора с UI-Mate (C4 / F02)
 
 - Added: Модуль `src/butler/background_research.py` с компонентом `BackgroundResearchManager` для асинхронного выполнения веб-поиска на модели Agents-A1 (`research_fast`) параллельно с разговором на UI-Mate (`ui_fast`).
