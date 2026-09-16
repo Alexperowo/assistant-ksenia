@@ -264,15 +264,15 @@ def _open_completion_response(
     request_id: str,
 ):
     """Own a loopback socket before connect/send/headers, not only the body."""
-    if checkpoint is None:
-        return urllib.request.urlopen(request, timeout=timeout)
-    checkpoint()
     parsed = urlsplit(request.full_url)
     host = parsed.hostname
     if parsed.scheme != "http" or host not in {"127.0.0.1", "localhost", "::1"}:
         raise OSError("Completion transport requires a loopback HTTP endpoint.")
     if parsed.username or parsed.password:
         raise OSError("Credentials in the model endpoint URL are forbidden.")
+    if checkpoint is None:
+        return urllib.request.urlopen(request, timeout=timeout)
+    checkpoint()
     # localhost is pinned to loopback IPv4, with no DNS/proxy/redirect machinery.
     host = "127.0.0.1" if host == "localhost" else host
     port = parsed.port or 80
@@ -575,9 +575,13 @@ def count_chat_tokens(
         method="POST",
     )
     try:
-        if checkpoint is not None:
-            checkpoint()
-        response = urllib.request.urlopen(request, timeout=30)
+        response = _open_completion_response(
+            request,
+            checkpoint=checkpoint,
+            timeout=30,
+            diagnostics_source=settings,
+            request_id=request_id,
+        )
         try:
             raw = (
                 _cancellable_response_read(
@@ -604,6 +608,18 @@ def count_chat_tokens(
                 **_message_metrics(message_list),
             )
             return len(tokens)
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        diagnostic_event(
+            settings,
+            "chat",
+            "token_count_fallback",
+            level="warning",
+            duration_ms=round((time.monotonic() - started) * 1000),
+            error_type=type(exc).__name__,
+            request_id=request_id,
+            **_message_metrics(message_list),
+        )
     except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
         diagnostic_event(
             settings,
@@ -685,9 +701,13 @@ def stream_chat(
         streaming=True,
     )
     try:
-        if checkpoint is not None:
-            checkpoint()
-        response = urllib.request.urlopen(request, timeout=600)
+        response = _open_completion_response(
+            request,
+            checkpoint=checkpoint,
+            timeout=600,
+            diagnostics_source=settings,
+            request_id=request_id,
+        )
         try:
             lines = (
                 _cancellable_response_lines(
@@ -751,6 +771,9 @@ def stream_chat(
             duration_ms=round((time.monotonic() - started) * 1000),
             request_id=request_id,
         )
+        if checkpoint is not None:
+            exc.close()
+            raise ChatError(f"Сервер модели вернул ошибку {exc.code}.") from exc
         detail = exc.read().decode("utf-8", errors="replace")
         raise ChatError(f"Сервер модели вернул ошибку {exc.code}: {detail}") from exc
     except (OSError, urllib.error.URLError) as exc:

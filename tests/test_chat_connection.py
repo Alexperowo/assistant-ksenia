@@ -10,7 +10,14 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.request import Request
 
-from butler.chat import ChatError, _open_completion_response, _reader_counts, complete_chat
+from butler.chat import (
+    ChatError,
+    _open_completion_response,
+    _reader_counts,
+    complete_chat,
+    count_chat_tokens,
+    stream_chat,
+)
 from butler.tasking import TaskCancelled
 
 
@@ -43,6 +50,8 @@ def local_model(mode):
                 self.end_headers()
                 if mode == 'error':
                     release.wait(2)
+                elif self.path == '/tokenize':
+                    self.wfile.write(b'{"tokens": [1, 2, 3]}\n')
                 else:
                     chunk = {'choices': [{'delta': {'content': 'Готово.'}, 'finish_reason': 'stop'}]}
                     self.wfile.write(('data: ' + json.dumps(chunk) + '\n\n').encode())
@@ -170,3 +179,61 @@ class CompletionConnectionTests(unittest.TestCase):
                                           checkpoint=lambda: None, timeout=1,
                                           diagnostics_source=None, request_id='test-remote')
             create_socket.assert_not_called()
+
+    def test_stream_chat_cancel_while_waiting_for_headers_stops_transport_worker(self):
+        for _ in range(5):
+            with local_model('stalled') as (settings, entered, requests):
+                def checkpoint():
+                    if entered.is_set():
+                        raise TaskCancelled('cancel stream header wait')
+                started = time.monotonic()
+                with self.assertRaises(TaskCancelled):
+                    list(stream_chat(settings, [{'role': 'user', 'content': 'test'}], checkpoint=checkpoint))
+                self.assertLess(time.monotonic() - started, 1)
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(_reader_counts()['active_reader_threads'], 0)
+                self.assertEqual(_reader_counts()['stuck_reader_threads'], 0)
+
+    def test_stream_chat_ignores_environment_proxy(self):
+        with local_model('normal') as (settings, _entered, requests), patch.dict(
+            'os.environ', {'http_proxy': 'http://127.0.0.1:1', 'no_proxy': ''}
+        ):
+            chunks = list(stream_chat(settings, [], checkpoint=lambda: None))
+            self.assertEqual(chunks, ['Готово.'])
+            self.assertTrue(requests[0]['stream'])
+
+    def test_stream_chat_http_error_does_not_wait_for_unbounded_error_body(self):
+        with local_model('error') as (settings, _entered, _requests):
+            started = time.monotonic()
+            with self.assertRaisesRegex(ChatError, '503'):
+                list(stream_chat(settings, [], checkpoint=lambda: None))
+            self.assertLess(time.monotonic() - started, 1)
+
+    def test_count_chat_tokens_cancels_during_header_wait(self):
+        with local_model('stalled') as (settings, entered, requests):
+            def checkpoint():
+                if entered.is_set():
+                    raise TaskCancelled('cancel tokenizer header wait')
+            started = time.monotonic()
+            with self.assertRaises(TaskCancelled):
+                count_chat_tokens(settings, [{'role': 'user', 'content': 'test'}], checkpoint=checkpoint)
+            self.assertLess(time.monotonic() - started, 1)
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(_reader_counts()['active_reader_threads'], 0)
+            self.assertEqual(_reader_counts()['stuck_reader_threads'], 0)
+
+    def test_count_chat_tokens_http_error_does_not_wait_for_unbounded_error_body(self):
+        with local_model('error') as (settings, _entered, _requests):
+            started = time.monotonic()
+            fallback = count_chat_tokens(
+                settings, [{'role': 'user', 'content': 'тестовое сообщение'}], checkpoint=lambda: None
+            )
+            self.assertGreater(fallback, 0)
+            self.assertLess(time.monotonic() - started, 1)
+
+    def test_count_chat_tokens_ignores_environment_proxy(self):
+        with local_model('normal') as (settings, _entered, requests), patch.dict(
+            'os.environ', {'http_proxy': 'http://127.0.0.1:1', 'no_proxy': ''}
+        ):
+            tokens = count_chat_tokens(settings, [{'role': 'user', 'content': 'тест'}], checkpoint=lambda: None)
+            self.assertEqual(tokens, 3)

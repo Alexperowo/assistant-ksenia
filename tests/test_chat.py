@@ -295,7 +295,7 @@ class ChatTransportTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             settings = self._settings(Path(directory))
-            with patch("butler.chat.urllib.request.urlopen", return_value=response):
+            with patch("butler.chat._open_completion_response", return_value=response):
                 with self.assertRaisesRegex(RuntimeError, "tokenizer cancelled"):
                     count_chat_tokens(
                         settings,
@@ -420,7 +420,7 @@ class ChatTransportTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             settings = self._settings(Path(directory))
-            with patch("butler.chat.urllib.request.urlopen", return_value=response):
+            with patch("butler.chat._open_completion_response", return_value=response):
                 stream = stream_chat(
                     settings,
                     self._messages(),
@@ -441,7 +441,7 @@ class ChatTransportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             settings = self._settings(Path(directory))
             with patch(
-                "butler.chat.urllib.request.urlopen", return_value=blocking
+                "butler.chat._open_completion_response", return_value=blocking
             ):
                 abandoned = stream_chat(
                     settings,
@@ -466,7 +466,7 @@ class ChatTransportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             settings = self._settings(Path(directory))
             with (
-                patch("butler.chat.urllib.request.urlopen", return_value=response),
+                patch("butler.chat._open_completion_response", return_value=response),
                 patch("butler.chat.diagnostic_event") as diagnostic_event,
             ):
                 with self.assertRaisesRegex(RuntimeError, "while stalled"):
@@ -504,7 +504,7 @@ class ChatTransportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             settings = self._settings(Path(directory))
             with (
-                patch("butler.chat.urllib.request.urlopen", return_value=response),
+                patch("butler.chat._open_completion_response", return_value=response),
                 patch("butler.chat.diagnostic_milestone") as milestone,
             ):
                 with self.assertRaises(TaskCancelled):
