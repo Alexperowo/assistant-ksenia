@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+import argparse
 import hashlib
 import json
 import sys
@@ -24,13 +23,41 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Живая проверка локального RAG и эмбеддера")
+    parser.add_argument(
+        "--enabled",
+        "--force",
+        action="store_true",
+        help="Запустить проверку RAG даже если в базовой конфигурации enabled=false",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     settings = load_settings(ROOT)
-    config = settings.raw.get("rag", {})
+    config = dict(settings.raw.get("rag", {}))
+    if args.enabled:
+        config["enabled"] = True
+        settings.raw.setdefault("rag", {})["enabled"] = True
     if not bool(config.get("enabled", False)):
         print("ПОЗЖЕ: RAG выключен в конфигурации; живая проверка эмбеддера пропущена.")
         return 0
-    model = Path(str(config.get("model_path", ""))).resolve()
+    raw_model = Path(str(config.get("model_path", ""))).expanduser()
+    model = (
+        raw_model.resolve()
+        if raw_model.is_absolute()
+        else (ROOT / raw_model).resolve()
+    )
+    if not model.is_file() and not raw_model.is_absolute():
+        models_dir_candidate = (settings.models_dir / raw_model).resolve()
+        if models_dir_candidate.is_file():
+            model = models_dir_candidate
+        else:
+            models_dir_named = (settings.models_dir / raw_model.name).resolve()
+            if models_dir_named.is_file():
+                model = models_dir_named
     expected_size = int(config.get("expected_size_bytes", 0) or 0)
     expected_hash = str(config.get("sha256", "")).casefold()
     if not model.is_file():

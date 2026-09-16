@@ -75,11 +75,20 @@ class LlamaCppEmbeddingService:
         self.settings = settings
         config = settings.raw.get("rag", {})
         raw_model = Path(str(config.get("model_path", ""))).expanduser()
-        self.model_path = (
+        candidate = (
             raw_model.resolve()
             if raw_model.is_absolute()
             else (settings.root / raw_model).resolve()
         )
+        if not candidate.is_file() and not raw_model.is_absolute():
+            models_dir_candidate = (settings.models_dir / raw_model).resolve()
+            if models_dir_candidate.is_file():
+                candidate = models_dir_candidate
+            else:
+                models_dir_named = (settings.models_dir / raw_model.name).resolve()
+                if models_dir_named.is_file():
+                    candidate = models_dir_named
+        self.model_path = candidate
         self.port = int(config.get("port", 18081))
         self.context_size = int(config.get("context_size", 8192))
         self.threads = max(1, int(config.get("cpu_threads", 6)))

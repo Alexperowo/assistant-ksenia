@@ -125,7 +125,9 @@ $cancellationResult = Invoke-PythonCaptured @(
 $cancellationResult.Lines | Tee-Object -FilePath $report -Append
 if ($cancellationResult.Code -ne 0) { exit $cancellationResult.Code }
 
-$ragResult = Invoke-PythonCaptured @((Join-Path $projectRoot 'scripts\test-rag.py'))
+$ragArguments = @((Join-Path $projectRoot 'scripts\test-rag.py'))
+if ($env:KSENIA_TEST_RAG -eq '1') { $ragArguments += '--enabled' }
+$ragResult = Invoke-PythonCaptured $ragArguments
 $ragResult.Lines | Tee-Object -FilePath $report -Append
 if ($ragResult.Code -ne 0) { exit $ragResult.Code }
 
