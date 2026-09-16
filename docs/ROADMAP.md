@@ -31,12 +31,11 @@
   verification используют один checkpoint, параллельные tools не получают новый
   срок. Deadline становится recoverable error, поздний ответ не сохраняется.
   Пауза учитывается в wall-clock; истечение проверяется и внутри paused checkpoint.
-- [ ] Остаются остальные connect/send fault-сценарии и аудит legacy HTTP opener-путей
-  (`stream_chat`, tokenizer, вызовы вне research без checkpoint). Общий бюджет
-  начинается после подготовки модели; cleanup/restore и сторонние callbacks
-  не выдаются за гарантированный пользовательский SLA.
-  Persistent browser-control и другие активные действия требуют
-  отдельного контракта остановки без обещания rollback.
+- [x] Аудит и защита HTTP-транспорта локальных моделей: `stream_chat` и
+  `count_chat_tokens` переведены на собственный `_open_completion_response` с loopback-проверкой,
+  обходом proxy, неблокирующим прерыванием ожидания заголовков при `TaskCancelled`,
+  защитой от зависания на теле HTTP-ошибок (`exc.close()`) и контролем потоков-читателей
+  (6 новых тестов с реальным HTTP-сервером в `tests/test_chat_connection.py`, 34/34 пройдены).
 - [x] Исправить Fast/Thinking и универсальные пользовательские настройки (C2):
   исправлен разбор команд Thinking/Fast с отрицаниями и защитой от ложных срабатываний
   на вопросах (F04); устранён хардкод имени пользователя в базовых defaults, CLI,
