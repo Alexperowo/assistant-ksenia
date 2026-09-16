@@ -138,6 +138,19 @@ def main() -> int:
         result = json.loads(recognizer.FinalResult())
         text = str(result.get("text", "")).strip()
         if not text:
+            if endpoint_reason == "no_speech":
+                print(
+                    json.dumps(
+                        {
+                            "event": "timeout",
+                            "error": "Речь не обнаружена вовремя.",
+                            **telemetry,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
+                return 0
             raise RuntimeError("Речь не распознана. Говорите после слова «Слушаю».")
         print(
             json.dumps(

@@ -242,6 +242,12 @@ class Settings:
         return raw_name or "Пользователь"
 
     @property
+    def conversational_silence_timeout_seconds(self) -> float:
+        return float(
+            self.raw.get("voice", {}).get("conversational_silence_timeout_seconds", 8.0)
+        )
+
+    @property
     def announce_status(self) -> bool:
         return bool(self.raw["assistant"].get("announce_status", True))
 
@@ -1104,6 +1110,21 @@ def load_settings(root: Path | None = None) -> Settings:
     voice["confirmation_microphone_handoff_timeout_seconds"] = (
         confirmation_handoff_timeout
     )
+    try:
+        conversational_silence_timeout = float(
+            voice.get("conversational_silence_timeout_seconds", 8.0)
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            "Тайм-аут тишины непрерывного диалога повреждён."
+        ) from exc
+    if not math.isfinite(conversational_silence_timeout) or not (
+        1.0 <= conversational_silence_timeout <= 60.0
+    ):
+        raise ConfigError(
+            "Тайм-аут тишины непрерывного диалога должен быть от 1,0 до 60,0 секунд."
+        )
+    voice["conversational_silence_timeout_seconds"] = conversational_silence_timeout
     playback_backend = str(voice.get("playback_backend", "system")).strip().casefold()
     if playback_backend not in {"system", "pcm"}:
         raise ConfigError("voice.playback_backend должен быть system или pcm.")

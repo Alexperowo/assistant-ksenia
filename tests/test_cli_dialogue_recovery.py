@@ -56,8 +56,11 @@ class CliDialogueRecoveryTests(unittest.TestCase):
             self.enterContext(patch("builtins.input", side_effect=inputs))
             return _agent_chat(self.settings, self.speech)
 
+        self.activation_wake_calls = 0
+
         def wake_event(*, cancel_event=None, **_kwargs):
             if cancel_event is None:
+                self.activation_wake_calls += 1
                 return {"event": "wake"}
             self.monitor_threads.append(threading.current_thread())
             deadline = time.monotonic() + 2
@@ -69,9 +72,11 @@ class CliDialogueRecoveryTests(unittest.TestCase):
         self.enterContext(patch("butler.cli.ModelResidencyCoordinator"))
         listener = self.enterContext(patch("butler.cli.WakeListener"))
         listener.return_value.wait_event.side_effect = wake_event
+        self.wake_listener = listener.return_value
         recognizer = self.enterContext(patch("butler.cli.SpeechRecognizer"))
         recognizer.return_value.prepare.return_value = {"device": "cpu", "engine": "test"}
-        recognizer.return_value.listen_after_prompt.side_effect = [{"text": text} for text in inputs]
+        recognizer.return_value.listen_after_prompt.side_effect = [{"text": inputs[0]}]
+        recognizer.return_value.listen_once.side_effect = [{"text": text} for text in inputs[1:]]
         return _voice_agent_active(self.settings, self.speech)
 
     def assert_recovers(self, error, *, voice):
@@ -84,6 +89,8 @@ class CliDialogueRecoveryTests(unittest.TestCase):
         self.assertIsNone(failed["confirmation"])
         self.assertEqual(tasks["Какое сегодня число?"]["state"], TaskState.COMPLETED)
         self.assertTrue(all(not thread.is_alive() for thread in self.monitor_threads))
+        if voice:
+            self.assertEqual(self.activation_wake_calls, 1)
         # A failed task must not continue voicing stale progress behind the error.
         calls = self.speech.method_calls
         progress = next(i for i, call in enumerate(calls) if call.args == ("Ищу источники",))
@@ -126,6 +133,197 @@ class CliDialogueRecoveryTests(unittest.TestCase):
             self.run_dialogue(ConfigError("Invalid security configuration"), voice=True)
         self.assertEqual(self.requests, ["Найди новости"])
         self.assertTrue(all(not thread.is_alive() for thread in self.monitor_threads))
+
+
+    def test_voice_multi_turn_dialogue_without_wake_word(self):
+        def route(text, **kwargs):
+            self.requests.append(text)
+            return AgentReply(f"Ответ на {text}", ())
+
+        self.enterContext(patch.object(RoutedAgentSession, "_ask_exclusive", side_effect=route))
+        inputs = ["Привет", "Как дела?", "Какая погода?", "выход"]
+
+        self.activation_wake_calls = 0
+
+        def wake_event(*, cancel_event=None, **_kwargs):
+            if cancel_event is None:
+                self.activation_wake_calls += 1
+                return {"event": "wake"}
+            self.monitor_threads.append(threading.current_thread())
+            deadline = time.monotonic() + 2
+            while not cancel_event.is_set() and time.monotonic() < deadline:
+                threading.Event().wait(0.005)
+            raise WakeListenerCancelled("Test listener cancelled")
+
+        self.enterContext(patch("butler.cli.AudioCaptureService"))
+        self.enterContext(patch("butler.cli.ModelResidencyCoordinator"))
+        listener = self.enterContext(patch("butler.cli.WakeListener"))
+        listener.return_value.wait_event.side_effect = wake_event
+        recognizer = self.enterContext(patch("butler.cli.SpeechRecognizer"))
+        recognizer.return_value.prepare.return_value = {"device": "cpu", "engine": "test"}
+        recognizer.return_value.listen_after_prompt.side_effect = [{"text": inputs[0]}]
+        recognizer.return_value.listen_once.side_effect = [{"text": text} for text in inputs[1:]]
+
+        self.assertEqual(_voice_agent_active(self.settings, self.speech), 0)
+        self.assertEqual(self.requests, ["Привет", "Как дела?", "Какая погода?"])
+        self.assertEqual(self.activation_wake_calls, 1)
+
+    def test_voice_silence_timeout_pauses_dialogue_and_requires_wake_word(self):
+        from butler.stt import SpeechRecognitionTimeout
+
+        def route(text, **kwargs):
+            self.requests.append(text)
+            return AgentReply(f"Ответ на {text}", ())
+
+        self.enterContext(patch.object(RoutedAgentSession, "_ask_exclusive", side_effect=route))
+
+        self.activation_wake_calls = 0
+
+        def wake_event(*, cancel_event=None, **_kwargs):
+            if cancel_event is None:
+                self.activation_wake_calls += 1
+                return {"event": "wake"}
+            self.monitor_threads.append(threading.current_thread())
+            deadline = time.monotonic() + 2
+            while not cancel_event.is_set() and time.monotonic() < deadline:
+                threading.Event().wait(0.005)
+            raise WakeListenerCancelled("Test listener cancelled")
+
+        self.enterContext(patch("butler.cli.AudioCaptureService"))
+        self.enterContext(patch("butler.cli.ModelResidencyCoordinator"))
+        listener = self.enterContext(patch("butler.cli.WakeListener"))
+        listener.return_value.wait_event.side_effect = wake_event
+        recognizer = self.enterContext(patch("butler.cli.SpeechRecognizer"))
+        recognizer.return_value.prepare.return_value = {"device": "cpu", "engine": "test"}
+        recognizer.return_value.listen_after_prompt.side_effect = [
+            {"text": "Первый вопрос"},
+            {"text": "Второй вопрос"},
+        ]
+        recognizer.return_value.listen_once.side_effect = [
+            SpeechRecognitionTimeout("silence"),
+            {"text": "выход"},
+        ]
+
+        self.assertEqual(_voice_agent_active(self.settings, self.speech), 0)
+        self.assertEqual(self.requests, ["Первый вопрос", "Второй вопрос"])
+        self.assertEqual(self.activation_wake_calls, 2)
+
+    def test_voice_explicit_end_dialogue_command_pauses_dialogue(self):
+        def route(text, **kwargs):
+            self.requests.append(text)
+            return AgentReply(f"Ответ на {text}", ())
+
+        self.enterContext(patch.object(RoutedAgentSession, "_ask_exclusive", side_effect=route))
+
+        self.activation_wake_calls = 0
+
+        def wake_event(*, cancel_event=None, **_kwargs):
+            if cancel_event is None:
+                self.activation_wake_calls += 1
+                return {"event": "wake"}
+            self.monitor_threads.append(threading.current_thread())
+            deadline = time.monotonic() + 2
+            while not cancel_event.is_set() and time.monotonic() < deadline:
+                threading.Event().wait(0.005)
+            raise WakeListenerCancelled("Test listener cancelled")
+
+        self.enterContext(patch("butler.cli.AudioCaptureService"))
+        self.enterContext(patch("butler.cli.ModelResidencyCoordinator"))
+        listener = self.enterContext(patch("butler.cli.WakeListener"))
+        listener.return_value.wait_event.side_effect = wake_event
+        recognizer = self.enterContext(patch("butler.cli.SpeechRecognizer"))
+        recognizer.return_value.prepare.return_value = {"device": "cpu", "engine": "test"}
+        recognizer.return_value.listen_after_prompt.side_effect = [
+            {"text": "Первый вопрос"},
+            {"text": "Второй вопрос"},
+        ]
+        recognizer.return_value.listen_once.side_effect = [
+            {"text": "закончи разговор"},
+            {"text": "выход"},
+        ]
+
+        self.assertEqual(_voice_agent_active(self.settings, self.speech), 0)
+        self.assertEqual(self.requests, ["Первый вопрос", "Второй вопрос"])
+        self.assertEqual(self.activation_wake_calls, 2)
+        self.assertTrue(any(call.args == ("Разговор завершён.",) for call in self.speech.say_and_wait.call_args_list))
+
+    def test_voice_stop_speaking_command_keeps_dialogue_active(self):
+        def route(text, **kwargs):
+            self.requests.append(text)
+            return AgentReply(f"Ответ на {text}", ())
+
+        self.enterContext(patch.object(RoutedAgentSession, "_ask_exclusive", side_effect=route))
+
+        self.activation_wake_calls = 0
+
+        def wake_event(*, cancel_event=None, **_kwargs):
+            if cancel_event is None:
+                self.activation_wake_calls += 1
+                return {"event": "wake"}
+            self.monitor_threads.append(threading.current_thread())
+            deadline = time.monotonic() + 2
+            while not cancel_event.is_set() and time.monotonic() < deadline:
+                threading.Event().wait(0.005)
+            raise WakeListenerCancelled("Test listener cancelled")
+
+        self.enterContext(patch("butler.cli.AudioCaptureService"))
+        self.enterContext(patch("butler.cli.ModelResidencyCoordinator"))
+        listener = self.enterContext(patch("butler.cli.WakeListener"))
+        listener.return_value.wait_event.side_effect = wake_event
+        recognizer = self.enterContext(patch("butler.cli.SpeechRecognizer"))
+        recognizer.return_value.prepare.return_value = {"device": "cpu", "engine": "test"}
+        recognizer.return_value.listen_after_prompt.side_effect = [
+            {"text": "замолчи"},
+        ]
+        recognizer.return_value.listen_once.side_effect = [
+            {"text": "Следующий вопрос"},
+            {"text": "выход"},
+        ]
+
+        self.assertEqual(_voice_agent_active(self.settings, self.speech), 0)
+        self.assertEqual(self.requests, ["Следующий вопрос"])
+        self.assertEqual(self.activation_wake_calls, 1)
+
+    def test_voice_continues_after_task_cancelled(self):
+        from butler.tasking import TaskCancelled
+
+        def route(text, **kwargs):
+            self.requests.append(text)
+            if len(self.requests) == 1:
+                raise TaskCancelled("Cancelled by user")
+            return AgentReply("Ответ после отмены", ())
+
+        self.enterContext(patch.object(RoutedAgentSession, "_ask_exclusive", side_effect=route))
+
+        self.activation_wake_calls = 0
+
+        def wake_event(*, cancel_event=None, **_kwargs):
+            if cancel_event is None:
+                self.activation_wake_calls += 1
+                return {"event": "wake"}
+            self.monitor_threads.append(threading.current_thread())
+            deadline = time.monotonic() + 2
+            while not cancel_event.is_set() and time.monotonic() < deadline:
+                threading.Event().wait(0.005)
+            raise WakeListenerCancelled("Test listener cancelled")
+
+        self.enterContext(patch("butler.cli.AudioCaptureService"))
+        self.enterContext(patch("butler.cli.ModelResidencyCoordinator"))
+        listener = self.enterContext(patch("butler.cli.WakeListener"))
+        listener.return_value.wait_event.side_effect = wake_event
+        recognizer = self.enterContext(patch("butler.cli.SpeechRecognizer"))
+        recognizer.return_value.prepare.return_value = {"device": "cpu", "engine": "test"}
+        recognizer.return_value.listen_after_prompt.side_effect = [
+            {"text": "Отменимая задача"},
+        ]
+        recognizer.return_value.listen_once.side_effect = [
+            {"text": "Новая задача"},
+            {"text": "выход"},
+        ]
+
+        self.assertEqual(_voice_agent_active(self.settings, self.speech), 0)
+        self.assertEqual(self.requests, ["Отменимая задача", "Новая задача"])
+        self.assertEqual(self.activation_wake_calls, 1)
 
 
 if __name__ == "__main__":

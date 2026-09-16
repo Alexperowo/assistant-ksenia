@@ -766,6 +766,49 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "routing.research_default_mode"):
                 load_settings(root)
 
+    def test_conversational_silence_timeout_setting_and_validation(self):
+        settings = load_settings()
+        self.assertEqual(settings.conversational_silence_timeout_seconds, 8.0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            defaults = json.loads(
+                (Path(__file__).resolve().parents[1] / "config" / "default.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            defaults["voice"]["conversational_silence_timeout_seconds"] = 12.5
+            (root / "config" / "default.json").write_text(
+                json.dumps(defaults), encoding="utf-8"
+            )
+            custom_settings = load_settings(root)
+            self.assertEqual(custom_settings.conversational_silence_timeout_seconds, 12.5)
+
+            # Test out of bounds (< 1.0)
+            defaults["voice"]["conversational_silence_timeout_seconds"] = 0.2
+            (root / "config" / "default.json").write_text(
+                json.dumps(defaults), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ConfigError, "Тайм-аут тишины"):
+                load_settings(root)
+
+            # Test out of bounds (> 60.0)
+            defaults["voice"]["conversational_silence_timeout_seconds"] = 120.0
+            (root / "config" / "default.json").write_text(
+                json.dumps(defaults), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ConfigError, "Тайм-аут тишины"):
+                load_settings(root)
+
+            # Test non-numeric
+            defaults["voice"]["conversational_silence_timeout_seconds"] = "forever"
+            (root / "config" / "default.json").write_text(
+                json.dumps(defaults), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ConfigError, "Тайм-аут тишины"):
+                load_settings(root)
+
 
 if __name__ == "__main__":
     unittest.main()

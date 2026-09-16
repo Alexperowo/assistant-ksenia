@@ -301,6 +301,29 @@ class SpeechRecognizerTests(unittest.TestCase):
             self.assertIn("2.4", enabled_command)
             self.assertNotIn("--semantic-endpointing", disabled_command)
 
+    def test_worker_timeout_raises_speech_recognition_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = SimpleNamespace(
+                root=root,
+                runtime_dir=root / "runtime",
+                raw={"diagnostics": {"enabled": False}, "voice": {}},
+            )
+            recognizer = SpeechRecognizer(settings)
+            fake_completed = SimpleNamespace(
+                stdout=json.dumps({"event": "timeout", "error": "Речь не обнаружена вовремя."}) + "\n",
+                stderr="",
+                returncode=0,
+            )
+            with patch("subprocess.run", return_value=fake_completed) as mock_run:
+                with self.assertRaises(SpeechRecognitionTimeout):
+                    recognizer._listen_worker(30, no_speech_timeout_seconds=5.0)
+
+            command = mock_run.call_args[0][0]
+            self.assertIn("--no-speech-timeout-seconds", command)
+            idx = command.index("--no-speech-timeout-seconds")
+            self.assertEqual(command[idx + 1], "5.0")
+
 
 if __name__ == "__main__":
     unittest.main()

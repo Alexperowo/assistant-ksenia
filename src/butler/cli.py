@@ -919,12 +919,17 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
         ),
     )
     pending_live_turns: queue.Queue[dict[str, object]] = queue.Queue(maxsize=1)
+    dialogue_active = False
+    conversational_silence_timeout = float(
+        voice_config.get("conversational_silence_timeout_seconds", 8.0)
+    )
     while True:
         try:
             event = pending_live_turns.get_nowait()
         except queue.Empty:
             event = None
         if event is not None:
+            dialogue_active = True
             trace_id = new_trace_id()
             turn_id = new_trace_id()
             diagnostic_event(
@@ -937,6 +942,68 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                 capture_seconds=event.get("capture_seconds", 0),
             )
             print("[Продолжаю с реплики, которой вы перебили Ксению]", flush=True)
+        elif dialogue_active:
+            trace_id = new_trace_id()
+            turn_id = new_trace_id()
+            diagnostic_event(
+                settings,
+                "voice_agent",
+                "continuous_listening_started",
+                trace_id=trace_id,
+                turn_id=turn_id,
+                timeout_seconds=conversational_silence_timeout,
+            )
+            print("[Слушаю продолжение разговора...]", flush=True)
+            try:
+                with trace_scope(trace_id=trace_id, turn_id=turn_id):
+                    event = recognizer.listen_once(
+                        no_speech_timeout_seconds=conversational_silence_timeout,
+                    )
+                microphone_failures.reset()
+            except SpeechRecognitionTimeout:
+                diagnostic_event(
+                    settings,
+                    "voice_agent",
+                    "continuous_dialogue_silence_timeout",
+                    trace_id=trace_id,
+                    turn_id=turn_id,
+                    timeout_seconds=conversational_silence_timeout,
+                )
+                print(
+                    "[Диалог приостановлен по тишине; ожидаю фразу «Ксения слушай»]",
+                    flush=True,
+                )
+                dialogue_active = False
+                continue
+            except SpeechRecognitionError as exc:
+                print(f"Ошибка микрофона: {exc}")
+                diagnostic_exception(
+                    settings,
+                    "voice_agent",
+                    "continuous_listen_failed",
+                    exc,
+                    trace_id=trace_id,
+                    turn_id=turn_id,
+                )
+                decision = microphone_failures.record_failure(time.monotonic())
+                diagnostic_event(
+                    settings,
+                    "voice_agent",
+                    "microphone_retry_scheduled",
+                    level="warning",
+                    failure_count=decision.failure_count,
+                    delay_seconds=decision.delay_seconds,
+                    announcement=decision.announce,
+                )
+                if decision.announce:
+                    speech.say_and_wait(
+                        _spoken_microphone_error(exc)
+                        + " Я продолжу проверять подключение молча."
+                    )
+                if decision.delay_seconds:
+                    time.sleep(decision.delay_seconds)
+                dialogue_active = False
+                continue
         else:
             print("Ожидаю фразу «Ксения слушай»...")
             try:
@@ -968,6 +1035,7 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                         flush=True,
                     )
                 speech.stop()
+                dialogue_active = True
                 trace_id = new_trace_id()
                 turn_id = new_trace_id()
                 with trace_scope(trace_id=trace_id, turn_id=turn_id):
@@ -997,10 +1065,12 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                     )
                 if decision.delay_seconds:
                     time.sleep(decision.delay_seconds)
+                dialogue_active = False
                 continue
             except SpeechRecognitionError as exc:
                 print(f"Ошибка микрофона: {exc}")
                 speech.say_and_wait(_spoken_microphone_error(exc))
+                dialogue_active = False
                 continue
 
         user_text = str(event.get("text", "")).strip()
@@ -1046,9 +1116,27 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                     "Снова получена только фраза активации. Проверьте микрофон отдельным ярлыком."
                 )
                 continue
-        if normalized_voice in {"ксения стоп", "стоп"}:
+        if normalized_voice in {
+            "ксения стоп",
+            "стоп",
+            "замолчи",
+            "стоп озвучивание",
+            "тихо",
+        }:
             speech.stop()
             print("[Озвучивание остановлено]")
+            continue
+        if normalized_voice in {
+            "закончи разговор",
+            "заверши разговор",
+            "конец разговора",
+            "отбой",
+            "спасибо пока",
+        }:
+            speech.stop()
+            dialogue_active = False
+            print("[Диалог завершён, перехожу в режим ожидания «Ксения слушай»]")
+            speech.say_and_wait("Разговор завершён.")
             continue
         print(f"{settings.user_name}: {user_text}")
         if user_text.lower() in {
@@ -1540,7 +1628,7 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                 turn_id=turn_id,
                 task_id=task.id,
             ):
-                speech.say(reply.text)
+                speech.say_and_wait(reply.text)
 
 
 def _agent_chat(settings, speech: SpeechAnnouncer) -> int:

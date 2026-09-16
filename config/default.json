@@ -89,7 +89,8 @@
     "cold_leading_silence_ms": 1000,
     "playback_backend": "system",
     "output_device": "",
-    "confirmation_microphone_handoff_timeout_seconds": 5.0
+    "confirmation_microphone_handoff_timeout_seconds": 5.0,
+    "conversational_silence_timeout_seconds": 8.0
   },
   "live": {
     "enabled": false,

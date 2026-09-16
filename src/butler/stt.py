@@ -580,14 +580,21 @@ class SpeechRecognizer:
         if service_result is not None:
             return service_result
 
-        if on_voice_started is not None or no_speech_timeout_seconds is not None:
+        if on_voice_started is not None:
             raise SpeechRecognitionError(
                 "Потоковое обнаружение речи требует готовый quality STT service."
             )
 
-        return self._listen_worker(effective_max_seconds)
+        return self._listen_worker(
+            effective_max_seconds,
+            no_speech_timeout_seconds=no_speech_timeout_seconds,
+        )
 
-    def _listen_worker(self, max_seconds: int) -> dict[str, object]:
+    def _listen_worker(
+        self,
+        max_seconds: int,
+        no_speech_timeout_seconds: float | None = None,
+    ) -> dict[str, object]:
         started = time.monotonic()
         diagnostic_event(
             self.settings,
@@ -596,6 +603,11 @@ class SpeechRecognizer:
             max_seconds=max_seconds,
         )
         try:
+            effective_no_speech = (
+                no_speech_timeout_seconds
+                if no_speech_timeout_seconds is not None
+                else self.no_speech_timeout_seconds
+            )
             worker_command = [
                 str(self.python),
                 "-u",
@@ -609,7 +621,7 @@ class SpeechRecognizer:
                 "--max-seconds",
                 str(max_seconds),
                 "--no-speech-timeout-seconds",
-                str(self.no_speech_timeout_seconds),
+                str(effective_no_speech),
             ]
             worker_env = os.environ.copy()
             if self.capture_endpoint is not None:
@@ -647,6 +659,17 @@ class SpeechRecognizer:
             event = json.loads(output[-1])
         except json.JSONDecodeError as exc:
             raise SpeechRecognitionError("Распознаватель вернул повреждённый результат.") from exc
+        if event.get("event") == "timeout":
+            diagnostic_event(
+                self.settings,
+                "stt",
+                "fallback_listen_timeout",
+                duration_ms=round((time.monotonic() - started) * 1000),
+                **_audio_telemetry(event),
+            )
+            raise SpeechRecognitionTimeout(
+                str(event.get("error", "Речь не обнаружена вовремя."))
+            )
         if event.get("event") != "transcript":
             diagnostic_event(
                 self.settings,
