@@ -1,5 +1,18 @@
 # История изменений
 
+## 8 сентября 2026 — чистый Windows CI
+
+- Fixed: GitHub Actions раньше запускал тесты без их Python-зависимостей. Добавлен
+  отдельный минимальный pinned `requirements/ci.lock.txt`; GPU, веса, Chromium и
+  локальные llama.cpp backend-ы намеренно не устанавливаются в cloud runner.
+- Fixed: `run_test_suite.py` экспортирует корневой `src` в дочерние Python workers;
+  native browser/job tests больше не зависят от `PYTHONPATH` оболочки разработчика.
+- Fixed: model-integrity/unknown-port проверки имеют корректный fail-closed
+  порядок до проверки отсутствующего локального backend-а; lock regression
+  сравнивает Windows path канонически.
+- Verified: GitHub Windows run 34221997531 зелёный: 496/496, shuffled 17/73/211
+  без errors/failures/skips и успешный release contract.
+
 ## 8 сентября 2026 — общий research budget и прямой режим runtime smoke
 
 - Fixed: активная исследовательская модель больше не проверяется через режим

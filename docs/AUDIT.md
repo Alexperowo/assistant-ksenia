@@ -1,5 +1,32 @@
 # Аудит проекта
 
+## Дополнение 8 сентября 2026 — переносимый Windows CI
+
+Проверено уведомлением GitHub Actions, что прежний workflow запускал 468 тестов в
+чистой Python 3.12 без их зависимостей. Красный результат не был одним дефектом
+продукта: отсутствовали `numpy`, Pillow, Playwright, pywin32 и Hugging Face client;
+после этого child worker также не видел пакет `butler`, поскольку test runner
+добавлял `src` только в собственный `sys.path`. Дополнительно cloud runner выявил
+зависимость diagnostic tests от наличия локального PoolSide backend-а до проверки
+артефакта и от канонического написания Windows path.
+
+Добавлен отдельный pinned `requirements/ci.lock.txt` без GPU/Torch, моделей,
+Chromium-весов и локальных llama.cpp backend-ов. Workflow устанавливает только
+его, с pip cache по этому lock. `run_test_suite.py` теперь передаёт корневой `src`
+во все дочерние Python workers; это контракт тестового harness, не изменение
+пользовательского окружения. `ModelManager.start` сначала проверяет артефакты и
+неизвестного владельца порта, а существование backend-а — непосредственно перед
+запуском процесса. Regression test блокировки сравнивает Windows path
+канонически, не по случайному регистру/форме пути.
+
+Настоящий чистый GitHub Windows gate commit `3431c08` зелёный:
+[run 34221997531](https://github.com/Alexperowo/assistant-ksenia/actions/runs/34221997531).
+Установлены зависимости из CI lock; 496/496 тестов прошли за 24,968 с, shuffled
+seed 17/73/211 имеют ноль errors/failures/skips, release contract успешен. Это
+подтверждает переносимость автоматического слоя, но не заменяет локальные GPU,
+модельные, RAG и физические audio gates. Старая красная история уведомлений
+сохранена GitHub как история и не является статусом текущего `main`.
+
 ## Дополнение 8 сентября 2026 — общий бюджет research и честный runtime smoke
 
 Исходная точка: `280a637`. Для `ResearchCoordinator` подтверждён отсутствующий
