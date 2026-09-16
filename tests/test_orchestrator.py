@@ -34,6 +34,40 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(assistant_mode_command("Какой сейчас режим?"), "status")
         self.assertIsNone(assistant_mode_command("Объясни, как работает мышление"))
 
+    def test_assistant_mode_negation_and_question_rejections(self):
+        # F04 regressions: turning off thinking switches to fast mode
+        self.assertEqual(assistant_mode_command("Выключи режим Thinking"), "fast")
+        self.assertEqual(assistant_mode_command("Выключи режим рассуждения"), "fast")
+        self.assertEqual(assistant_mode_command("Отключи режим reasoning"), "fast")
+        self.assertEqual(assistant_mode_command("Отключи thinking"), "fast")
+        self.assertEqual(assistant_mode_command("Выключи мышление"), "fast")
+        self.assertEqual(assistant_mode_command("Не включай режим рассуждения"), "fast")
+        self.assertEqual(assistant_mode_command("Хватит рассуждать"), "fast")
+        self.assertEqual(assistant_mode_command("Включи быстрый режим"), "fast")
+        self.assertEqual(assistant_mode_command("Быстрый режим"), "fast")
+        self.assertEqual(assistant_mode_command("Пожалуйста выключи thinking"), "fast")
+        self.assertEqual(assistant_mode_command("Ксения, выключи thinking"), "fast")
+
+        # Enabling thinking
+        self.assertEqual(assistant_mode_command("Включи режим thinking"), "thinking")
+        self.assertEqual(assistant_mode_command("Переключись на thinking"), "thinking")
+        self.assertEqual(assistant_mode_command("Режим thinking"), "thinking")
+        self.assertEqual(assistant_mode_command("Режим рассуждения"), "thinking")
+
+        # Status queries
+        self.assertEqual(assistant_mode_command("Какой режим дворецкого?"), "status")
+        self.assertEqual(assistant_mode_command("Какой режим включен?"), "status")
+        self.assertEqual(assistant_mode_command("Текущий режим"), "status")
+        self.assertEqual(assistant_mode_command("Скажи какой сейчас режим"), "status")
+
+        # Questions, explanations, non-commands must return None
+        self.assertIsNone(assistant_mode_command("Что такое режим thinking?"))
+        self.assertIsNone(assistant_mode_command("Расскажи про режим рассуждения"))
+        self.assertIsNone(assistant_mode_command("Почему выключился режим thinking?"))
+        self.assertIsNone(assistant_mode_command("В чем разница между быстрым режимом и thinking?"))
+        self.assertIsNone(assistant_mode_command("Напиши статью про thinking"))
+        self.assertIsNone(assistant_mode_command("Найди информацию про reasoning"))
+
     def test_public_request_restores_task_trace_for_entire_route(self):
         session = RoutedAgentSession(load_settings())
         observed = []

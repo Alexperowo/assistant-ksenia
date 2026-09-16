@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-import threading
-import time
 import os
 from pathlib import Path
+import re
+import threading
+import time
 from typing import Any
 
 from butler.agent import (
@@ -101,34 +102,71 @@ DIRECT_CONVERSATION_BLOCKERS = (
 
 
 def assistant_mode_command(text: str) -> str | None:
-    normalized = " ".join(text.casefold().replace("ё", "е").split())
-    thinking = (
-        "включи режим рассуждения",
-        "включи режим мышления",
-        "включи thinking",
-        "включи reasoning",
-        "режим thinking",
-        "режим reasoning",
+    tokens = re.findall(r"[а-яёa-z0-9]+", text.casefold().replace("ё", "е"))
+    if not tokens:
+        return None
+    while tokens and tokens[0] in {"ксения", "пожалуйста", "скажи", "подскажи"}:
+        tokens = tokens[1:]
+    if not tokens:
+        return None
+
+    normalized = " ".join(tokens)
+
+    question_starters = {
+        "что",
+        "как",
+        "зачем",
+        "почему",
+        "где",
+        "куда",
+        "откуда",
+        "кто",
+        "кому",
+        "чем",
+        "расскажи",
+        "объясни",
+        "опиши",
+        "сравни",
+        "напиши",
+        "найди",
+        "поищи",
+    }
+    if tokens[0] in question_starters:
+        return None
+
+    status_patterns = (
+        r"^какой\s+(?:сейчас\s+)?режим(?:\s+дворецкого|\s+включен)?$",
+        r"^какой\s+режим\s+(?:дворецкого|включен)$",
+        r"^какой\s+сейчас\s+режим$",
+        r"^текущий\s+режим$",
+        r"^статус\s+режима$",
+        r"^в\s+каком\s+(?:ты\s+)?режиме$",
     )
-    fast = (
-        "включи быстрый режим",
-        "переключись в быстрый режим",
-        "выключи режим рассуждения",
-        "выключи режим мышления",
-        "выключи thinking",
-        "выключи reasoning",
-    )
-    status = (
-        "какой режим дворецкого",
-        "какой режим включен",
-        "какой сейчас режим",
-    )
-    if any(phrase in normalized for phrase in status):
+    if any(re.search(p, normalized) for p in status_patterns):
         return "status"
-    if any(phrase in normalized for phrase in thinking):
-        return "thinking"
-    if any(phrase in normalized for phrase in fast):
+
+    turn_off_thinking = (
+        r"^(?:выключи|отключи|убери|выруби|не\s+(?:включай|используй|надо))\s+(?:режим\s+)?(?:thinking|reasoning|рассуждени[яйе]?|мышлени[яйе]?)$",
+        r"^(?:хватит|перестань)\s+рассуждать$",
+    )
+    switch_to_fast = (
+        r"^(?:включи|переключи(?:сь)?(?:\s+(?:в|на))?|активируй|верни(?:сь)?(?:\s+(?:в|на))?)\s+(?:быстрый\s+режим|режим\s+быстрый|fast(?:\s+режим)?)$",
+        r"^быстрый\s+режим$",
+        r"^режим\s+fast$",
+    )
+    if any(re.search(p, normalized) for p in turn_off_thinking) or any(
+        re.search(p, normalized) for p in switch_to_fast
+    ):
         return "fast"
+
+    switch_to_thinking = (
+        r"^(?:включи|переключи(?:сь)?(?:\s+(?:в|на))?|активируй)\s+(?:режим\s+)?(?:thinking|reasoning|рассуждени[яйе]?|мышлени[яйе]?)$",
+        r"^(?:режим\s+)?(?:thinking|reasoning)$",
+        r"^режим\s+(?:рассуждени[яйе]|мышлени[яйе])$",
+    )
+    if any(re.search(p, normalized) for p in switch_to_thinking):
+        return "thinking"
+
     return None
 
 PLANNING_TOOLS = {
