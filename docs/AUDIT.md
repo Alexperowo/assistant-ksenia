@@ -1,5 +1,28 @@
 # Аудит проекта
 
+## Дополнение 16 сентября 2026 — метрики фонового поиска (C6) и аудит компонентов (C5)
+
+1. Этап C6 (Метрики и контрольные точки производительности фонового поиска):
+   - В `src/butler/performance.py` добавлены пары контрольных точек жизненного цикла фоновых задач:
+     - `background_research_queued` → `background_research_started` (`background_queue_wait_ms`);
+     - `background_research_started` → `background_research_completed` (`background_research_duration_ms`);
+     - `background_research_completed` → `background_research_delivered` (`background_delivery_latency_ms`).
+   - Метки интегрированы в `src/butler/background_research.py` (`queued`, `started`, `completed`, `cancelled`, `failed`) и `src/butler/cli.py` (`delivered`), с привязкой к `task_id` и сквозному `trace_id`.
+   - В `tests/test_cli_dialogue_recovery.py` устранена вероятностная задержка `time.sleep(0.05)`: завершение фонового рабочего потока ожидается через детерминированный `thread.join(timeout=2.0)`, что гарантирует 100% стабильность во всех перемешанных порядках тестов.
+   - В `tests/test_performance.py` добавлен тест расчёта метрик `test_background_research_milestones_are_calculated_in_report`.
+2. Этап C5 (Аудит целостности компонентов и lock-файлов):
+   - Проверено состояние среды `D:\AI\Butler\venv` через `scripts/maintenance.py status`:
+     - Все 59 закреплённых Python-библиотек (включая PyTorch 2.13.0+cu126, faster-whisper 1.2.1, Vosk 0.3.45, Playwright 1.62.0) строго соответствуют `requirements/*.lock.txt` (`packages_match: true`);
+     - Оба LLM-движка соответствуют `config/engine.lock.json` (`all_engine_backends_match: true`):
+       - `official`: release b10621, commit `c1d0e7a004015f23bc0233470b747b596f29b264`;
+       - `poolside`: commit `06f8cebd7fe728687be3d19f8bdedb70d75883af`, ветка laguna, все 9 бинарных файлов и DLL проверены по SHA-256.
+     - `scripts/update.ps1 -CheckOnly` подтвердил: все компоненты совпадают, обновление не требуется.
+3. Проверка тестов и полный проверочный гейт:
+   - 531 тест (4 прогона: 1 прямой + 3 со случайным порядком seed 17, 73, 211 — всего 2124 выполнения) пройдены без единой ошибки и предупреждения.
+   - Полный гейт `scripts/check.ps1` успешно завершён с кодом 0 (Doctor ok, LAN ok, TTS→STT 100% recall).
+
+Результат: C6 и C5 проверены программно, 531/531 тест пройден успешно, check.ps1 завершён с кодом 0.
+
 ## Дополнение 16 сентября 2026 — сквозная живая приёмка гибридного RAG (C8)
 
 1. Выполнена приёмка отключённого компонента RAG в рамках Этапа C8 (`docs/ROADMAP.md`, `docs/RELIABILITY-PLAN-2026-09-07.md`):
