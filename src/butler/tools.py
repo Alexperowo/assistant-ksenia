@@ -432,7 +432,7 @@ def tool_schemas(settings: Settings | None = None) -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "browser_send_message",
-                "description": "Отправить уже подготовленное сообщение в авторизованном профиле браузера. Каждая отправка подтверждается Александром отдельно.",
+                "description": "Отправить уже подготовленное сообщение в авторизованном профиле браузера. Каждая отправка подтверждается пользователем отдельно.",
                 "parameters": {
                     "type": "object",
                     "properties": {

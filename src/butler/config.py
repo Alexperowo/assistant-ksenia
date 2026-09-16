@@ -238,7 +238,8 @@ class Settings:
 
     @property
     def user_name(self) -> str:
-        return str(self.raw.get("assistant", {}).get("user_name", "пользователь"))
+        raw_name = str(self.raw.get("assistant", {}).get("user_name", "")).strip()
+        return raw_name or "Пользователь"
 
     @property
     def announce_status(self) -> bool:
@@ -1342,6 +1343,22 @@ def set_user_assistant_mode(root: Path, mode: str) -> Path:
         if not isinstance(routing, dict):
             raise ConfigError("Раздел runtime_routing в пользовательской конфигурации повреждён.")
         routing["assistant_mode"] = normalized
+
+    return _edit_user_settings(target, edit)
+
+
+def set_user_name(root: Path, user_name: str) -> Path:
+    normalized = str(user_name).strip()
+    target = root.resolve() / "config" / "user.json"
+
+    def edit(value: dict[str, Any]) -> None:
+        assistant = value.setdefault("assistant", {})
+        if not isinstance(assistant, dict):
+            raise ConfigError("Раздел assistant в пользовательской конфигурации повреждён.")
+        if normalized:
+            assistant["user_name"] = normalized
+        else:
+            assistant.pop("user_name", None)
 
     return _edit_user_settings(target, edit)
 

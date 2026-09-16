@@ -290,7 +290,7 @@ class DurableTaskStore:
                 raise TaskCancelled("Журнал задачи удалён.")
             state = TaskState(str(current["state"]))
             if state == TaskState.CANCELLED:
-                raise TaskCancelled("Задача отменена Александром.")
+                raise TaskCancelled("Задача отменена пользователем.")
             if deadline_check is not None:
                 deadline_check()
             if state != TaskState.PAUSED:

@@ -1,5 +1,22 @@
 # История изменений
 
+## 16 сентября 2026 — нейтральные defaults и разделение настроек пользователя (F06)
+
+- Fixed: Имя пользователя отделено от распространяемой базовой конфигурации. В
+  `config/default.json` значение `assistant.user_name` установлено в `""` (по умолчанию
+  возвращается нейтральное обращение «Пользователь»). Личное имя Александра сохранено
+  в неотслеживаемом локальном `config/user.json`.
+- Fixed: Добавлен программный хелпер `set_user_name(root, user_name)` для атомарной
+  записи или очистки имени в `config/user.json`.
+- Fixed: Хардкод имени заменён на динамическое `settings.user_name` или нейтральные
+  формулировки в CLI (`input(f"{settings.user_name}: ")`), `tools.py` (описание схемы
+  `browser_send_message`), `tasking.py`, `lan.py`, `speech.py` (тестовые реплики
+  `test_voices`) и в процедурах (`procedures/development.json`, `messages.json`,
+  `product-research.json`).
+- Verified: Unit-тест `test_user_name_defaults_to_neutral_and_accepts_custom_user_profile`
+  в `tests/test_config.py`. Полный тестовый прогон 498/498 тестов за 24,9 с без
+  ошибок и предупреждений.
+
 ## 16 сентября 2026 — исправление переключения режима Thinking (F04)
 
 - Fixed: `assistant_mode_command` больше не включает режим Thinking при командах

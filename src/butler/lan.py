@@ -145,13 +145,13 @@ class LanTaskStore:
             except ValueError as exc:
                 current = self.journal.get(task_id)
                 if current is not None and current.get("state") == TaskState.CANCELLED:
-                    raise TaskCancelled("Задача уже отменена Александром.") from exc
+                    raise TaskCancelled("Задача уже отменена пользователем.") from exc
                 raise
         with self._lock:
             task = self._tasks[task_id]
             if task.status in {"Готово", "Ошибка", "Отменено"} and status != task.status:
                 if task.status == "Отменено":
-                    raise TaskCancelled("Задача уже отменена Александром.")
+                    raise TaskCancelled("Задача уже отменена пользователем.")
                 raise ValueError("Завершённую LAN-задачу нельзя запустить снова.")
             task.status = status
             task.updated_at = _now()

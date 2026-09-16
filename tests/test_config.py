@@ -12,6 +12,7 @@ from butler.config import (
     set_user_headset_control,
     set_user_microphone,
     set_user_model,
+    set_user_name,
     set_user_reasoning,
     set_user_response_budget,
     write_user_settings,
@@ -695,6 +696,45 @@ class ConfigTests(unittest.TestCase):
             settings = load_settings(root)
 
             self.assertEqual(settings.model("profile").model_path, artifact.resolve())
+
+    def test_user_name_defaults_to_neutral_and_accepts_custom_user_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            default = {
+                "assistant": {"name": "Ксения", "default_role": "profile", "user_name": ""},
+                "paths": {
+                    "llama_server": "server.exe",
+                    "models_dir": "models",
+                    "runtime_dir": "runtime",
+                },
+                "server": {"host": "127.0.0.1", "port": 18080},
+                "models": {
+                    "profile": {
+                        "label": "Profile",
+                        "artifacts": {"model": {"filename": "brain.gguf"}},
+                        "context_size": 4096,
+                        "gpu_layers": 0,
+                    }
+                },
+            }
+            (root / "config" / "default.json").write_text(
+                json.dumps(default), encoding="utf-8"
+            )
+
+            settings = load_settings(root)
+            self.assertEqual(settings.user_name, "Пользователь")
+
+            set_user_name(root, "Александр")
+            reloaded = load_settings(root)
+            self.assertEqual(reloaded.user_name, "Александр")
+
+            user_payload = json.loads((root / "config" / "user.json").read_text(encoding="utf-8"))
+            self.assertEqual(user_payload.get("assistant", {}).get("user_name"), "Александр")
+
+            set_user_name(root, "")
+            cleared = load_settings(root)
+            self.assertEqual(cleared.user_name, "Пользователь")
 
 
 if __name__ == "__main__":

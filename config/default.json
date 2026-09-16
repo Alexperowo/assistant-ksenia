@@ -1,7 +1,7 @@
 {
   "assistant": {
     "name": "Ксения",
-    "user_name": "Александр",
+    "user_name": "",
     "language": "ru",
     "default_role": "assistant",
     "announce_status": true

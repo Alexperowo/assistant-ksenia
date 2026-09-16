@@ -1050,7 +1050,7 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             speech.stop()
             print("[Озвучивание остановлено]")
             continue
-        print(f"Александр: {user_text}")
+        print(f"{settings.user_name}: {user_text}")
         if user_text.lower() in {
             "выход",
             "выйти",
@@ -1554,7 +1554,7 @@ def _agent_chat(settings, speech: SpeechAnnouncer) -> int:
     speech.say("Агентный диалог готов.")
     while True:
         try:
-            user_text = input("Александр: ").strip()
+            user_text = input(f"{settings.user_name}: ").strip()
         except EOFError:
             return 0
         if not user_text:
