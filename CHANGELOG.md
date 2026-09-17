@@ -1,5 +1,13 @@
 # История изменений
 
+## 17 сентября 2026 — обновление llama.cpp (b10991), 64x ускорение обработки промпта и завершение C5
+
+- Upgraded: Официальный движок `llama.cpp` обновлён до релиза `b10991` (commit `930e2fa59`, CUDA 12.4 x64). Загружен и проверен архив `tools/downloads/llama-b10991-bin-win-cuda-12.4-x64.zip` (SHA-256 `DE86232A73A0FD5B96454309DA2993F2DC6BF5E16ECC506192F551D49D833CDF`).
+- Verified: Механизм обновления и отката проверен изолированно через `scripts/test-engine-maintenance.ps1`: стадийная установка, принудительная подмена, резервное копирование и возврат к прежней версии прошли успешно (`ok: true`). Обновление применено в продакшн через `scripts/update.ps1` с сохранением автоматического бэкапа `b10621` в `runtime/updates/20260917-122011/engine-backup/llama.cpp`.
+- Fixed: Устранено критическое падение производительности (64x speedup) при оценке промпта на Windows Clang сборках `llama.cpp`. При включённом `--flash-attn on` и квантованных типах KV-кэша (`q8_0-q5_0` / `q8_0-q4_0`) движок выдавал предупреждение `ggml_cuda_flash_attn_ext_vec: no FlashAttention vector kernel compiled for K/V types... converting K and V to f16 instead (slow)`, замедляя prompt eval до 0.25 t/s (обработка 17 токенов занимала 30–66 секунд!). В `config/default.json` для `ui_butler` и `research_fast` убран флаг `--flash-attn on` и установлен `--cache-type-v q4_0`: нативные CUDA SDPA/cuBLAS ядра обеспечили скорость оценки промпта 52.8 t/s (322 мс) и генерации 59.2 t/s (суммарно 0.48 с против 30.8 с).
+- Verified: Аудит компонентов среды `D:\AI\Butler\venv` через `scripts/maintenance.py status` подтвердил 100% совпадение (`all_components_match: true`): 59/59 Python-пакетов, official `b10991` и PoolSide `laguna` (commit `06f8cebd7`).
+- Verified: Полный тестовый набор из 531 теста пройден детерминированно в 4 прогонах (2124 выполнения, 0 ошибок, 0 сбоев, 0 предупреждений). Мастер-скрипт `scripts/check.ps1` с `KSENIA_TEST_RAG=1` успешно завершён с кодом 0 (Doctor ok, LAN ok, RAG 5/5 ok, TTS→STT 100% recall).
+
 ## 16 сентября 2026 — полная приёмка C1 и очистка состояния отмены (TaskCancelled)
 
 - Fixed: Устранена утечка незавершённых состояний задач и ожидающих подтверждений при отмене задачи `TaskCancelled`: в `_voice_agent_active` и `_agent_chat` (`src/butler/cli.py`) задача гарантированно переводится в `TaskState.CANCELLED`, поле `confirmation` очищается (`confirmation=None`), а воспроизведение речи немедленно прерывается (`speech.stop()`).

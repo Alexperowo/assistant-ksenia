@@ -1,5 +1,26 @@
 # Аудит проекта
 
+## Дополнение 17 сентября 2026 — обновление llama.cpp (b10991), 64x ускорение обработки промпта и завершение C5
+
+1. Обновление официального движка `llama.cpp` до релиза `b10991`:
+   - Скачан официальный релиз `llama-b10991-bin-win-cuda-12.4-x64.zip` (254 197 034 байт, SHA-256 `DE86232A73A0FD5B96454309DA2993F2DC6BF5E16ECC506192F551D49D833CDF`, commit `930e2fa59`).
+   - Изолированная верификация: скрипт `scripts/test-engine-maintenance.ps1` проверил staged install, forced swap, backup creation и rollback (`ok: true`).
+   - Применение: через `scripts/update.ps1` движок обновлён в рабочей среде, резервная копия предыдущей версии `b10621` сохранена в `runtime/updates/20260917-122011/engine-backup/llama.cpp`.
+   - Зафиксированы параметры в `config/engine.lock.json` (release `b10991`, commit `930e2fa5995789efbf249a8bf61325bb626e417b`, build `10991`).
+
+2. Устранение узкого места FlashAttention fallback (64x speedup):
+   - При диагностике обнаружено, что на Windows Clang сборках `llama.cpp` при квантованных типах KV-кэша (`q8_0-q5_0` / `q8_0-q4_0`) флаг `--flash-attn on` вызывает медленный fallback: `ggml_cuda_flash_attn_ext_vec: no FlashAttention vector kernel compiled for K/V types... converting K and V to f16 instead (slow)`.
+   - Это приводило к катастрофическому падению скорости оценки промпта до ~0.25 t/s (обработка 17 токенов занимала 30–66 секунд).
+   - В `config/default.json` для `ui_butler` и `research_fast` удалён флаг `--flash-attn on` и установлен `--cache-type-v q4_0`.
+   - Результат замеров: нативные CUDA SDPA/cuBLAS ядра обеспечили скорость оценки промпта 52.8 t/s (322 мс) и генерации 59.2 t/s (суммарный ответ за 0.48 с против 30.8 с — ускорение в 64 раза).
+
+3. Аудит компонентов и тестовый гейт:
+   - `scripts/maintenance.py status`: `all_components_match: true` (59/59 Python-библиотек, official `b10991`, PoolSide `laguna` commit `06f8cebd7`).
+   - 531 тест пройден в 4 прогонах (2124 выполнения, seeds 17, 73, 211), 0 ошибок, 0 предупреждений.
+   - Мастер-гейт `scripts/check.ps1` с `KSENIA_TEST_RAG=1` пройден с кодом 0 (Doctor ok, LAN ok, RAG 5/5 ok, TTS→STT 100% recall).
+
+Результат: Этап C5 полностью завершён, движок обновлён до b10991, критическое замедление устранено, 531/531 тест пройден, check.ps1 завершён с кодом 0.
+
 ## Дополнение 16 сентября 2026 — метрики фонового поиска (C6) и аудит компонентов (C5)
 
 1. Этап C6 (Метрики и контрольные точки производительности фонового поиска):

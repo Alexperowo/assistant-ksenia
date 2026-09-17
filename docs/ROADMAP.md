@@ -64,10 +64,14 @@
   добавлены пары контрольных точек жизненного цикла (queued->started, started->completed,
   completed->delivered), сквозной trace_id, устранён race condition в тестах диалога
   через детерминированный join рабочего потока. Все 531 тест проходят без ошибок.
-- [x] Провести аудит версий и lock-файлов компонентов (C5):
-  все 59 Python-библиотек и 2 LLM-бэкенда (official b10621, PoolSide laguna) проверены
-  через scripts/maintenance.py status и update.ps1 -CheckOnly (all_components_match: true).
-  Все runtime-файлы PoolSide соответствуют SHA-256.
+- [x] Провести аудит версий, обновление и lock-файлов компонентов (C5):
+  официальный движок `llama.cpp` обновлён до релиза `b10991` (commit `930e2fa59`, CUDA 12.4 x64),
+  проверена изолированная стадийная установка и откат (`test-engine-maintenance.ps1`),
+  обновление применено через `update.ps1` с сохранением бэкапа `b10621`.
+  Устранено узкое место FlashAttention fallback на Windows Clang (64x ускорение обработки промпта
+  до 52.8 t/s и 322 мс благодаря переходу на нативные CUDA ядра SDPA/cuBLAS и квантование KV `q4_0`).
+  Все 59 Python-библиотек и 2 LLM-бэкенда (official b10991, PoolSide laguna) проверены
+  через `scripts/maintenance.py status` (`all_components_match: true`).
 - [ ] Безопасный backend песочницы (C7) — заблокирован аппаратным требованием AMD-V/SVM в UEFI.
 - [x] Обязательная приёмка отключённых компонентов (C8, часть RAG выполнена):
   загружена закреплённая модель `Qwen3-Embedding-0.6B-Q8_0.gguf` (SHA-256 проверен),

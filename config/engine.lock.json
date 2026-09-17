@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
   "engine": "llama.cpp",
-  "release": "b10621",
-  "commit": "c1d0e7a00",
+  "release": "b10991",
+  "commit": "930e2fa59",
   "cuda": "12.4",
   "assets": {
-    "llama-b10621-bin-win-cuda-12.4-x64.zip": "81C2FF62E14B549CD5C766CCDD5C61F09E821A171655C3047BDCCFDDC2D1A1E2",
+    "llama-b10991-bin-win-cuda-12.4-x64.zip": "DE86232A73A0FD5B96454309DA2993F2DC6BF5E16ECC506192F551D49D833CDF",
     "cudart-llama-bin-win-cuda-12.4-x64.zip": "8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6"
   },
   "backends": {
@@ -13,10 +13,10 @@
       "distribution": "official-release",
       "executable": "tools/llama.cpp/llama-server.exe",
       "repository": "https://github.com/ggml-org/llama.cpp.git",
-      "release": "b10621",
-      "commit": "c1d0e7a004015f23bc0233470b747b596f29b264",
-      "version_build": "10621",
-      "version_commit": "c1d0e7a00",
+      "release": "b10991",
+      "commit": "930e2fa5995789efbf249a8bf61325bb626e417b",
+      "version_build": "10991",
+      "version_commit": "930e2fa59",
       "capabilities": {
         "cors_controls": true
       }
