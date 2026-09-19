@@ -165,7 +165,9 @@ class BrowserReader:
                 environment = self._environment()
                 environment["KSENIA_BROWSER_JOB"] = job.name
                 environment["PYTHONPATH"] = os.pathsep.join(filter(None, (
-                    str(self.worker.parent.parent / "src"), environment.get("PYTHONPATH", "")
+                    str(Path(__file__).resolve().parents[1]),
+                    str(self.worker.parent.parent / "src"),
+                    environment.get("PYTHONPATH", ""),
                 )))
                 process = subprocess.Popen(
                     [

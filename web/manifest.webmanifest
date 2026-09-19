@@ -1,0 +1,19 @@
+{
+  "name": "Ксения — Голосовой ассистент",
+  "short_name": "Ксения",
+  "description": "Локальный ассистент-напарник Ксения",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#080b10",
+  "background_color": "#080b10",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

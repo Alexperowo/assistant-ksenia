@@ -53,6 +53,8 @@ models/
 *.key
 *.pfx
 *.p12
+*.crt
+certs/
 *.kdbx
 *.sqlite3
 *.db

@@ -247,6 +247,18 @@ class LanTaskStoreTests(unittest.TestCase):
             self.assertFalse(app.authorized("000000", "phone"))
         self.assertFalse(app.authorized("123456", "phone"))
 
+    def test_local_network_addresses_supports_scheme(self):
+        from butler.lan import local_network_addresses
+        addrs = local_network_addresses(8443, scheme="https")
+        self.assertTrue(all(a.startswith("https://") for a in addrs))
+        self.assertTrue(all(":8443" in a for a in addrs))
+
+    def test_static_pwa_assets_exist(self):
+        project_root = Path(__file__).resolve().parents[1]
+        self.assertTrue((project_root / "web" / "manifest.webmanifest").is_file())
+        self.assertTrue((project_root / "web" / "sw.js").is_file())
+        self.assertTrue((project_root / "web" / "icon.svg").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

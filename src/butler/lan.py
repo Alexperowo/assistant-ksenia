@@ -4,9 +4,11 @@ import hmac
 import hashlib
 import ipaddress
 import json
+import os
 import queue
 import secrets
 import socket
+import ssl
 import threading
 import time
 import uuid
@@ -556,9 +558,17 @@ class LanApplication:
 class ButlerLanServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], app: LanApplication) -> None:
+    def __init__(
+        self,
+        address: tuple[str, int],
+        app: LanApplication,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> None:
         super().__init__(address, ButlerLanHandler)
         self.app = app
+        self.ssl_context = ssl_context
+        if ssl_context is not None:
+            self.socket = ssl_context.wrap_socket(self.socket, server_side=True)
 
 
 class ButlerLanHandler(BaseHTTPRequestHandler):
@@ -570,6 +580,22 @@ class ButlerLanHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _send_static(
+        self, path: Path, content_type: str, cache_control: str = "no-cache"
+    ) -> None:
+        try:
+            payload = path.read_bytes()
+        except OSError:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": "Файл не найден"})
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", cache_control)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(payload)
@@ -613,6 +639,39 @@ class ButlerLanHandler(BaseHTTPRequestHandler):
         if path == "/":
             self._send_page()
             return
+        if path in {"/manifest.webmanifest", "/manifest.json"}:
+            self._send_static(
+                self.server.app.settings.root / "web" / "manifest.webmanifest",
+                "application/manifest+json; charset=utf-8",
+                "public, max-age=3600",
+            )
+            return
+        if path == "/sw.js":
+            self._send_static(
+                self.server.app.settings.root / "web" / "sw.js",
+                "application/javascript; charset=utf-8",
+                "no-cache",
+            )
+            return
+        if path in {"/icon.svg", "/favicon.ico", "/favicon.svg"}:
+            self._send_static(
+                self.server.app.settings.root / "web" / "icon.svg",
+                "image/svg+xml",
+                "public, max-age=86400",
+            )
+            return
+        if path in {"/openhands-ca.crt", "/ca.crt"}:
+            ca_path = self.server.app.settings.root / "certs" / "openhands-ca.crt"
+            pwa_env = os.environ.get("OPENHANDS_PWA_DIR", "")
+            if not ca_path.is_file() and pwa_env:
+                ca_path = Path(pwa_env) / "certs" / "openhands-ca.crt"
+            if ca_path.is_file():
+                self._send_static(
+                    ca_path,
+                    "application/x-x509-ca-cert",
+                    "public, max-age=86400",
+                )
+                return
         if path == "/api/health":
             self._send_json(
                 HTTPStatus.OK,
@@ -731,7 +790,45 @@ def _address_priority(value: str) -> tuple[int, str]:
     return (3, value)
 
 
-def local_network_addresses(port: int) -> list[str]:
+def get_ssl_context(
+    settings: Settings,
+    *,
+    cert_file: Path | str | None = None,
+    key_file: Path | str | None = None,
+) -> tuple[ssl.SSLContext | None, Path | None, Path | None]:
+    if cert_file and key_file:
+        crt = Path(cert_file)
+        key = Path(key_file)
+        if crt.is_file() and key.is_file():
+            try:
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ctx.load_cert_chain(certfile=str(crt), keyfile=str(key))
+                return ctx, crt, key
+            except Exception as exc:
+                diagnostic_exception(settings, "lan", "ssl_load_failed", exc)
+                return None, None, None
+
+    candidates = [
+        (settings.root / "certs" / "openhands-lan.crt", settings.root / "certs" / "openhands-lan.key"),
+        (settings.root / "certs" / "ksenia-lan.crt", settings.root / "certs" / "ksenia-lan.key"),
+        (settings.runtime_dir / "certs" / "lan.crt", settings.runtime_dir / "certs" / "lan.key"),
+    ]
+    pwa_env = os.environ.get("OPENHANDS_PWA_DIR", "")
+    if pwa_env:
+        candidates.append((Path(pwa_env) / "certs" / "openhands-lan.crt", Path(pwa_env) / "certs" / "openhands-lan.key"))
+    for crt, key in candidates:
+        if crt.is_file() and key.is_file():
+            try:
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ctx.load_cert_chain(certfile=str(crt), keyfile=str(key))
+                return ctx, crt, key
+            except Exception as exc:
+                diagnostic_exception(settings, "lan", "ssl_load_failed", exc)
+                continue
+    return None, None, None
+
+
+def local_network_addresses(port: int, scheme: str = "http") -> list[str]:
     try:
         raw = socket.gethostbyname_ex(socket.gethostname())[2]
     except OSError:
@@ -748,7 +845,7 @@ def local_network_addresses(port: int) -> list[str]:
     )
     if not addresses:
         addresses = ["127.0.0.1"]
-    return [f"http://{address}:{port}" for address in addresses]
+    return [f"{scheme}://{address}:{port}" for address in addresses]
 
 
 def persistent_pin(settings: Settings) -> str:
@@ -770,31 +867,58 @@ def run_lan_server(
     speech: SpeechAnnouncer,
     *,
     host: str = "auto",
-    port: int = 8765,
+    port: int | None = None,
     pin: str | None = None,
+    ssl_enabled: bool | None = None,
 ) -> None:
     access_pin = pin or persistent_pin(settings)
     app = LanApplication(settings, speech, access_pin)
-    discovered = local_network_addresses(port)
+    lan_config = settings.raw.get("lan", {})
+
+    if ssl_enabled is None:
+        cfg_ssl = lan_config.get("ssl", "auto")
+        if cfg_ssl == "auto":
+            if host == "127.0.0.1":
+                ssl_enabled = False
+            else:
+                ssl_probe, _, _ = get_ssl_context(settings)
+                ssl_enabled = ssl_probe is not None
+        else:
+            ssl_enabled = bool(cfg_ssl)
+
+    ssl_ctx = None
+    if ssl_enabled:
+        ssl_ctx, crt_path, _ = get_ssl_context(settings)
+        if ssl_ctx is None:
+            diagnostic_event(settings, "lan", "ssl_unavailable_fallback_to_http", level="warning")
+            ssl_enabled = False
+
+    scheme = "https" if ssl_enabled else "http"
+    effective_port = port if port is not None else (8443 if ssl_enabled else int(lan_config.get("port", 8765)))
+
+    discovered = local_network_addresses(effective_port, scheme=scheme)
     if host == "auto":
-        addresses = discovered[:1]
+        addresses = discovered
         address = addresses[0]
-        bind_host = urlparse(address).hostname or "127.0.0.1"
+        bind_host = "0.0.0.0"
     elif host in {"0.0.0.0", "::"}:
         addresses = discovered
         address = addresses[0]
         bind_host = host
     else:
         bind_host = host
-        addresses = [f"http://{host}:{port}"]
+        addresses = [f"{scheme}://{host}:{effective_port}"]
         address = addresses[0]
-    server = ButlerLanServer((bind_host, port), app)
+
+    server = ButlerLanServer((bind_host, effective_port), app, ssl_context=ssl_ctx)
     diagnostic_event(
         settings,
         "lan",
         "server_started",
         bind_host=bind_host,
-        port=port,
+        port=effective_port,
+        scheme=scheme,
+        ssl_enabled=ssl_enabled,
         url=address,
         address_count=len(addresses),
     )
@@ -803,21 +927,36 @@ def run_lan_server(
     for alternative in addresses[1:]:
         print(f"Запасной адрес: {alternative}")
     print(f"PIN: {access_pin}")
-    print(f"Интерфейс: {bind_host}")
+    print(f"Интерфейс: {bind_host} ({scheme.upper()})")
     print("Для остановки закройте окно или нажмите Ctrl+C.\n")
+
     spoken_address = (
-        address.removeprefix("http://")
+        address.removeprefix("https://")
+        .removeprefix("http://")
         .replace(".", " точка ")
         .replace(":", " порт ")
     )
-    speech.say(
-        f"Локальная панель готова. Адрес: {spoken_address}. "
-        f"Пин код: {', '.join(access_pin)}"
-    )
+    if scheme == "https":
+        speech.say(
+            f"Локальная панель готова. Защищённый адрес эйч ти ти пи эс: {spoken_address}. "
+            f"Пин код: {', '.join(access_pin)}"
+        )
+    else:
+        speech.say(
+            f"Локальная панель готова. Адрес: {spoken_address}. "
+            f"Пин код: {', '.join(access_pin)}"
+        )
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
-        diagnostic_event(settings, "lan", "server_stopped", bind_host=bind_host, port=port)
+        diagnostic_event(
+            settings,
+            "lan",
+            "server_stopped",
+            bind_host=bind_host,
+            port=effective_port,
+            scheme=scheme,
+        )

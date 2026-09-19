@@ -7,6 +7,9 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Ксения">
   <meta name="theme-color" content="#080b10">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon.svg">
   <title>Ксения — локальный дворецкий</title>
   <style>
     :root { color-scheme: dark; font-family: system-ui, "Segoe UI", sans-serif; }
@@ -287,6 +290,12 @@
       pinInput.focus();
     });
     else pinInput.focus();
+
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+      });
+    }
   </script>
 </body>
 </html>

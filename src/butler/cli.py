@@ -2117,6 +2117,8 @@ def build_parser() -> argparse.ArgumentParser:
     lan.add_argument("--host", default=None)
     lan.add_argument("--port", type=int, default=None)
     lan.add_argument("--pin", default=None)
+    lan.add_argument("--ssl", dest="ssl", action="store_true", default=None, help="включить защищённый режим HTTPS")
+    lan.add_argument("--no-ssl", dest="ssl", action="store_false", help="отключить режим HTTPS")
     start = sub.add_parser("start")
     start.add_argument("role", nargs="?", default=None)
     switch = sub.add_parser("switch")
@@ -2200,8 +2202,9 @@ def main(argv: list[str] | None = None) -> int:
                 settings,
                 speech,
                 host=args.host or str(lan_config.get("host", "auto")),
-                port=args.port or int(lan_config.get("port", 8765)),
+                port=args.port,
                 pin=args.pin,
+                ssl_enabled=args.ssl,
             )
             return 0
         if command == "start":
