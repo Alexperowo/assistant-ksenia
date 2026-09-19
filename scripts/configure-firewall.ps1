@@ -1,4 +1,4 @@
-# Ksenia Local LAN PWA Firewall Configuration
+﻿# Ksenia Local LAN PWA Firewall Configuration
 $ErrorActionPreference = "Stop"
 
 $ruleName = "Ksenia-LAN-PWA"

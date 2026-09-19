@@ -2117,6 +2117,7 @@ def build_parser() -> argparse.ArgumentParser:
     lan.add_argument("--host", default=None)
     lan.add_argument("--port", type=int, default=None)
     lan.add_argument("--pin", default=None)
+    lan.add_argument("--no-pin", dest="no_pin", action="store_true", help="отключить запрос PIN-кода (доверенная домашняя сеть)")
     lan.add_argument("--ssl", dest="ssl", action="store_true", default=None, help="включить защищённый режим HTTPS")
     lan.add_argument("--no-ssl", dest="ssl", action="store_false", help="отключить режим HTTPS")
     start = sub.add_parser("start")
@@ -2198,6 +2199,7 @@ def main(argv: list[str] | None = None) -> int:
             return _trusted_task_control(settings, speech)
         if command == "lan":
             lan_config = settings.raw.get("lan", {})
+            auth_enabled = False if getattr(args, "no_pin", False) else (True if args.pin else None)
             run_lan_server(
                 settings,
                 speech,
@@ -2205,6 +2207,7 @@ def main(argv: list[str] | None = None) -> int:
                 port=args.port,
                 pin=args.pin,
                 ssl_enabled=args.ssl,
+                auth_enabled=auth_enabled,
             )
             return 0
         if command == "start":

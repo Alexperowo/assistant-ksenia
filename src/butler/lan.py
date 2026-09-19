@@ -272,10 +272,17 @@ class LanApplication:
         settings: Settings,
         speech: SpeechAnnouncer,
         pin: str,
+        *,
+        auth_enabled: bool | None = None,
     ) -> None:
         self.settings = settings
         self.speech = speech
         self.pin = pin
+        lan_config = getattr(settings, "raw", {}).get("lan", {})
+        if auth_enabled is None:
+            self.auth_enabled = lan_config.get("auth_enabled", True)
+        else:
+            self.auth_enabled = auth_enabled
         self.task_journal = DurableTaskStore(settings.runtime_dir)
         self.store = LanTaskStore(self.task_journal)
         self._queue: queue.Queue[str] = queue.Queue()
@@ -289,6 +296,8 @@ class LanApplication:
         diagnostic_event(self.settings, "lan", "application_ready")
 
     def authorized(self, supplied_pin: str, client: str = "local") -> bool:
+        if not getattr(self, "auth_enabled", True):
+            return True
         now = time.monotonic()
         with self._auth_lock:
             recent = [stamp for stamp in self._auth_failures.get(client, []) if now - stamp < 60]
@@ -630,6 +639,8 @@ class ButlerLanHandler(BaseHTTPRequestHandler):
         return value if isinstance(value, dict) else None
 
     def _authorized(self) -> bool:
+        if not getattr(self.server.app, "auth_enabled", True):
+            return True
         return self.server.app.authorized(
             self.headers.get("X-Butler-Pin", ""), self.client_address[0]
         )
@@ -694,6 +705,9 @@ class ButlerLanHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         if path == "/api/auth":
+            if not getattr(self.server.app, "auth_enabled", True):
+                self._send_json(HTTPStatus.OK, {"ok": True, "auth_required": False})
+                return
             value = self._read_json()
             supplied = str((value or {}).get("pin", ""))
             if self.server.app.authorized(supplied, self.client_address[0]):
@@ -870,10 +884,17 @@ def run_lan_server(
     port: int | None = None,
     pin: str | None = None,
     ssl_enabled: bool | None = None,
+    auth_enabled: bool | None = None,
 ) -> None:
-    access_pin = pin or persistent_pin(settings)
-    app = LanApplication(settings, speech, access_pin)
     lan_config = settings.raw.get("lan", {})
+    if auth_enabled is None:
+        if pin is not None:
+            auth_enabled = True
+        else:
+            auth_enabled = lan_config.get("auth_enabled", False)
+
+    access_pin = pin or (persistent_pin(settings) if auth_enabled else "")
+    app = LanApplication(settings, speech, access_pin, auth_enabled=auth_enabled)
 
     if ssl_enabled is None:
         cfg_ssl = lan_config.get("ssl", "auto")
@@ -926,7 +947,10 @@ def run_lan_server(
     print(f"Адрес: {address}")
     for alternative in addresses[1:]:
         print(f"Запасной адрес: {alternative}")
-    print(f"PIN: {access_pin}")
+    if auth_enabled:
+        print(f"PIN: {access_pin}")
+    else:
+        print("Авторизация: ОТКЛЮЧЕНА (Доверенная домашняя сеть)")
     print(f"Интерфейс: {bind_host} ({scheme.upper()})")
     print("Для остановки закройте окно или нажмите Ctrl+C.\n")
 
@@ -936,16 +960,27 @@ def run_lan_server(
         .replace(".", " точка ")
         .replace(":", " порт ")
     )
-    if scheme == "https":
-        speech.say(
-            f"Локальная панель готова. Защищённый адрес эйч ти ти пи эс: {spoken_address}. "
-            f"Пин код: {', '.join(access_pin)}"
-        )
+    if auth_enabled:
+        if scheme == "https":
+            speech.say(
+                f"Локальная панель готова. Защищённый адрес эйч ти ти пи эс: {spoken_address}. "
+                f"Пин код: {', '.join(access_pin)}"
+            )
+        else:
+            speech.say(
+                f"Локальная панель готова. Адрес: {spoken_address}. "
+                f"Пин код: {', '.join(access_pin)}"
+            )
     else:
-        speech.say(
-            f"Локальная панель готова. Адрес: {spoken_address}. "
-            f"Пин код: {', '.join(access_pin)}"
-        )
+        if scheme == "https":
+            speech.say(
+                f"Локальная панель готова. Защищённый адрес эйч ти ти пи эс: {spoken_address}. "
+                "Вход без пин кода."
+            )
+        else:
+            speech.say(
+                f"Локальная панель готова. Адрес: {spoken_address}. Вход без пин кода."
+            )
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:
