@@ -109,11 +109,13 @@ class AudioOutputTests(unittest.TestCase):
                 w.setframerate(48000)
                 w.writeframes(b"\x00\x00" * 480)  # 10 ms of silence
 
-            import sounddevice as real_sd
+            class FakePortAudioError(Exception):
+                pass
+
             fake_sd = MagicMock()
-            fake_sd.PortAudioError = real_sd.PortAudioError
+            fake_sd.PortAudioError = FakePortAudioError
             fake_sd.check_output_settings.return_value = None
-            fake_sd.RawOutputStream.side_effect = real_sd.PortAudioError("Blocking API not supported yet")
+            fake_sd.RawOutputStream.side_effect = FakePortAudioError("Blocking API not supported yet")
 
             cb_stream_instance = MagicMock()
             def start_cb():
@@ -127,9 +129,7 @@ class AudioOutputTests(unittest.TestCase):
 
             controller = PcmPlaybackController("Speakers")
             with (
-                patch("sounddevice.check_output_settings", fake_sd.check_output_settings),
-                patch("sounddevice.RawOutputStream", fake_sd.RawOutputStream),
-                patch("sounddevice.OutputStream", fake_sd.OutputStream),
+                patch.dict("sys.modules", {"sounddevice": fake_sd}),
                 patch("audio_output.ranked_output_devices", return_value=[(14, {"name": "Speakers", "max_output_channels": 2}, "Windows WDM-KS")]),
             ):
                 result = controller.play(wav_path, controller.generation())

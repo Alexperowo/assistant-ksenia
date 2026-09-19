@@ -603,8 +603,11 @@ class ModelManagerTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             settings = replace(load_settings(), runtime_dir=Path(directory))
             manager = ModelManager(settings, "ui_fast")
+            dummy_model = Path(directory) / "test_model.gguf"
+            dummy_model.write_bytes(b"dummy")
             profile = replace(
                 settings.model("ui_butler"),
+                model_path=dummy_model,
                 expected_size_bytes=None,
                 sha256=None,
                 draft_model_path=None,

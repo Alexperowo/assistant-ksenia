@@ -29,7 +29,7 @@ from butler.tools import ToolExecutor, tool_schemas
 class SoftwareManagerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
+        self.root = Path(self.temp_dir.name).resolve()
         base = load_settings()
         self.settings = replace(base, root=self.root, runtime_dir=self.root / "runtime")
         self.manager = SoftwareManager(self.settings)
@@ -188,7 +188,7 @@ class SoftwareManagerTests(unittest.TestCase):
         args = mock_run.call_args[0][0]
         self.assertEqual(args[0], "msiexec.exe")
         self.assertIn("/i", args)
-        self.assertIn(str(msi_path), args)
+        self.assertTrue(any(Path(a).resolve() == msi_path.resolve() for a in args if isinstance(a, str) and a.endswith(".msi")))
         self.assertIn("/qn", args)
 
     @patch.object(SoftwareManager, "_run_subprocess")
@@ -200,7 +200,7 @@ class SoftwareManagerTests(unittest.TestCase):
         res = self.manager.install_downloaded(exe_path, silent=True)
         self.assertTrue(res["ok"])
         args = mock_run.call_args[0][0]
-        self.assertEqual(args[0], str(exe_path))
+        self.assertEqual(Path(args[0]).resolve(), exe_path.resolve())
         self.assertIn("/S", args)
 
     # --- Tier 4: Portable archives & PATH ---
