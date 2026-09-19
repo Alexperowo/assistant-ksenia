@@ -671,6 +671,20 @@ class ButlerLanHandler(BaseHTTPRequestHandler):
                 "public, max-age=86400",
             )
             return
+        if path in {"/icon-192x192.png", "/android-chrome-192x192.png", "/icon-192.png"}:
+            self._send_static(
+                self.server.app.settings.root / "web" / "icon-192x192.png",
+                "image/png",
+                "public, max-age=86400",
+            )
+            return
+        if path in {"/icon-512x512.png", "/android-chrome-512x512.png", "/apple-touch-icon.png", "/icon-512.png"}:
+            self._send_static(
+                self.server.app.settings.root / "web" / "icon-512x512.png",
+                "image/png",
+                "public, max-age=86400",
+            )
+            return
         if path in {"/openhands-ca.crt", "/ca.crt"}:
             ca_path = self.server.app.settings.root / "certs" / "openhands-ca.crt"
             pwa_env = os.environ.get("OPENHANDS_PWA_DIR", "")

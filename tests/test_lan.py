@@ -258,6 +258,8 @@ class LanTaskStoreTests(unittest.TestCase):
         self.assertTrue((project_root / "web" / "manifest.webmanifest").is_file())
         self.assertTrue((project_root / "web" / "sw.js").is_file())
         self.assertTrue((project_root / "web" / "icon.svg").is_file())
+        self.assertTrue((project_root / "web" / "icon-192x192.png").is_file())
+        self.assertTrue((project_root / "web" / "icon-512x512.png").is_file())
 
 
 if __name__ == "__main__":
