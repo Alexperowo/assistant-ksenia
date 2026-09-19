@@ -894,7 +894,7 @@ def run_lan_server(
             ssl_enabled = False
 
     scheme = "https" if ssl_enabled else "http"
-    effective_port = port if port is not None else (8443 if ssl_enabled else int(lan_config.get("port", 8765)))
+    effective_port = port if port is not None else int(lan_config.get("port", 8765))
 
     discovered = local_network_addresses(effective_port, scheme=scheme)
     if host == "auto":
