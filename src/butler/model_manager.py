@@ -210,6 +210,10 @@ class ModelManager:
             command.extend(
                 ["--gpu-layers-draft", str(profile.draft_gpu_layers)]
             )
+        if self.service.device:
+            device_options = {"--device", "-dev"}
+            if not any(arg.split("=", 1)[0].casefold() in device_options for arg in profile.extra_args):
+                command.extend(["--device", self.service.device])
         command.extend(profile.extra_args)
         command.extend(
             reasoning_arguments(
@@ -308,6 +312,40 @@ class ModelManager:
         except (OSError, urllib.error.URLError):
             return False
 
+    def compute_ready(self, timeout: float = 2.5) -> bool:
+        """Verify the model process compute pipeline is responsive and not deadlocked."""
+        slots_url = f"http://{self.service.host}:{self.service.port}/slots"
+        try:
+            req_slots = urllib.request.Request(
+                slots_url,
+                headers={"Authorization": f"Bearer {local_api_key(self.settings)}"},
+            )
+            with urllib.request.urlopen(req_slots, timeout=min(timeout, 1.0)) as resp:
+                if 200 <= resp.status < 300:
+                    slots_data = json.loads(resp.read().decode("utf-8"))
+                    if isinstance(slots_data, list) and any(
+                        isinstance(s, dict) and s.get("is_processing") for s in slots_data
+                    ):
+                        return True
+        except Exception:
+            pass
+
+        url = f"http://{self.service.host}:{self.service.port}/completion"
+        try:
+            payload = json.dumps({"prompt": "hi", "n_predict": 1}).encode("utf-8")
+            request = urllib.request.Request(
+                url,
+                data=payload,
+                headers={
+                    "Authorization": f"Bearer {local_api_key(self.settings)}",
+                    "Content-Type": "application/json",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return 200 <= response.status < 300
+        except (OSError, urllib.error.URLError, TimeoutError):
+            return False
+
     def _port_open(self, timeout: float = 0.5) -> bool:
         host = self.service.host
         if host in {"0.0.0.0", "::"}:
@@ -350,6 +388,7 @@ class ModelManager:
             and current.role == role
             and current.launch_signature == self.launch_signature(profile)
             and self.api_ready()
+            and self.compute_ready()
         )
 
     def start(self, role: str, wait: bool = True) -> RuntimeState:
@@ -438,6 +477,7 @@ class ModelManager:
             and current.role == role
             and current.launch_signature == signature
             and self.api_ready()
+            and self.compute_ready()
         ):
             diagnostic_event(
                 self.settings,
@@ -449,6 +489,14 @@ class ModelManager:
             )
             return current
         if current:
+            diagnostic_event(
+                self.settings,
+                "model_manager",
+                "stale_or_unresponsive_model_detected",
+                level="warning",
+                role=current.role,
+                model_pid=current.pid,
+            )
             if not self.stop() or not self._wait_port_closed():
                 raise ModelManagerError(
                     "Предыдущая локальная модель не освободила порт после остановки. "
@@ -492,6 +540,7 @@ class ModelManager:
                 creationflags=(
                     getattr(subprocess, "CREATE_NO_WINDOW", 0)
                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    | getattr(subprocess, "DETACHED_PROCESS", 0)
                 ),
             )
         finally:
@@ -540,7 +589,7 @@ class ModelManager:
                     raise ModelManagerError(
                         f"llama-server завершился с кодом {process.returncode}. Журнал: {log_path}"
                     )
-                if self.api_ready():
+                if self.api_ready() and self.compute_ready(timeout=5.0):
                     metadata = self.model_metadata()
                     actual_context = int(metadata.get("n_ctx", 0) or 0)
                     state = RuntimeState(
@@ -727,6 +776,9 @@ class ModelResidencyCoordinator:
         self.settings = settings
         self.primary = ModelManager(settings, "primary")
         self.residents = ResidentModelPool(settings)
+        self.isolate_resident_vram = bool(
+            settings.raw.get("runtime_routing", {}).get("isolate_resident_vram", False)
+        )
 
     @staticmethod
     def _require_closed(manager: ModelManager, label: str) -> None:
@@ -736,16 +788,37 @@ class ModelResidencyCoordinator:
             )
 
     def activate_residents(self) -> dict[str, RuntimeState]:
-        primary_state = self.primary.running_state()
-        stopped_primary_role = primary_state.role if primary_state is not None else ""
-        if primary_state is not None:
-            if not self.primary.stop():
-                raise ModelManagerError(
-                    "Не удалось безопасно остановить primary-модель перед быстрым уровнем."
-                )
-        try:
+        stopped_primary_role = ""
+        if not self.isolate_resident_vram:
+            primary_state = self.primary.running_state()
+            stopped_primary_role = primary_state.role if primary_state is not None else ""
+            if primary_state is not None:
+                if not self.primary.stop():
+                    raise ModelManagerError(
+                        "Не удалось безопасно остановить primary-модель перед быстрым уровнем."
+                    )
             self._require_closed(self.primary, "primary")
+        try:
             states = self.residents.start_all()
+            if self.isolate_resident_vram:
+                try:
+                    primary_role = self.settings.capability_model(
+                        "planner", fallback="reasoning"
+                    )
+                    primary_state = self.primary.running_state()
+                    if primary_state is None:
+                        if self.settings.model(primary_role).enabled:
+                            states[primary_role] = self.primary.start(primary_role)
+                    else:
+                        states[primary_role] = primary_state
+                except Exception as exc:
+                    diagnostic_event(
+                        self.settings,
+                        "model_residency",
+                        "primary_resident_warmup_deferred",
+                        level="warning",
+                        error=str(exc),
+                    )
         except Exception:
             if stopped_primary_role:
                 self.primary.start(stopped_primary_role)
@@ -759,6 +832,14 @@ class ModelResidencyCoordinator:
         return states
 
     def suspend_residents_for_primary(self) -> ResidencyLease:
+        if self.isolate_resident_vram:
+            diagnostic_event(
+                self.settings,
+                "model_residency",
+                "primary_window_opened_isolated",
+                suspended_roles=[],
+            )
+            return ResidencyLease(())
         active_roles = tuple(self.residents.running_states())
         stopped_roles: list[str] = []
         try:
@@ -788,6 +869,14 @@ class ModelResidencyCoordinator:
 
     def restore_after_primary(self, lease: ResidencyLease) -> dict[str, RuntimeState]:
         if not lease.active_resident_roles:
+            if not self.isolate_resident_vram:
+                primary_state = self.primary.running_state()
+                if primary_state is not None:
+                    if not self.primary.stop():
+                        raise ModelManagerError(
+                            "Не удалось безопасно остановить primary-модель перед восстановлением."
+                        )
+                self._require_closed(self.primary, "primary")
             return {}
         primary_state = self.primary.running_state()
         if primary_state is not None:

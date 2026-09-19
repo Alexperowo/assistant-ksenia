@@ -17,12 +17,17 @@ from butler.chat import ChatError
 from butler.approval import approval_explanation
 from butler.atomic_io import atomic_write_text
 from butler.audio_capture import AudioCaptureService, AudioCaptureServiceError
+from butler.audio_routing import (
+    execute_audio_output_command,
+    parse_audio_output_command,
+)
 from butler.confirmation import confirmation_text
 from butler.config import (
     ConfigError,
     load_settings,
     reasoning_label,
     response_budget_label,
+    set_user_audio_output,
     set_user_capability_model,
     set_user_assistant_mode,
     set_user_headset_control,
@@ -406,6 +411,8 @@ def _audio_devices(
     *,
     select: str | None = None,
     clear: bool = False,
+    output_select: str | None = None,
+    clear_output: bool = False,
     interactive: bool = False,
 ) -> int:
     if clear:
@@ -419,7 +426,39 @@ def _audio_devices(
             "микрофон автоматически."
         )
         return 0
+    if clear_output:
+        set_user_audio_output(settings.root, "")
+        speech.switch_output_device("")
+        print(
+            "Сохранённый выбор устройства вывода удалён. Ксения использует "
+            "системный маршрут Windows по умолчанию."
+        )
+        speech.say_and_wait(
+            "Сохранённый выбор устройства вывода удалён. Используется системный маршрут Windows по умолчанию."
+        )
+        return 0
     recognizer = SpeechRecognizer(settings)
+    if output_select is not None:
+        selector = str(output_select).strip()
+        if not selector:
+            print("ОШИБКА: селектор вывода звука не может быть пустым.")
+            speech.say_and_wait("Название устройства вывода не может быть пустым.")
+            return 1
+        try:
+            probe = recognizer.probe_output_device(selector)
+        except SpeechRecognitionError as exc:
+            diagnostic_exception(settings, "audio_devices", "probe_output_failed", exc)
+            print(f"ОШИБКА: устройство вывода «{selector}» не открывается: {exc}")
+            speech.say_and_wait("Указанное устройство вывода звука не открывается.")
+            return 1
+        set_user_audio_output(settings.root, selector)
+        speech.switch_output_device(selector)
+        device_name = str(probe.get("device", selector))
+        print(f"Выбрано устройство вывода: {_spoken_device_name(device_name)}.")
+        print(f"Проверено фактическое открытие: {device_name}; {probe.get('host_api', '')}; {probe.get('sample_rate', '')} Гц.")
+        print("Выбор сохранён атомарно в config/user.json.")
+        speech.say_and_wait(f"Устройство вывода звука {_spoken_device_name(selector)} выбрано.")
+        return 0
     devices = recognizer.list_devices()
     output_devices = recognizer.list_output_devices()
     if not isinstance(output_devices, list):
@@ -456,15 +495,26 @@ def _audio_devices(
                 f"{device.get('index')}: {display_name} — {device.get('host_api')}, "
                 f"{device.get('sample_rate')} Гц, {device.get('channels')} кан. {marker}"
             )
-    else:
-        print("Устройства вывода звука не найдены.")
+    raw_output = getattr(settings, "output_device", "")
+    configured_output = (
+        raw_output
+        if raw_output
+        else str(voice_settings.get("output_device", "")).strip()
+        if isinstance(voice_settings, dict)
+        else ""
+    )
+    if configured_output:
+        print(f"Сохранённый выбор устройства вывода: {configured_output}.")
     default_outputs = [device for device in output_devices if device.get("default")]
     if default_outputs:
         output_name = _spoken_device_name(default_outputs[0].get("name"))
-        print(
-            "Обычная речь Ксении сейчас следует системному маршруту Windows: "
-            f"{output_name}. Этот мастер пока не меняет устройство вывода."
-        )
+        if configured_output:
+            print(f"Обычная речь Ксении сейчас направлена на: {configured_output}.")
+        else:
+            print(
+                "Обычная речь Ксении сейчас следует системному маршруту Windows: "
+                f"{output_name}. Этот мастер пока не меняет устройство вывода."
+            )
     else:
         output_name = ""
         print(
@@ -749,6 +799,12 @@ def _headset_controls_test(settings, speech: SpeechAnnouncer) -> int:
 
 
 def _voice_agent(settings, speech: SpeechAnnouncer) -> int:
+    if sys.platform == "win32":
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_OK)
+        except Exception:
+            pass
     with SingleInstance(settings.root, "microphone") as acquired:
         if not acquired:
             speech.say_and_wait(
@@ -929,7 +985,7 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
     pending_live_turns: queue.Queue[dict[str, object]] = queue.Queue(maxsize=1)
     dialogue_active = False
     conversational_silence_timeout = float(
-        voice_config.get("conversational_silence_timeout_seconds", 8.0)
+        voice_config.get("conversational_silence_timeout_seconds", 20.0)
     )
     while True:
         try:
@@ -1184,6 +1240,19 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
             capture_service.close()
             speech.say_and_wait("Голосовой диалог завершён.")
             return 0
+
+        audio_output_cmd = parse_audio_output_command(user_text)
+        if audio_output_cmd is not None:
+            reply = execute_audio_output_command(
+                audio_output_cmd,
+                settings=settings,
+                speech=speech,
+                recognizer=recognizer,
+            )
+            print(f"[Вывод звука: {reply}]", flush=True)
+            speech.say_and_wait(reply)
+            dialogue_active = True
+            continue
 
         if is_research_status_command(user_text):
             status_text = session.background_research.get_status()
@@ -1693,6 +1762,14 @@ def _voice_agent_active(settings, speech: SpeechAnnouncer) -> int:
                     else 4
                 )
             )
+        current_task_record = task_store.get(task.id)
+        if current_task_record is not None and current_task_record.get("state") in (
+            TaskState.CANCELLED.value,
+            TaskState.FAILED.value,
+            TaskState.CANCELLED,
+            TaskState.FAILED,
+        ):
+            continue
         task_store.transition(
             task.id,
             TaskState.COMPLETED,
@@ -1757,6 +1834,16 @@ def _agent_chat(settings, speech: SpeechAnnouncer) -> int:
         if user_text.lower() in {"выход", "выйти", "/exit", "/quit"}:
             speech.say_and_wait("Диалог завершён.")
             return 0
+        audio_output_cmd = parse_audio_output_command(user_text)
+        if audio_output_cmd is not None:
+            reply = execute_audio_output_command(
+                audio_output_cmd,
+                settings=settings,
+                speech=speech,
+            )
+            print(f"[Вывод звука] {reply}\n")
+            speech.say_and_wait(reply)
+            continue
         try:
             def report_status(status: str) -> None:
                 print(f"[{status}]", flush=True)
@@ -2007,6 +2094,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="удалить сохранённый выбор микрофона",
     )
+    output_selection = audio_devices.add_mutually_exclusive_group()
+    output_selection.add_argument(
+        "--output",
+        metavar="NAME",
+        help="сохранить устойчивый фрагмент имени устройства вывода звука",
+    )
+    output_selection.add_argument(
+        "--clear-output",
+        action="store_true",
+        help="удалить сохранённый выбор устройства вывода звука",
+    )
     audio_devices.add_argument(
         "--interactive",
         action="store_true",
@@ -2085,6 +2183,8 @@ def main(argv: list[str] | None = None) -> int:
                 speech,
                 select=getattr(args, "select", None),
                 clear=bool(getattr(args, "clear", False)),
+                output_select=getattr(args, "output", None),
+                clear_output=bool(getattr(args, "clear_output", False)),
                 interactive=bool(getattr(args, "interactive", False)),
             )
         if command == "headset-test":

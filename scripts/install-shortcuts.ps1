@@ -25,8 +25,24 @@ $shortcuts = @(
     @{ Name = 'Ксения — полный аудит'; Target = 'AUDIT.cmd'; Description = 'Проверить Python, голос, модели и программу.' },
     @{ Name = 'Ксения — вход в сайты'; Target = 'BROWSER-PROFILE.cmd'; Description = 'Открыть отдельный браузер Ксении для входа в нужные сайты.' }
 )
+$toolsFolder = Join-Path $desktop 'Ксения — Инструменты и отладка'
+if (-not (Test-Path -LiteralPath $toolsFolder)) {
+    New-Item -ItemType Directory -Force -Path $toolsFolder | Out-Null
+}
+$mainShortcuts = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$mainShortcuts.Add('Ксения — НАЧАТЬ РАЗГОВОР') | Out-Null
+$mainShortcuts.Add('Ксения — ОСТАНОВИТЬ ГОЛОС') | Out-Null
+
 foreach ($item in $shortcuts) {
-    $link = $shell.CreateShortcut((Join-Path $desktop ($item.Name + '.lnk')))
+    $targetDir = if ($mainShortcuts.Contains($item.Name)) { $desktop } else { $toolsFolder }
+    $shortcutPath = Join-Path $targetDir ($item.Name + '.lnk')
+    if ($targetDir -ne $desktop) {
+        $oldRootShortcut = Join-Path $desktop ($item.Name + '.lnk')
+        if (Test-Path -LiteralPath $oldRootShortcut) {
+            Remove-Item -LiteralPath $oldRootShortcut -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $link = $shell.CreateShortcut($shortcutPath)
     $link.TargetPath = Join-Path $projectRoot $item.Target
     $link.WorkingDirectory = $projectRoot
     $link.IconLocation = "$kseniaIcon,0"
@@ -34,7 +50,7 @@ foreach ($item in $shortcuts) {
     $link.WindowStyle = 1
     $link.Hotkey = if ($item.Hotkey) { $item.Hotkey } else { '' }
     $link.Save()
-    $saved = $shell.CreateShortcut((Join-Path $desktop ($item.Name + '.lnk')))
+    $saved = $shell.CreateShortcut($shortcutPath)
     if (
         [IO.Path]::GetFullPath($saved.TargetPath) -ne
         [IO.Path]::GetFullPath((Join-Path $projectRoot $item.Target)) -or
@@ -44,4 +60,4 @@ foreach ($item in $shortcuts) {
         throw "Ярлык не прошёл проверку после сохранения: $($item.Name)"
     }
 }
-Write-Host "Ярлыки Ксении созданы: $desktop"
+Write-Host "Ярлыки Ксении созданы: $desktop (главные) и $toolsFolder (инструменты)"

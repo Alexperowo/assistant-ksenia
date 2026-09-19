@@ -28,5 +28,12 @@ if ($ButlerArgs.Count -eq 0) {
     $ButlerArgs = @('menu')
 }
 
+if ($ButlerArgs.Count -gt 0 -and $ButlerArgs[0] -eq 'voice-agent') {
+    try {
+        [System.Media.SystemSounds]::Asterisk.Play()
+    }
+    catch {}
+}
+
 & $python -m butler @ButlerArgs
 exit $LASTEXITCODE

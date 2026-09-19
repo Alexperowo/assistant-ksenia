@@ -325,6 +325,31 @@ class BrowserSafetyTests(unittest.TestCase):
             self.assertEqual(completed_call.kwargs.get("transport"), "single")
 
 
+    def test_search_mode_uses_general_search_and_not_google_news(self):
+        worker_path = Path(__file__).resolve().parents[1] / "scripts" / "browser_worker.py"
+        content = worker_path.read_text(encoding="utf-8")
+        self.assertNotIn("news.google.com", content)
+
+    def test_sanitize_web_text_removes_cookie_and_gdpr_banners(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+        from browser_worker import sanitize_web_text
+
+        sample_page = (
+            "Мы используем файлы cookie для улучшения работы сайта. Принять все.\n"
+            "Политика конфиденциальности и пользовательское соглашение.\n\n"
+            "Главная новость: астрономы обнаружили новую экзопланету в обитаемой зоне.\n"
+            "Планета обращается вокруг красного карлика за 18 дней.\n\n"
+            "Настройки cookie | Все права защищены."
+        )
+        cleaned = sanitize_web_text(sample_page)
+        self.assertNotIn("Мы используем файлы cookie", cleaned)
+        self.assertNotIn("Принять все", cleaned)
+        self.assertNotIn("Политика конфиденциальности", cleaned)
+        self.assertNotIn("Настройки cookie", cleaned)
+        self.assertIn("Главная новость: астрономы обнаружили новую экзопланету", cleaned)
+        self.assertIn("Планета обращается вокруг красного карлика", cleaned)
+
+
 if __name__ == "__main__":
     unittest.main()
 

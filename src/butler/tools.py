@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import subprocess
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -34,6 +35,7 @@ from butler.windows_bridge import (
     active_window,
     click_pointer,
     list_windows,
+    manage_window,
     move_pointer,
     press_keys,
     scroll_pointer,
@@ -41,6 +43,11 @@ from butler.windows_bridge import (
 )
 from butler.windows_automation import WindowsAutomation, WindowsAutomationError
 from butler.weather import WeatherClient, WeatherError
+from butler.software_manager import (
+    SoftwareManager,
+    SoftwareManagerError,
+    validate_command_safety,
+)
 
 
 MAX_READ_BYTES = 1_048_576
@@ -48,7 +55,6 @@ MAX_READ_CHARS = 32_000
 MAX_LIST_ENTRIES = 200
 ACTIVE_WINDOWS_TOOLS = frozenset(
     {
-        "windows_activate_window",
         "windows_type_text",
         "windows_press_keys",
         "windows_invoke_control",
@@ -481,6 +487,33 @@ def tool_schemas(settings: Settings | None = None) -> list[dict[str, Any]]:
         {
             "type": "function",
             "function": {
+                "name": "windows_manage_window",
+                "description": "Управление состоянием окна Windows: свернуть (minimize), развернуть (maximize), восстановить (restore) или закрыть (close). Можно передать часть названия окна (например, 'терминал', 'браузер') или дескриптор. По умолчанию применяется к активному окну.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["minimize", "maximize", "restore", "close"],
+                            "description": "Действие над окном: minimize (свернуть), maximize (развернуть), restore (восстановить), close (закрыть).",
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Часть заголовка окна или тип приложения (например 'терминал', 'powershell', 'браузер', 'блокнот').",
+                        },
+                        "handle": {
+                            "type": "integer",
+                            "description": "Дескриптор окна (0 для активного окна).",
+                        },
+                    },
+                    "required": ["action"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "windows_type_text",
                 "description": "Ввести текст в текущее активное окно Windows. Требует подтверждения.",
                 "parameters": {
@@ -609,6 +642,119 @@ def tool_schemas(settings: Settings | None = None) -> list[dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_software",
+                "description": "Найти программу в официальном каталоге winget (Windows Package Manager). Только чтение, без изменений системы.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "minLength": 1, "description": "Название или идентификатор программы, например 7zip, vlc, git."}
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "install_software",
+                "description": "Установить или обновить программу в Windows по четырёхуровневой стратегии (winget, прямая загрузка с хешем, мастер с окном, портативный архив). Всегда требует подтверждения пользователя.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "package_id": {"type": "string", "description": "Идентификатор пакета (например 7zip.7zip, VideoLAN.VLC) или путь/имя программы."},
+                        "tier": {
+                            "type": "string",
+                            "enum": ["winget", "download", "interactive", "portable"],
+                            "description": "Уровень установки: winget (по умолчанию), download, interactive, portable."
+                        },
+                        "url": {"type": "string", "description": "Официальный URL загрузки инсталлятора (для download и portable)."},
+                        "sha256": {"type": "string", "description": "Ожидаемая контрольная сумма SHA-256 инсталлятора для проверки целостности."},
+                        "silent": {"type": "boolean", "description": "Выполнять ли тихую установку без диалоговых окон (по умолчанию true)."}
+                    },
+                    "required": ["package_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "configure_environment",
+                "description": "Проверить наличие утилиты в системе или настроить переменную окружения PATH пользователя Windows. Добавление и удаление путей требуют подтверждения.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["check_command", "list_path", "add_to_path", "remove_from_path"],
+                            "description": "Действие: check_command (проверить команду), list_path (показать текущий PATH), add_to_path (добавить каталог в PATH), remove_from_path (удалить из PATH)."
+                        },
+                        "command": {"type": "string", "description": "Имя команды для проверки (например git, ffmpeg, python)."},
+                        "path": {"type": "string", "description": "Каталог для добавления или удаления из PATH."}
+                    },
+                    "required": ["action"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "start_video_generation",
+                "description": (
+                    "Передать согласованный с Александром сценарий автономному кинооператору Agent A1 в RAM "
+                    "для генерации кинематографического видеоролика (MiniMax H3, Lip-Sync, 24 fps). "
+                    "Вызывается только после явного согласия Александра (например, «передавай в работу»)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "project_name": {
+                            "type": "string",
+                            "description": "Название видеопроекта (например, 'Красная Шапочка и Волк').",
+                        },
+                        "global_style": {
+                            "type": "string",
+                            "description": "Общий кинематографический стиль сцен.",
+                        },
+                        "scenes": {
+                            "type": "array",
+                            "description": "Список сцен (шотов). Каждый шот длится ровно 5 секунд (124 кадра при 24 fps).",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "shot": {"type": "integer", "description": "Номер сцены (1, 2, 3...)"},
+                                    "description": {"type": "string", "description": "Краткое описание сцены на русском."},
+                                    "prompt": {"type": "string", "description": "Английский кинематографический промпт (35mm film, lighting, subject)."},
+                                    "speech": {
+                                        "type": "object",
+                                        "properties": {
+                                            "text": {"type": "string", "description": "Реплика персонажа на русском (не более 8-10 слов)."},
+                                            "voice": {"type": "string", "description": "Голос персонажа (red_riding_hood, girl, female_soft)."},
+                                            "lip_sync": {"type": "boolean", "description": "Синхронизация губ (требуется крупный план лица)."},
+                                        },
+                                    },
+                                    "voiceover": {
+                                        "type": "object",
+                                        "properties": {
+                                            "text": {"type": "string", "description": "Закадровый голос диктора на русском."},
+                                            "voice": {"type": "string", "description": "Голос диктора (narrator, male_clear)."},
+                                        },
+                                    },
+                                },
+                                "required": ["shot", "prompt"],
+                            },
+                        },
+                    },
+                    "required": ["project_name", "scenes"],
+                    "additionalProperties": False,
+                },
+            },
+        },
     ]
     if settings is not None and bool(settings.raw.get("rag", {}).get("enabled", False)):
         schemas.insert(
@@ -686,6 +832,7 @@ class ToolExecutor:
         self.browser = BrowserReader(settings)
         self.windows = WindowsAutomation(settings)
         self.developer = DeveloperRunner(settings)
+        self.software = SoftwareManager(settings)
         self.journal = ChangeJournal(self.workspace_root, settings.runtime_dir)
         self.knowledge = KnowledgeStore(settings.runtime_dir)
         self.rag = HybridRagIndex(settings.runtime_dir)
@@ -1354,13 +1501,17 @@ class ToolExecutor:
                 if blocked:
                     result = blocked
                 else:
-                    command = self.developer.run(args.get("command"), args.get("cwd", "."))
-                    result = ToolResult(
-                        command.return_code == 0 and not command.timed_out,
-                        "ok" if command.return_code == 0 and not command.timed_out else "command_failed",
-                        "Команда выполнена." if command.return_code == 0 else "Команда завершилась с ошибкой.",
-                        command.as_dict(),
-                    )
+                    is_safe, safety_reason = validate_command_safety(args.get("command", ""))
+                    if not is_safe:
+                        result = ToolResult(False, "command_blocked", safety_reason)
+                    else:
+                        command = self.developer.run(args.get("command"), args.get("cwd", "."))
+                        result = ToolResult(
+                            command.return_code == 0 and not command.timed_out,
+                            "ok" if command.return_code == 0 and not command.timed_out else "command_failed",
+                            "Команда выполнена." if command.return_code == 0 else "Команда завершилась с ошибкой.",
+                            command.as_dict(),
+                        )
             elif name == "browser_search":
                 blocked = self._outbound_after_local_guard(confirmed) or self._authorize(
                     "browser_read", self.workspace_root, confirmed
@@ -1436,6 +1587,38 @@ class ToolExecutor:
                 result = blocked or ToolResult(
                     True, "ok", "Окно активировано.", activate_window(int(args.get("handle", 0)))
                 )
+            elif name == "windows_manage_window":
+                action = str(args.get("action", "minimize")).strip().lower()
+                title = str(args.get("title", "")).strip()
+                handle = int(args.get("handle", 0) or 0)
+                blocked = self._authorize(
+                    "windows_write", self.workspace_root, confirmed
+                )
+                if not blocked and action in ("close", "закрыть", "закрой") and not confirmed:
+                    blocked = ToolResult(
+                        False,
+                        "confirmation_required",
+                        f"Закрытие окна требует подтверждения: '{title or handle or 'активное окно'}'.",
+                    )
+                if blocked:
+                    result = blocked
+                else:
+                    outcome = manage_window(handle=handle, action=action, title=title)
+                    action_labels = {
+                        "minimize": "свёрнуто",
+                        "maximize": "развёрнуто",
+                        "restore": "восстановлено",
+                        "close": "закрыто",
+                    }
+                    action_desc = action_labels.get(outcome.get("action", action), "изменено")
+                    window_title = outcome.get("title", "")
+                    title_str = f" «{window_title}»" if window_title else ""
+                    result = ToolResult(
+                        True,
+                        "ok",
+                        f"Окно{title_str} успешно {action_desc}.",
+                        outcome,
+                    )
             elif name == "windows_type_text":
                 blocked = (
                     self._windows_active_control_guard()
@@ -1533,6 +1716,144 @@ class ToolExecutor:
                     "Прокрутка выполнена.",
                     scroll_pointer(int(args.get("clicks", 0))),
                 )
+            elif name == "search_software":
+                query = str(args.get("query", "")).strip()
+                items = self.software.search_winget(query)
+                result = ToolResult(
+                    True,
+                    "ok",
+                    f"Найдено пакетов winget: {len(items)}." if items else "Пакеты не найдены.",
+                    {"query": query, "packages": items},
+                )
+            elif name == "install_software":
+                blocked = self._authorize("install_software", self.workspace_root, confirmed)
+                if blocked:
+                    result = blocked
+                else:
+                    pkg = str(args.get("package_id", "")).strip()
+                    tier = str(args.get("tier", "winget")).strip().casefold()
+                    silent = bool(args.get("silent", True))
+                    url = str(args.get("url", "")).strip()
+                    sha256 = str(args.get("sha256", "")).strip() or None
+                    if tier == "winget":
+                        res = self.software.install_winget(pkg, silent=silent)
+                    elif tier == "download":
+                        if url:
+                            dl = self.software.download_installer(url, expected_sha256=sha256)
+                            res = self.software.install_downloaded(dl["path"], silent=silent)
+                        else:
+                            res = self.software.install_downloaded(pkg, silent=silent)
+                    elif tier == "interactive":
+                        res = self.software.prepare_interactive_installer(pkg)
+                    elif tier == "portable":
+                        if url:
+                            dl = self.software.download_installer(url, expected_sha256=sha256)
+                            res = self.software.install_portable_zip(dl["path"], add_to_path=True)
+                        else:
+                            res = self.software.install_portable_zip(pkg, add_to_path=True)
+                    else:
+                        raise ValueError(f"Неизвестный уровень установки: {tier}")
+                    result = ToolResult(
+                        bool(res.get("ok", True)),
+                        "ok" if res.get("ok", True) else "install_failed",
+                        str(res.get("message", "Действие выполнено.")),
+                        res,
+                    )
+            elif name == "configure_environment":
+                action = str(args.get("action", "")).strip().casefold()
+                if action in {"add_to_path", "remove_from_path"}:
+                    blocked = self._authorize("install_software", self.workspace_root, confirmed)
+                    if blocked:
+                        result = blocked
+                    else:
+                        target_dir = str(args.get("path", "")).strip()
+                        if action == "add_to_path":
+                            res = self.software.add_to_user_path(target_dir)
+                        else:
+                            res = self.software.remove_from_user_path(target_dir)
+                        result = ToolResult(
+                            bool(res.get("ok", True)),
+                            "ok" if res.get("ok", True) else "path_failed",
+                            str(res.get("message", "Окружение обновлено.")),
+                            res,
+                        )
+                elif action == "list_path":
+                    paths = self.software.get_user_path()
+                    result = ToolResult(
+                        True,
+                        "ok",
+                        f"Элементов в PATH пользователя: {len(paths)}.",
+                        {"path": paths},
+                    )
+                elif action == "check_command":
+                    cmd = str(args.get("command", "")).strip()
+                    res = self.software.check_command(cmd)
+                    result = ToolResult(
+                        True,
+                        "ok",
+                        f"Команда '{cmd}' найдена в системе ({res['path']})." if res["found"] else f"Команда '{cmd}' не найдена в PATH.",
+                        res,
+                    )
+                else:
+                    raise ValueError(f"Неизвестное действие configure_environment: {action}")
+            elif name == "start_video_generation":
+                project_name = str(args.get("project_name", "Новый фильм")).strip() or "Новый фильм"
+                scenes = args.get("scenes", [])
+                if not scenes:
+                    result = ToolResult(False, "invalid_arguments", "Список сцен (scenes) не может быть пустым.")
+                else:
+                    import re
+                    import yaml
+                    safe_title = re.sub(r"[^a-zA-Z0-9_\u0400-\u04FF]+", "_", project_name.strip()).strip("_")
+                    sys_drive = os.environ.get("SystemDrive", "C:")
+                    alt_drive = "D:" if sys_drive.upper().startswith("C") else "C:"
+                    candidates_dir = [
+                        Path(os.environ.get("CINEMA_DIR", "")),
+                        Path(f"{sys_drive}/AI/CinemaDirector"),
+                        Path(f"{alt_drive}/AI/CinemaDirector"),
+                    ]
+                    actual_cinema_dir = next((p for p in candidates_dir if str(p) and p.exists()), Path(f"{sys_drive}/AI/CinemaDirector"))
+                    candidates_comfy = [
+                        Path(os.environ.get("COMFYUI_PYTHON", "")),
+                        Path(f"{sys_drive}/AI/ComfyUI/venv/Scripts/python.exe"),
+                        Path(f"{alt_drive}/AI/ComfyUI/venv/Scripts/python.exe"),
+                    ]
+                    python_exe = str(next((p for p in candidates_comfy if str(p) and p.exists()), Path(f"{sys_drive}/AI/ComfyUI/venv/Scripts/python.exe")))
+                    candidates_output = [
+                        Path(os.environ.get("CINEMA_OUTPUT_DIR", "")),
+                        Path(f"{alt_drive}/AI/Project"),
+                        Path(f"{sys_drive}/AI/Project"),
+                    ]
+                    actual_output_dir = next((p for p in candidates_output if str(p) and p.exists()), Path(f"{alt_drive}/AI/Project"))
+                    actual_output_dir.mkdir(parents=True, exist_ok=True)
+                    output_file = str(actual_output_dir / f"{safe_title or 'cinema_project'}_master.mp4")
+                    storyboard = {
+                        "project_name": project_name,
+                        "output_video": output_file,
+                        "global_style": str(args.get("global_style", "photorealistic National Geographic documentary, 35mm cinematic film grain, volumetric lighting, ancient misty pine forest")),
+                        "negative_prompt": "cartoon, 3d render, anime, plastic skin, oversaturated, blurry, bad anatomy, text, watermark, deformed, low quality",
+                        "resolution": "1344x768",
+                        "fps": 24,
+                        "upscale_4k": False,
+                        "scenes": scenes,
+                    }
+                    target_yaml = actual_cinema_dir / "storyboard.yaml"
+                    target_yaml.parent.mkdir(parents=True, exist_ok=True)
+                    target_yaml.write_text(yaml.dump(storyboard, allow_unicode=True, sort_keys=False), encoding="utf-8")
+                    
+                    operator_script = str(actual_cinema_dir / "agent_a1_operator.py")
+                    subprocess.Popen(
+                        [python_exe, operator_script, str(target_yaml)],
+                        cwd=str(actual_cinema_dir),
+                        creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                    )
+                    result = ToolResult(
+                        True,
+                        "ok",
+                        f"Сценарий фильма «{project_name}» из {len(scenes)} сцен успешно передан оператору Agent A1 в оперативной памяти. "
+                        "Рендер запущен в фоне. Промежуточные статусы каждого шота будут озвучены, а готовый фильм откроется на экране.",
+                        {"project_name": project_name, "scenes_count": len(scenes), "output_video": output_file},
+                    )
             else:
                 result = ToolResult(False, "unknown_tool", f"Неизвестный инструмент: {name}")
         except (
@@ -1540,6 +1861,7 @@ class ToolExecutor:
             DeveloperError,
             WindowsAutomationError,
             WindowsBridgeError,
+            SoftwareManagerError,
             OSError,
             ValueError,
             TypeError,
@@ -1560,6 +1882,8 @@ class ToolExecutor:
             "windows_active_window",
             "windows_list_windows",
             "windows_inspect_controls",
+            "configure_environment",
+            "search_software",
         }:
             self._local_data_exposed = True
         self._log(

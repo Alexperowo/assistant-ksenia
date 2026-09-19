@@ -11,6 +11,7 @@ from butler.research import (
     _page_is_usable,
     _select_sources,
     _source_limit_for_request,
+    format_news_summary,
     is_fast_lookup_request,
     is_web_research_request,
     select_research_mode,
@@ -492,6 +493,12 @@ class ResearchTests(unittest.TestCase):
         )
         self.assertEqual(reply_deep.text, "Проверенный глубокий итог.")
         self.assertIn("Готовлю глубокое исследование с увеличенным временем ожидания", statuses_deep)
+
+    def test_news_format_and_summary_question(self):
+        formatted = format_news_summary("Вышла новая версия драйверов Nvidia.")
+        self.assertIn("Рассказать подробнее?", formatted)
+        self.assertEqual(format_news_summary(formatted), formatted)
+        self.assertEqual(format_news_summary(""), "")
 
 
 if __name__ == "__main__":

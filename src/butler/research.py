@@ -253,6 +253,16 @@ def is_web_research_request(
     return asks_to_find and names_web_destination
 
 
+def format_news_summary(text: str) -> str:
+    """Format news text into 2-3 brief sentences followed by 'Рассказать подробнее?'."""
+    cleaned = text.strip()
+    if not cleaned:
+        return cleaned
+    if "рассказать подробнее" not in cleaned.casefold():
+        cleaned += "\n\nРассказать подробнее?"
+    return cleaned
+
+
 def select_research_mode(
     text: str,
     default: str = "normal",
@@ -325,13 +335,22 @@ def _relevance_markers(request: str) -> tuple[str, ...]:
         for word in words
         if len(word) >= 3 and word not in _GENERIC_RESEARCH_WORDS and not word.isdigit()
     }
-    if "vr" in words or "виртуальн" in normalized:
+    if (
+        "vr" in words
+        or "виртуальн" in normalized
+        or "квест" in normalized
+        or "quest" in normalized
+        or "метаклас" in normalized
+        or "metaclass" in normalized
+    ):
         markers.update(
             {
                 "virtual reality",
                 "spatial computing",
                 "metaverse",
                 "meta quest",
+                "quest",
+                "квест",
                 "uploadvr",
                 "roadtovr",
                 "vr",
@@ -406,6 +425,33 @@ def _select_sources(
                 candidate["relevance"] = str(score)
                 candidates.append(candidate)
 
+    if not candidates:
+        for payload in search_payloads:
+            results = payload.get("results", [])
+            if not isinstance(results, list):
+                continue
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                url = _valid_url(item.get("url"))
+                if not url or url in seen_urls:
+                    continue
+                lowered_url = url.casefold()
+                if any(marker in lowered_url for marker in _UNUSABLE_PAGE_MARKERS):
+                    continue
+                seen_urls.add(url)
+                candidates.append(
+                    {
+                        "url": url,
+                        "title": str(item.get("title", "")),
+                        "description": str(item.get("description", "")),
+                        "published": str(item.get("published", "")),
+                        "source": str(item.get("source", "")),
+                        "source_url": _valid_url(item.get("source_url")),
+                        "relevance": "0",
+                    }
+                )
+
     candidates.sort(key=lambda item: int(item.get("relevance", "0")), reverse=True)
 
     selected: list[dict[str, str]] = []
@@ -451,13 +497,14 @@ def _russian_count(value: int, one: str, few: str, many: str) -> str:
 def _deterministic_query(request: str) -> str:
     normalized = " ".join(request.split()).strip(" .!?;:")
     normalized = re.sub(
-        r"^(?:пожалуйста[,.]?\s*)?(?:быстро|кратко|экспресс)\s+",
+        r"^(?:пожалуйста[,.]?\s*)?(?:быстро|кратко|экспресс|найди(?:те)?|поищи(?:те)?|посмотри(?:те)?)\s+",
         "",
         normalized,
         flags=re.IGNORECASE,
     )
-    if "vr" in request.casefold() and "новост" in request.casefold():
-        return "virtual reality VR internet metaverse spatial computing latest news"
+    lowered_req = request.casefold()
+    if ("vr" in lowered_req or "квест" in lowered_req or "quest" in lowered_req) and "новост" in lowered_req:
+        return "Meta Quest 3 VR virtual reality latest news"
     technical_tokens = re.findall(
         r"[A-Za-z][A-Za-z0-9.+_-]*|\d+(?:\.\d+){1,}", normalized
     )
@@ -687,7 +734,8 @@ class ResearchCoordinator:
             # interpreted as a bank abbreviation). One deterministic retry is
             # faster and safer than asking the LLM to reason over irrelevant pages.
             fallback_query = request
-            if "vr" in request.casefold():
+            lowered_req = request.casefold()
+            if "vr" in lowered_req or "квест" in lowered_req or "quest" in lowered_req:
                 fallback_query = (
                     "virtual reality VR Meta Quest spatial computing metaverse latest news"
                 )
@@ -769,7 +817,16 @@ class ResearchCoordinator:
             },
             {"role": "user", "content": request},
         ]
-        if mode.name == "fast":
+        is_news = any(
+            marker in request.casefold()
+            for marker in ("новост", "что нового", "что произошло", "последние события", "главные события")
+        )
+        if is_news:
+            messages[0]["content"] += (
+                " Это запрос новостей: дай краткую сводку ровно из 2–3 коротких предложений с ключевыми фактами "
+                "и обязательно заверши ответ вопросом: «Рассказать подробнее?». Список источников приведи в самом конце."
+            )
+        elif mode.name == "fast":
             messages[0]["content"] += (
                 " Это быстрый режим: дай не более восьми коротких предложений плюс список ссылок."
             )
@@ -839,7 +896,8 @@ class ResearchCoordinator:
             heartbeat_done.set()
             heartbeat_thread.join(timeout=0.2)
         budget.checkpoint()
-        session.record_exchange(request, answer)
+        if hasattr(session, "record_exchange") and callable(getattr(session, "record_exchange", None)):
+            session.record_exchange(request, answer)
         diagnostic_event(
             self.settings,
             "research",

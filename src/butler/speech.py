@@ -120,6 +120,7 @@ class SpeechAnnouncer:
         ).strip().casefold()
         self._tts_model_signature: tuple[int, int] | None = None
         self.speaker = str(voice_config.get("speaker", "xenia"))
+        self.speech_rate = float(voice_config.get("speech_rate", 1.05))
         self.sample_rate = int(voice_config.get("sample_rate", 48000))
         self.threads = int(voice_config.get("threads", 4))
         self.device = str(voice_config.get("tts_device", "cpu")).casefold()
@@ -148,6 +149,10 @@ class SpeechAnnouncer:
         self._worker_ready = threading.Event()
         self._worker_start_error = ""
         atexit.register(self.close)
+
+    @property
+    def is_pcm_playback(self) -> bool:
+        return self.playback_backend == "pcm" or bool(self.output_device.strip())
 
     def configure_capture_endpoint(self, endpoint: object | None) -> None:
         """Attach far-reference routing before the persistent TTS worker starts."""
@@ -218,6 +223,8 @@ class SpeechAnnouncer:
                 self.tts_model_sha256,
                 "--speaker",
                 self.speaker,
+                "--speech-rate",
+                str(self.speech_rate),
                 "--sample-rate",
                 str(self.sample_rate),
                 "--threads",
@@ -759,7 +766,7 @@ class SpeechAnnouncer:
         )
         if self._send_silero(spoken_text):
             return
-        if self.playback_backend == "pcm":
+        if self.is_pcm_playback:
             diagnostic_event(
                 self.diagnostics_source,
                 "tts",
@@ -833,7 +840,7 @@ class SpeechAnnouncer:
         )
         if self._send_silero(spoken_text, wait=True):
             return
-        if self.playback_backend == "pcm":
+        if self.is_pcm_playback:
             diagnostic_event(
                 self.diagnostics_source,
                 "tts",
@@ -858,7 +865,7 @@ class SpeechAnnouncer:
         )
         for speaker, text in samples:
             if not self._send_silero(text, speaker, wait=True):
-                if self.playback_backend == "pcm":
+                if self.is_pcm_playback:
                     diagnostic_event(
                         self.diagnostics_source,
                         "tts",
@@ -868,6 +875,13 @@ class SpeechAnnouncer:
                     )
                     continue
                 self._speak_with_sapi(text, wait=True)
+
+    def switch_output_device(self, selector: str) -> None:
+        """Switch audio output device, restarting the worker on next speech."""
+        normalized = str(selector).strip()
+        with self._lock:
+            self.output_device = normalized
+        self.close()
 
     def close(self) -> None:
         self.stop()

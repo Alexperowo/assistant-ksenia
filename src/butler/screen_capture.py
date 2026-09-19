@@ -214,8 +214,23 @@ def _windows_monitor_inventory() -> tuple[MonitorSnapshot, ...]:
     return result
 
 
+def _ensure_desktop() -> None:
+    try:
+        user32 = ctypes.windll.user32
+        user32.SetProcessDPIAware()
+        desk = user32.OpenInputDesktop(0, False, 0x01FF)
+        if desk:
+            user32.SetThreadDesktop(desk)
+    except Exception:
+        pass
+
+
 def _grab_virtual_desktop() -> Image.Image:
-    return ImageGrab.grab(all_screens=True, include_layered_windows=True)
+    _ensure_desktop()
+    try:
+        return ImageGrab.grab(all_screens=True, include_layered_windows=True)
+    except OSError:
+        return ImageGrab.grab(all_screens=True)
 
 
 class ScreenCaptureService:

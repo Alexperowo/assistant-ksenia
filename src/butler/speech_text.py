@@ -268,6 +268,195 @@ def _replace_time(match: re.Match[str]) -> str:
     )
 
 
+_SPECIAL_TERMS = {
+    "llama": "Лама",
+    "deepseek": "Дипсик",
+    "mistral": "Мистраль",
+    "whisper": "Виспер",
+    "silero": "Силеро",
+    "vosk": "Воск",
+    "pytorch": "Пайторч",
+    "python": "Пайтон",
+    "windows": "Виндовс",
+    "word": "Ворд",
+    "excel": "Эксель",
+    "powerpoint": "Пауэрпоинт",
+    "powershell": "Пауэршелл",
+    "cmd": "ЦМД",
+    "explorer": "Проводник",
+    "chrome": "Хром",
+    "chromium": "Хромиум",
+    "edge": "Эдж",
+    "firefox": "Файрфокс",
+    "vscode": "Ви-Эс Код",
+    "code": "Код",
+    "github": "Гитхаб",
+    "git": "Гит",
+    "google": "Гугл",
+    "alibaba": "Алибаба",
+    "cloud": "Клауд",
+    "openai": "Опен-Эй-Ай",
+    "microsoft": "Майкрософт",
+    "apple": "Эппл",
+    "meta": "Мета",
+    "quest": "Квест",
+    "oculus": "Окулус",
+    "jbl": "Джи-Би-Эль",
+    "tour": "Тур",
+    "sense": "Сенс",
+    "one": "Ван",
+    "pro": "Про",
+    "plus": "Плюс",
+    "max": "Макс",
+    "ultra": "Ультра",
+    "lite": "Лайт",
+    "mini": "Мини",
+    "realtek": "Риалтек",
+    "nvidia": "Нвидиа",
+    "geforce": "Джифорс",
+    "rtx": "Эр-Тэ-Икс",
+    "gtx": "Джи-Тэ-Икс",
+    "cuda": "Куда",
+    "cpu": "ЦПУ",
+    "gpu": "ГПУ",
+    "vram": "видеопамять",
+    "ram": "ОЗУ",
+    "ssd": "ССД",
+    "hdd": "ХДД",
+    "usb": "Ю-Эс-Би",
+    "wi-fi": "вай-фай",
+    "wifi": "вай-фай",
+    "bluetooth": "блютуз",
+    "gguf": "Гэ-Гэ-У-Эф",
+    "llm": "ЛЛМ",
+    "api": "А-Пи-Ай",
+    "url": "Ю-Эр-Эль",
+    "http": "Эйч-Ти-Ти-Пи",
+    "https": "Эйч-Ти-Ти-Пи-Эс",
+    "ip": "Ай-Пи",
+    "pin": "пин",
+    "id": "Ай-Ди",
+    "os": "О-Эс",
+    "pc": "Пи-Си",
+    "gb": "гигабайт",
+    "mb": "мегабайт",
+    "kb": "килобайт",
+    "tb": "терабайт",
+    "ghz": "гигагерц",
+    "mhz": "мегагерц",
+    "hz": "герц",
+    "fps": "кадров в секунду",
+    "ms": "миллисекунд",
+    "sec": "секунд",
+    "min": "минут",
+    "docx": "документ ворд",
+    "doc": "документ ворд",
+    "txt": "текстовый файл",
+    "pdf": "пэдээф",
+    "json": "джейсон",
+    "html": "эйч-ти-эм-эль",
+    "xml": "икс-эм-эль",
+    "zip": "зип",
+    "exe": "экзе",
+}
+
+_DIGRAPHS = (
+    ("tion", "шн"),
+    ("sion", "жн"),
+    ("ight", "айт"),
+    ("sch", "ш"),
+    ("sh", "ш"),
+    ("ch", "ч"),
+    ("th", "т"),
+    ("ph", "ф"),
+    ("qu", "кв"),
+    ("ck", "к"),
+    ("wh", "в"),
+    ("kn", "н"),
+    ("wr", "р"),
+    ("ng", "нг"),
+    ("ee", "и"),
+    ("oo", "у"),
+    ("ea", "и"),
+    ("ai", "эй"),
+    ("ay", "эй"),
+    ("ei", "эй"),
+    ("ey", "эй"),
+    ("oi", "ой"),
+    ("oy", "ой"),
+    ("ou", "ау"),
+    ("ow", "ау"),
+    ("au", "о"),
+    ("aw", "о"),
+    ("ia", "иа"),
+    ("io", "ио"),
+    ("iu", "иу"),
+)
+
+_SINGLE_LETTERS = {
+    "b": "б",
+    "c": "к",
+    "d": "д",
+    "f": "ф",
+    "g": "г",
+    "h": "х",
+    "j": "дж",
+    "k": "к",
+    "l": "л",
+    "m": "м",
+    "n": "н",
+    "p": "п",
+    "q": "к",
+    "r": "р",
+    "s": "с",
+    "t": "т",
+    "v": "в",
+    "w": "в",
+    "x": "кс",
+    "z": "з",
+    "a": "а",
+    "e": "е",
+    "i": "и",
+    "o": "о",
+    "u": "у",
+    "y": "и",
+}
+
+
+def transliterate_latin_to_cyrillic(word: str) -> str:
+    """Phonetically transcribe a Latin word into Russian Cyrillic for Silero TTS."""
+    cf = word.casefold()
+    if cf in _SPECIAL_TERMS:
+        res = _SPECIAL_TERMS[cf]
+        if word.isupper() and len(word) > 1:
+            return res.upper() if "-" not in res else res
+        return res if (word.islower() or res[0].isupper()) else res.capitalize()
+    letters: list[str] = []
+    i = 0
+    w = cf
+    length = len(w)
+    while i < length:
+        matched = False
+        for pattern, repl in _DIGRAPHS:
+            if w.startswith(pattern, i):
+                letters.append(repl)
+                i += len(pattern)
+                matched = True
+                break
+        if matched:
+            continue
+        c = w[i]
+        if c in {"c", "g"} and i + 1 < length and w[i + 1] in {"e", "i", "y"}:
+            letters.append("с" if c == "c" else "дж")
+        elif c in _SINGLE_LETTERS:
+            letters.append(_SINGLE_LETTERS[c])
+        else:
+            letters.append(c)
+        i += 1
+    result = "".join(letters)
+    return result.capitalize() if word.istitle() else result
+
+
 def _replace_decimal(match: re.Match[str]) -> str:
     whole = int(match.group("whole"))
     fraction = match.group("fraction")
@@ -280,9 +469,70 @@ def _replace_decimal(match: re.Match[str]) -> str:
     return f"{integer_to_russian_words(whole)} {separator} {fraction_words}"
 
 
+_RUSSIAN_STRESS_MAP: dict[str, str] = {
+    "готов": "гот+ов",
+    "готова": "гот+ова",
+    "готово": "гот+ово",
+    "готовы": "гот+овы",
+    "подготовлен": "подгот+овлен",
+    "подготовлена": "подгот+овлена",
+    "подготовлено": "подгот+овлено",
+    "подготовлены": "подгот+овлены",
+    "подготовка": "подгот+овка",
+    "готовлю": "гот+овлю",
+    "готовит": "гот+овит",
+    "готовьте": "гот+овьте",
+    "включен": "включ+ен",
+    "включена": "включен+а",
+    "включено": "включен+о",
+    "включены": "включен+ы",
+    "отключен": "отключ+ен",
+    "отключена": "отключен+а",
+    "отключено": "отключен+о",
+    "отключены": "отключен+ы",
+    "звонит": "звон+ит",
+    "звонят": "звон+ят",
+    "понял": "п+онял",
+    "поняла": "понял+а",
+    "понятно": "пон+ятно",
+    "создан": "с+оздан",
+    "создана": "создан+а",
+    "создано": "с+оздано",
+    "начал": "н+ачал",
+    "начала": "начал+а",
+    "начало": "нач+ало",
+    "занят": "з+анят",
+    "занята": "занят+а",
+    "занято": "з+анято",
+}
+
+_STRESS_REGEX = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in _RUSSIAN_STRESS_MAP) + r")\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _apply_russian_stress(match: re.Match[str]) -> str:
+    word = match.group(0)
+    key = word.casefold()
+    replacement = _RUSSIAN_STRESS_MAP.get(key, word)
+    if word.isupper() and len(word) > 1:
+        return replacement.upper()
+    if word.istitle():
+        return replacement.capitalize()
+    return replacement
+
+
 def normalize_for_speech(text: str) -> str:
-    """Make digits audible while keeping the text shown to the user unchanged."""
+    """Make digits and Latin audible for Silero while keeping text shown unchanged."""
     value = str(text)
+    # Remove ellipses to prevent Silero saying 'три точки'
+    value = re.sub(r"\.{2,}|…", ", ", value)
+    # Remove markdown asterisks, hashes, backticks, brackets
+    value = re.sub(r"[*#`_~]", "", value)
+    # Separate attached letters and digits: Model3.5 -> Model 3.5
+    value = re.sub(r"([A-Za-zА-Яа-яЁё])(\d)", r"\1 \2", value)
+    value = re.sub(r"(\d)([A-Za-zА-Яа-яЁё])", r"\1 \2", value)
     value = re.sub(
         r"(?<!\d)(?P<day>0?[1-9]|[12]\d|3[01])[./-](?P<month>0?[1-9]|1[0-2])[./-](?P<year>\d{4})(?!\d)",
         _replace_numeric_date,
@@ -315,4 +565,9 @@ def normalize_for_speech(text: str) -> str:
         ),
         value,
     )
+    # Transliterate Latin words into Russian Cyrillic phonemes
+    value = re.sub(r"[A-Za-z]+", lambda match: transliterate_latin_to_cyrillic(match.group(0)), value)
+    # Apply phonetic stress marks for Russian homographs and words misstressed by Silero
+    value = _STRESS_REGEX.sub(_apply_russian_stress, value)
     return re.sub(r"[ \t]+", " ", value).strip()
+

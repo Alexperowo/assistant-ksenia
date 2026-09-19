@@ -47,6 +47,32 @@ def _command_version(command: str, *args: str) -> str | None:
         return executable
 
 
+def _command_multiline(command: str, *args: str) -> str | None:
+    executable = shutil.which(command)
+    if not executable:
+        return None
+    try:
+        result = subprocess.run(
+            [executable, *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        lines = [
+            line.strip()
+            for line in (result.stdout or result.stderr).strip().splitlines()
+            if line.strip()
+        ]
+        return "; ".join(lines) if lines else None
+    except (OSError, subprocess.TimeoutExpired):
+        return executable
+
+
 def _physical_memory_gb() -> float | None:
     if not hasattr(ctypes, "windll"):
         return None
@@ -325,7 +351,7 @@ def run_checks(settings: Settings, *, installation_mode: bool = False) -> list[C
         )
     )
 
-    nvidia = _command_version(
+    nvidia = _command_multiline(
         "nvidia-smi",
         "--query-gpu=name,memory.total,driver_version",
         "--format=csv,noheader",

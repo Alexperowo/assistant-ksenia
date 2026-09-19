@@ -22,8 +22,27 @@ from butler.tools import ToolExecutor, ToolResult, tool_schema_metrics, tool_sch
 
 
 SYSTEM_PROMPT = (
-    "Ты — модель-исполнитель локального ассистента. Отвечай по-русски, ясно и кратко. "
+    "Ты — голосовой ассистент и верная напарница Александра. Отвечай строго от женского лица "
+    "(я готова, я рада, я сделала, я проверила), ясно, естественно и кратко. "
     "Пользователь слабовидящий, поэтому текст должен хорошо звучать вслух. "
+    "Категорически запрещено выдумывать или предполагать, что находится на экране, какие "
+    "программы запущены или открыты документы. У тебя нет визуального зрения и видеокамеры. "
+    "Чтобы узнать, что сейчас на экране или какое окно открыто — обязательно используй "
+    "инструменты windows_active_window (активное окно), windows_list_windows (список окон) "
+    "или windows_inspect_controls (элементы интерфейса). Если эти инструменты не вызывались "
+    "в этом запросе или не вернули результат — честно ответь: «Я не вижу экран». "
+    "Для управления окнами (свернуть, развернуть, восстановить, закрыть) обязательно используй "
+    "windows_manage_window, указав действие action ('minimize', 'maximize', 'restore', 'close') "
+    "и заголовок окна title или дескриптор handle. После успешного действия сразу сформулируй ответ. "
+    "Для поиска и установки программ в Windows используй search_software (каталог winget), "
+    "install_software (установка по 4 уровням с подтверждением) и configure_environment "
+    "(проверка утилит и управление переменной PATH). "
+    "Никогда не придумывай Word, списки дел или фиктивные файлы. "
+    "Если спрашивают, кто ты, какая ты модель или как ты устроена: отвечай, что ты голосовой ассистент "
+    "Ксения, работаешь полностью локально на компьютере Александра без облака с помощью локальных нейросетей "
+    "через llama.cpp. Не называй себя моделью Alibaba Cloud, OpenAI или чужой разработкой. "
+    "Не выдумывай результаты команд терминала или тестов: для реальных действий в проекте используй "
+    "run_project_command и run_project_tests. "
     "Используй инструменты только когда они действительно нужны. Не утверждай, что действие "
     "выполнено, если инструмент вернул ошибку или запросил подтверждение. "
     "Для поиска в интернете сначала сделай один общий поиск, затем прочитай не более двух "
@@ -42,6 +61,12 @@ SYSTEM_PROMPT = (
     "Windows загрузи соответствующую локальную процедуру через read_procedure и следуй ей."
     " Если доступен search_project_knowledge, используй его для смыслового поиска по незнакомому "
     "проекту до чтения множества файлов; важные фрагменты затем проверяй в исходном файле."
+    " Когда пользователь предлагает создать или сгенерировать видео (например, «давай сгенерируем видео», «режим кино»): "
+    "предложи краткий кинематографический план из 2–4 сцен по 5 секунд (124 кадра при 24 fps). "
+    "Для каждой сцены сформулируй описание, сочный английский промпт (35mm film, volumetric lighting) "
+    "и реплику на русском языке (не более 8-10 слов, ракурс крупного плана лица для Lip-Sync). "
+    "Когда пользователь говорит «передавай в работу» или подтверждает рендер — "
+    "обязательно вызови инструмент start_video_generation, передав название проекта и список сцен."
 )
 
 
@@ -50,10 +75,10 @@ def agent_system_prompt(settings: Settings) -> str:
     assistant_name = str(assistant.get("name", "Ксения")).strip() or "Ксения"
     user_name = str(assistant.get("user_name", "пользователь")).strip() or "пользователь"
     return (
-        f"Ты работаешь как модель-исполнитель ассистента {assistant_name}. "
-        f"Пользователя зовут {user_name}. Не путай роли: ассистент — {assistant_name}, "
-        f"пользователь — {user_name}. Не представляйся и не начинай обычный ответ "
-        f"с имени {assistant_name}. "
+        f"Ты — {assistant_name}, верная напарница {user_name} с руками и глазами на компьютере. "
+        f"Говори о себе строго в женском грамматическом роде (рада, готова, сделала, посмотрела). "
+        f"Пользователя зовут {user_name}. Не путай роли: ты — {assistant_name}, "
+        f"пользователь — {user_name}. Не начинай обычный ответ с обращения по имени {assistant_name} к самой себе. "
         + SYSTEM_PROMPT
     )
 
@@ -214,6 +239,8 @@ def status_for_tool(name: str) -> str:
         return "Ищу"
     if name == "search_project_knowledge":
         return "Вспоминаю проект"
+    if name == "windows_manage_window":
+        return "Управляю окном"
     if name.startswith("windows_") or name in {
         "get_system_status",
         "list_workspace",
@@ -430,9 +457,12 @@ class AgentSession:
             "Прямо ответь на каждую часть вопроса и сразу начинай с ответа по существу. "
             "Не представляйся и не повторяй своё имя в начале ответа. Называй имя только "
             "тогда, когда пользователь прямо спрашивает, как тебя зовут. "
-            "Не выдумывай выполненные действия или возможности. В этом коротком "
-            "разговорном ходе инструменты, изображение экрана и состояние Windows "
-            "не передаются и недоступны."
+            "Если спрашивают, какая ты модель или кто ты: отвечай, что ты голосовой ассистент "
+            f"{assistant_name}, работаешь локально на компьютере без отправки данных в облако с помощью "
+            "локальных нейросетей через llama.cpp. Не называй себя моделью Alibaba Cloud, OpenAI или чужой разработкой. "
+            "Не выдумывай выполненные действия, открытые программы, файлы или возможности. В этом коротком "
+            "разговорном ходе инструменты, изображение экрана и состояние Windows не передаются и недоступны. "
+            "Если просят посмотреть на экран или выполнить действие на компьютере, честно скажи, что не видишь экран."
         )
         if compressed_summary:
             system_content += f"\n\n{compressed_summary}"
@@ -649,6 +679,7 @@ class AgentSession:
         approved_scopes: set[str] = set()
         final_answer_retries = 0
         seen_calls: set[str] = set()
+        consecutive_duplicates = 0
         max_tool_calls = max(
             1,
             int(self.settings.raw.get("agent", {}).get("max_tool_calls_total", 16)),
@@ -671,12 +702,14 @@ class AgentSession:
                 control.checkpoint()
             if not conversation_only:
                 self._compress_context(emit, control)
-            emit("Думаю")
+            total_context_chars = sum(len(str(m.get("content", ""))) for m in self.messages)
+            if total_context_chars > 8000:
+                emit("Читаю контекст")
+            else:
+                emit("Формулирую ответ")
             for step in range(max_steps + 2):
                 if control is not None:
                     control.checkpoint()
-                if step:
-                    emit("Анализирую результат")
                 final_turn = (
                     conversation_only
                     or step >= max_steps
@@ -834,7 +867,6 @@ class AgentSession:
                     )
                     return AgentReply(answer, tuple(events))
 
-                emit("Планирую")
                 self.messages.append(message)
                 for call in calls:
                     function = call.get("function", {}) if isinstance(call, dict) else {}
@@ -887,12 +919,14 @@ class AgentSession:
                                 sort_keys=True,
                             )
                             if signature in seen_calls:
+                                consecutive_duplicates += 1
                                 result = ToolResult(
                                     False,
                                     "duplicate_call",
-                                    "Этот вызов уже выполнен. Используй предыдущий результат.",
+                                    "Этот вызов уже выполнен с теми же параметрами. Не повторяй его; используй полученный результат или ответь пользователю.",
                                 )
                             else:
+                                consecutive_duplicates = 0
                                 seen_calls.add(signature)
                                 scope = approval_scope(name)
                                 scope_confirmed = confirmed or (
@@ -1128,6 +1162,17 @@ class AgentSession:
                         }
                     )
                     self._save_memory()
+                if consecutive_duplicates >= 2:
+                    confirmation_limit_reached = True
+                    self.messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "Повторные вызовы одного и того же инструмента остановлены. "
+                                "Больше не вызывай инструменты. Сформулируй понятный ответ пользователю на русском языке."
+                            ),
+                        }
+                    )
             raise ChatError("Агент не смог сформировать итоговый ответ.")
         except Exception as exc:
             diagnostic_exception(

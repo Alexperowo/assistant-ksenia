@@ -212,11 +212,11 @@ class HybridTurnDetectorTests(unittest.TestCase):
         detector.observe("Открой браузер.", speech_active=True, at=10.0)
 
         self.assertEqual(
-            detector.observe("Открой браузер.", speech_active=False, at=10.44),
+            detector.observe("Открой браузер.", speech_active=False, at=10.54),
             TurnDecision.KEEP_LISTENING,
         )
         self.assertEqual(
-            detector.observe("Открой браузер.", speech_active=False, at=10.46),
+            detector.observe("Открой браузер.", speech_active=False, at=10.56),
             TurnDecision.END_TURN,
         )
 
@@ -228,10 +228,10 @@ class HybridTurnDetectorTests(unittest.TestCase):
             TurnDecision.KEEP_LISTENING,
         )
         self.assertEqual(
-            detector.observe("Сравни Qwen с", speech_active=False, at=22.21),
+            detector.observe("Сравни Qwen с", speech_active=False, at=22.61),
             TurnDecision.END_TURN,
         )
-        self.assertEqual(detector.required_silence("Эээ… секунду…"), 2.2)
+        self.assertEqual(detector.required_silence("Эээ… секунду…"), 2.6)
 
     def test_resumed_speech_resets_silence_clock(self):
         detector = HybridTurnDetector()
@@ -240,11 +240,11 @@ class HybridTurnDetectorTests(unittest.TestCase):
         detector.observe("Найди модель Qwen", speech_active=True, at=1.8)
 
         self.assertEqual(
-            detector.observe("Найди модель Qwen", speech_active=False, at=2.4),
+            detector.observe("Найди модель Qwen", speech_active=False, at=2.8),
             TurnDecision.KEEP_LISTENING,
         )
         self.assertEqual(
-            detector.observe("Найди модель Qwen", speech_active=False, at=2.66),
+            detector.observe("Найди модель Qwen", speech_active=False, at=2.96),
             TurnDecision.END_TURN,
         )
 

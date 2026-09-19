@@ -38,6 +38,10 @@ class IsolatedResearchSession:
         self.settings = settings
         self.tools = ToolExecutor(settings)
 
+    def record_exchange(self, user_text: str, assistant_text: str) -> None:
+        """Isolated session does not manage conversation memory directly."""
+        pass
+
 
 def is_research_status_command(text: str) -> bool:
     normalized = " ".join(text.casefold().replace("ё", "е").split())

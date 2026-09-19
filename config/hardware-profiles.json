@@ -61,6 +61,18 @@
       "cache_type_v": "q5_0",
       "fit_target_mb": 3072,
       "guidance_ru": "Можно тестировать более точные кванты и тяжёлые роли, сохраняя одну активную модель и обязательный A/B benchmark."
+    },
+    {
+      "id": "dual_gpu_38gb",
+      "label_ru": "Две видеокарты: 16 ГБ + 22 ГБ (38 ГБ суммарно)",
+      "minimum_vram_mb": 35000,
+      "minimum_ram_gb": 32,
+      "recommended_context": 65536,
+      "gpu_layers": "auto",
+      "cache_type_k": "q8_0",
+      "cache_type_v": "q5_0",
+      "fit_target_mb": 2048,
+      "guidance_ru": "Раздельный режим: GPU 0 (16 ГБ) держит резидентов UI-Mate 9B и Agents-A1 4B с Whisper на CUDA; GPU 1 (22 ГБ) выделен под тяжёлого кодера/планировщика без выгрузки резидентов."
     }
   ]
 }

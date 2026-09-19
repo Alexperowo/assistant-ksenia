@@ -102,9 +102,9 @@ class HybridTurnDetector:
     def __init__(
         self,
         *,
-        complete_silence_seconds: float = 0.45,
-        ordinary_silence_seconds: float = 0.85,
-        incomplete_silence_seconds: float = 2.2,
+        complete_silence_seconds: float = 0.55,
+        ordinary_silence_seconds: float = 1.15,
+        incomplete_silence_seconds: float = 2.6,
     ) -> None:
         values = (
             float(complete_silence_seconds),

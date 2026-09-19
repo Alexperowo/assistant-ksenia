@@ -9,6 +9,7 @@ from butler.config import (
     load_settings,
     reasoning_arguments,
     response_budget_label,
+    set_user_audio_output,
     set_user_headset_control,
     set_user_microphone,
     set_user_model,
@@ -513,6 +514,27 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(selected["voice"]["wake_device"], "Tour One M3")
         self.assertEqual(cleared["voice"], {"speaker": "xenia"})
 
+    def test_set_user_audio_output_updates_and_clears_output_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "config").mkdir()
+            (root / "config" / "user.json").write_text(
+                json.dumps({"voice": {"speaker": "xenia"}}), encoding="utf-8"
+            )
+
+            set_user_audio_output(root, "JBL Tour")
+            selected = json.loads(
+                (root / "config" / "user.json").read_text(encoding="utf-8")
+            )
+            set_user_audio_output(root, "")
+            cleared = json.loads(
+                (root / "config" / "user.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(selected["voice"]["speaker"], "xenia")
+        self.assertEqual(selected["voice"]["output_device"], "JBL Tour")
+        self.assertEqual(cleared["voice"], {"speaker": "xenia"})
+
     def test_default_roles_and_execution_policy_are_safe(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -527,11 +549,11 @@ class ConfigTests(unittest.TestCase):
             planner = settings.capability_role("planner")
             heavy_brain = settings.capability_role("heavy_brain")
 
-            self.assertEqual(developer.primary_model, "candidate")
-            self.assertEqual(developer.candidate_model, "reasoning")
+            self.assertEqual(developer.primary_model, "reasoning")
+            self.assertIsNone(developer.candidate_model)
             self.assertTrue(developer.enabled)
             self.assertEqual(planner.primary_model, "reasoning")
-            self.assertEqual(heavy_brain.primary_model, "generalist")
+            self.assertEqual(heavy_brain.primary_model, "reasoning")
             self.assertTrue(heavy_brain.enabled)
             self.assertEqual(settings.default_role, "ui_butler")
             self.assertIn("ui_butler", settings.resident_model_roles())
@@ -768,7 +790,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_conversational_silence_timeout_setting_and_validation(self):
         settings = load_settings()
-        self.assertEqual(settings.conversational_silence_timeout_seconds, 8.0)
+        self.assertEqual(settings.conversational_silence_timeout_seconds, 20.0)
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

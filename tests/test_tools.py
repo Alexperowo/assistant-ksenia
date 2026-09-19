@@ -550,13 +550,28 @@ class ToolExecutorTests(unittest.TestCase):
         self.assertEqual(result.status, "window_context_unavailable")
         execute.assert_not_called()
 
-    def test_pointer_movement_requires_confirmation_before_side_effect(self):
+    def test_windows_manage_window_available_by_default(self):
         original = load_settings()
-        raw = copy.deepcopy(original.raw)
-        raw["windows"]["active_control_enabled"] = True
-        tools = ToolExecutor(replace(original, raw=raw))
-        result = tools.execute("windows_move_pointer", {"x": 10, "y": 10})
-        self.assertEqual(result.status, "confirmation_required")
+        names = {item["function"]["name"] for item in tool_schemas(original)}
+        self.assertIn("windows_manage_window", names)
+
+    def test_windows_manage_window_execution_and_confirmation(self):
+        original = load_settings()
+        executor = ToolExecutor(original)
+        with patch("butler.tools.manage_window", return_value={"action": "minimize", "title": "Terminal", "handle": 1234}) as mock_mw:
+            unconfirmed = executor.execute("windows_manage_window", {"action": "minimize", "title": "терминал"}, confirmed=False)
+            self.assertEqual(unconfirmed.status, "confirmation_required")
+            mock_mw.assert_not_called()
+
+            confirmed = executor.execute("windows_manage_window", {"action": "minimize", "title": "терминал"}, confirmed=True)
+            self.assertTrue(confirmed.ok)
+            self.assertIn("свёрнуто", confirmed.message)
+            mock_mw.assert_called_once_with(handle=0, action="minimize", title="терминал")
+
+        with patch("butler.tools.manage_window", return_value={"action": "close", "title": "Terminal", "handle": 1234}) as mock_mw:
+            unconfirmed_close = executor.execute("windows_manage_window", {"action": "close", "title": "терминал"}, confirmed=False)
+            self.assertEqual(unconfirmed_close.status, "confirmation_required")
+            mock_mw.assert_not_called()
 
 
 if __name__ == "__main__":

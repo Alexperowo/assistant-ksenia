@@ -95,6 +95,51 @@ class AudioOutputTests(unittest.TestCase):
         self.assertTrue(np.array_equal(stereo[:, 0], mono))
         self.assertTrue(np.array_equal(stereo[:, 1], mono))
 
+    def test_pcm_playback_falls_back_to_callback_stream(self):
+        import tempfile
+        import wave
+        from unittest.mock import MagicMock, patch
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            wav_path = Path(f.name)
+        try:
+            with wave.open(str(wav_path), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(48000)
+                w.writeframes(b"\x00\x00" * 480)  # 10 ms of silence
+
+            import sounddevice as real_sd
+            fake_sd = MagicMock()
+            fake_sd.PortAudioError = real_sd.PortAudioError
+            fake_sd.check_output_settings.return_value = None
+            fake_sd.RawOutputStream.side_effect = real_sd.PortAudioError("Blocking API not supported yet")
+
+            cb_stream_instance = MagicMock()
+            def start_cb():
+                # Trigger callback: once to consume audio frames, once to hit EOF and set finished_event
+                cb = fake_sd.OutputStream.call_args.kwargs["callback"]
+                outdata = np.zeros((480, 2), dtype=np.int16)
+                cb(outdata, 480, None, None)
+                cb(outdata, 480, None, None)
+            cb_stream_instance.start.side_effect = start_cb
+            fake_sd.OutputStream.return_value = cb_stream_instance
+
+            controller = PcmPlaybackController("Speakers")
+            with (
+                patch("sounddevice.check_output_settings", fake_sd.check_output_settings),
+                patch("sounddevice.RawOutputStream", fake_sd.RawOutputStream),
+                patch("sounddevice.OutputStream", fake_sd.OutputStream),
+                patch("audio_output.ranked_output_devices", return_value=[(14, {"name": "Speakers", "max_output_channels": 2}, "Windows WDM-KS")]),
+            ):
+                result = controller.play(wav_path, controller.generation())
+
+            self.assertTrue(result)
+            fake_sd.RawOutputStream.assert_called_once()
+            fake_sd.OutputStream.assert_called_once()
+        finally:
+            wav_path.unlink(missing_ok=True)
+
 
 if __name__ == "__main__":
     unittest.main()

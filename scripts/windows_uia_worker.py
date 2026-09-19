@@ -12,7 +12,18 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 
+def _attach_input_desktop() -> None:
+    try:
+        user32 = ctypes.windll.user32
+        hdesk = user32.OpenInputDesktop(0, False, 0x01FF)
+        if hdesk:
+            user32.SetThreadDesktop(hdesk)
+    except Exception:
+        pass
+
+
 def _window(handle: int):
+    _attach_input_desktop()
     from pywinauto import Desktop
 
     if handle <= 0:

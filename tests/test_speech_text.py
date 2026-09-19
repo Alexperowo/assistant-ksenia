@@ -22,5 +22,40 @@ class SpeechTextTests(unittest.TestCase):
         self.assertIn("четыре точка ноль", spoken)
 
 
+    def test_transliteration_of_models_and_hardware_terms(self):
+        spoken = normalize_for_speech("Я — Qwen3.5, модель от Alibaba Cloud.")
+        self.assertNotIn("Qwen", spoken)
+        self.assertNotIn("Alibaba", spoken)
+        self.assertIn("Квен", spoken)
+        self.assertIn("три точка пять", spoken)
+        self.assertIn("Алибаба", spoken)
+
+        devices = normalize_for_speech("Шлем Quest 3 на Windows 11 через JBL Tour One M3.")
+        self.assertNotIn("Quest", devices)
+        self.assertNotIn("Windows", devices)
+        self.assertNotIn("JBL", devices)
+        self.assertIn("Квест три", devices)
+        self.assertIn("Виндовс одиннадцать", devices)
+        self.assertIn("Джи-Би-Эль", devices)
+        self.assertIn("Ван", devices)
+
+    def test_ellipsis_and_dots_do_not_produce_unwanted_stutter(self):
+        spoken = normalize_for_speech("Ожидание... Завершено...")
+        self.assertNotIn("точки", spoken)
+        self.assertNotIn("точка", spoken)
+        self.assertIn("Ожидание", spoken)
+        self.assertIn("Завершено", spoken)
+
+    def test_russian_stress_accents(self):
+        spoken = normalize_for_speech("Голос готов. Всё готово. Я готова. Сервер готов к работе.")
+        self.assertIn("гот+ов", spoken)
+        self.assertIn("гот+ово", spoken)
+        self.assertIn("гот+ова", spoken)
+
+    def test_arbitrary_latin_is_converted_to_cyrillic(self):
+        spoken = normalize_for_speech("Фреймворк OpenHands и бенчмарк.")
+        self.assertNotRegex(spoken, r"[A-Za-z]")
+
+
 if __name__ == "__main__":
     unittest.main()

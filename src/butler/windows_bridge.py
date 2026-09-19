@@ -9,7 +9,15 @@ class WindowsBridgeError(RuntimeError):
     pass
 
 
-def _window_info(user32, hwnd: int) -> dict[str, Any]:
+def _hwnd_int(hwnd: Any) -> int:
+    if isinstance(hwnd, int):
+        return hwnd
+    if hasattr(hwnd, "value") and hwnd.value is not None:
+        return int(hwnd.value)
+    return int(hwnd)
+
+
+def _window_info(user32, hwnd: Any) -> dict[str, Any]:
     title_length = user32.GetWindowTextLengthW(hwnd)
     title_buffer = ctypes.create_unicode_buffer(title_length + 1)
     user32.GetWindowTextW(hwnd, title_buffer, title_length + 1)
@@ -18,21 +26,31 @@ def _window_info(user32, hwnd: int) -> dict[str, Any]:
     process_id = wintypes.DWORD()
     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
     return {
-        "handle": int(hwnd),
+        "handle": _hwnd_int(hwnd),
         "title": title_buffer.value,
         "class_name": class_buffer.value,
         "process_id": int(process_id.value),
     }
 
 
+def _attach_input_desktop(user32) -> int:
+    try:
+        hdesk = user32.OpenInputDesktop(0, False, 0x01FF)
+        if hdesk:
+            user32.SetThreadDesktop(hdesk)
+            return int(hdesk)
+    except Exception:
+        pass
+    return 0
+
+
 def list_windows() -> list[dict[str, Any]]:
     if not hasattr(ctypes, "windll"):
         raise WindowsBridgeError("Windows API недоступен.")
     user32 = ctypes.windll.user32
+    hdesk = _attach_input_desktop(user32)
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
     user32.IsWindowVisible.restype = wintypes.BOOL
-    user32.EnumWindows.argtypes = [ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM), wintypes.LPARAM]
-    user32.EnumWindows.restype = wintypes.BOOL
     result: list[dict[str, Any]] = []
 
     @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -43,7 +61,10 @@ def list_windows() -> list[dict[str, Any]]:
                 result.append(info)
         return True
 
-    user32.EnumWindows(callback, 0)
+    if hdesk:
+        user32.EnumDesktopWindows(wintypes.HANDLE(hdesk), callback, 0)
+    else:
+        user32.EnumWindows(callback, 0)
     return result[:100]
 
 
@@ -51,6 +72,7 @@ def active_window() -> dict[str, Any]:
     if not hasattr(ctypes, "windll"):
         raise WindowsBridgeError("Windows API недоступен.")
     user32 = ctypes.windll.user32
+    _attach_input_desktop(user32)
     hwnd = user32.GetForegroundWindow()
     if not hwnd:
         raise WindowsBridgeError("Активное окно не найдено.")
@@ -69,6 +91,99 @@ def activate_window(handle: int) -> dict[str, Any]:
     if not user32.SetForegroundWindow(hwnd):
         raise WindowsBridgeError("Windows не разрешила переключить активное окно.")
     return _window_info(user32, hwnd)
+
+
+WINDOW_TITLE_ALIASES: dict[str, list[str]] = {
+    "терминал": ["терминал", "terminal", "powershell", "cmd", "командная строка", "console"],
+    "браузер": ["браузер", "chrome", "edge", "firefox", "opera", "yandex"],
+    "блокнот": ["блокнот", "notepad"],
+    "проводник": ["проводник", "explorer"],
+    "ide": ["ide", "antigravity", "code", "visual studio"],
+}
+
+
+def find_window_by_title(query: str) -> dict[str, Any] | None:
+    q = query.strip().casefold()
+    if not q:
+        return None
+    windows = list_windows()
+    for w in windows:
+        if q in w["title"].casefold():
+            return w
+    for alias_key, keywords in WINDOW_TITLE_ALIASES.items():
+        if q in alias_key or alias_key in q or any(kw in q for kw in keywords):
+            for w in windows:
+                wt = w["title"].casefold()
+                if any(kw in wt for kw in keywords):
+                    return w
+    return None
+
+
+SW_MINIMIZE = 6
+SW_MAXIMIZE = 3
+SW_RESTORE = 9
+WM_CLOSE = 0x0010
+
+
+def manage_window(handle: int = 0, action: str = "minimize", title: str = "") -> dict[str, Any]:
+    if not hasattr(ctypes, "windll"):
+        raise WindowsBridgeError("Windows API недоступен.")
+    action_clean = action.strip().lower()
+    valid_actions = {
+        "minimize": "minimize",
+        "свернуть": "minimize",
+        "сверни": "minimize",
+        "maximize": "maximize",
+        "развернуть": "maximize",
+        "разверни": "maximize",
+        "restore": "restore",
+        "восстановить": "restore",
+        "восстанови": "restore",
+        "close": "close",
+        "закрыть": "close",
+        "закрой": "close",
+    }
+    if action_clean not in valid_actions:
+        raise WindowsBridgeError(
+            f"Неподдерживаемое действие над окном: '{action}'. Доступны: minimize, maximize, restore, close."
+        )
+    resolved_action = valid_actions[action_clean]
+    user32 = ctypes.windll.user32
+    target_hwnd = None
+
+    if title and title.strip():
+        found = find_window_by_title(title)
+        if found:
+            target_hwnd = wintypes.HWND(int(found["handle"]))
+        else:
+            raise WindowsBridgeError(f"Окно с заголовком '{title}' не найдено среди видимых окон.")
+    elif handle:
+        target_hwnd = wintypes.HWND(int(handle))
+    else:
+        target_hwnd = user32.GetForegroundWindow()
+        if not target_hwnd:
+            raise WindowsBridgeError("Активное окно не найдено.")
+
+    if not user32.IsWindow(target_hwnd):
+        raise WindowsBridgeError("Окно не найдено или уже закрыто.")
+
+    info = _window_info(user32, target_hwnd)
+
+    if resolved_action == "minimize":
+        user32.ShowWindow(target_hwnd, SW_MINIMIZE)
+    elif resolved_action == "maximize":
+        user32.ShowWindow(target_hwnd, SW_MAXIMIZE)
+    elif resolved_action == "restore":
+        user32.ShowWindow(target_hwnd, SW_RESTORE)
+    elif resolved_action == "close":
+        user32.PostMessageW(target_hwnd, WM_CLOSE, 0, 0)
+
+    return {
+        "handle": _hwnd_int(target_hwnd),
+        "action": resolved_action,
+        "title": info["title"],
+    }
+
 
 
 ULONG_PTR = wintypes.WPARAM

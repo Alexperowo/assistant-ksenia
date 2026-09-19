@@ -3,7 +3,7 @@ import hashlib
 from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from butler.config import load_settings, reasoning_arguments
 from butler.model_manager import (
@@ -17,8 +17,13 @@ from butler.model_manager import (
 
 
 class ModelManagerTests(unittest.TestCase):
-    def test_residency_coordinator_stops_primary_before_starting_fast_pool(self):
+    def _coordinator(self, *, isolate_resident_vram: bool = False) -> ModelResidencyCoordinator:
         coordinator = ModelResidencyCoordinator(load_settings())
+        coordinator.isolate_resident_vram = isolate_resident_vram
+        return coordinator
+
+    def test_residency_coordinator_stops_primary_before_starting_fast_pool(self):
+        coordinator = self._coordinator(isolate_resident_vram=False)
         primary_state = RuntimeState(
             pid=20,
             role="generalist",
@@ -50,8 +55,7 @@ class ModelManagerTests(unittest.TestCase):
         self.assertEqual(call_order, ["primary_stop", "residents_start"])
 
     def test_residency_coordinator_restores_primary_if_fast_pool_fails(self):
-        settings = load_settings()
-        coordinator = ModelResidencyCoordinator(settings)
+        coordinator = self._coordinator(isolate_resident_vram=False)
         primary_state = RuntimeState(
             pid=20,
             role="generalist",
@@ -76,8 +80,7 @@ class ModelManagerTests(unittest.TestCase):
         restart.assert_called_once_with("generalist")
 
     def test_residency_coordinator_rolls_back_partial_suspend(self):
-        settings = load_settings()
-        coordinator = ModelResidencyCoordinator(settings)
+        coordinator = self._coordinator(isolate_resident_vram=False)
         ui_manager = Mock()
         ui_manager.running_state.return_value = object()
         ui_manager.stop.return_value = True
@@ -106,7 +109,7 @@ class ModelManagerTests(unittest.TestCase):
         research_manager.start.assert_called_once_with("research_fast")
 
     def test_primary_window_restores_exact_previous_resident_set(self):
-        coordinator = ModelResidencyCoordinator(load_settings())
+        coordinator = self._coordinator(isolate_resident_vram=False)
         lease = ResidencyLease(("research_fast",))
         with (
             patch.object(
@@ -121,7 +124,7 @@ class ModelManagerTests(unittest.TestCase):
         restore.assert_called_once_with(lease)
 
     def test_restore_after_primary_stops_primary_before_exact_resident_set(self):
-        coordinator = ModelResidencyCoordinator(load_settings())
+        coordinator = self._coordinator(isolate_resident_vram=False)
         lease = ResidencyLease(("research_fast",))
         primary_state = RuntimeState(
             pid=21,
@@ -158,7 +161,7 @@ class ModelManagerTests(unittest.TestCase):
         research_manager.start.assert_called_once_with("research_fast")
 
     def test_activate_residents_fails_closed_for_unknown_primary_port_owner(self):
-        coordinator = ModelResidencyCoordinator(load_settings())
+        coordinator = self._coordinator(isolate_resident_vram=False)
         with (
             patch.object(coordinator.primary, "running_state", return_value=None),
             patch.object(coordinator.primary, "_port_open", return_value=True),
@@ -276,7 +279,7 @@ class ModelManagerTests(unittest.TestCase):
         )
         self.assertIn("--model-draft", generalist_command)
         self.assertNotIn("--ctx-size-draft", generalist_command)
-        self.assertEqual(reasoning.context_size, 98_304)
+        self.assertEqual(reasoning.context_size, 86_016)
         self.assertEqual(
             reasoning_command[reasoning_command.index("--spec-type") + 1],
             "draft-mtp",
@@ -482,6 +485,161 @@ class ModelManagerTests(unittest.TestCase):
                 ):
                     manager.start("generalist")
             popen.assert_not_called()
+
+    def test_build_command_applies_service_device(self):
+        settings = load_settings()
+        manager = ModelManager(settings, "primary")
+        profile = settings.model("candidate")
+        # Default without device
+        cmd_default = manager.build_command(profile)
+        # With device on service
+        manager.service = replace(manager.service, device="CUDA1")
+        cmd_with_dev = manager.build_command(profile)
+        self.assertIn("--device", cmd_with_dev)
+        idx = cmd_with_dev.index("--device")
+        self.assertEqual(cmd_with_dev[idx + 1], "CUDA1")
+
+        # If profile extra_args already has --device, it does not duplicate
+        profile_with_dev = replace(profile, extra_args=profile.extra_args + ("--device", "CUDA0"))
+        cmd_no_dup = manager.build_command(profile_with_dev)
+        self.assertEqual(cmd_no_dup.count("--device"), 1)
+
+    def test_residency_coordinator_isolated_vram_does_not_suspend_residents(self):
+        coordinator = self._coordinator(isolate_resident_vram=True)
+        self.assertTrue(coordinator.isolate_resident_vram)
+
+        with (
+            patch.object(coordinator.residents, "manager") as manager_mock,
+            patch.object(coordinator.primary, "running_state", return_value=RuntimeState(1, "reasoning", "s.exe", "m.gguf", "")),
+            patch.object(coordinator.primary, "stop") as primary_stop_mock,
+        ):
+            lease = coordinator.suspend_residents_for_primary()
+            self.assertEqual(lease.active_resident_roles, ())
+            manager_mock.assert_not_called()
+
+            # restore does not touch residents and keeps primary resident
+            restored = coordinator.restore_after_primary(lease)
+            self.assertEqual(restored, {})
+            primary_stop_mock.assert_not_called()
+
+        # activate does not stop primary when isolated
+        with (
+            patch.object(coordinator.primary, "running_state", return_value=RuntimeState(1, "reasoning", "s.exe", "m.gguf", "")),
+            patch.object(coordinator.primary, "stop") as stop_mock,
+            patch.object(coordinator.residents, "start_all", return_value={"ui_butler": object()}),
+        ):
+            coordinator.activate_residents()
+            stop_mock.assert_not_called()
+
+    def test_residency_coordinator_isolated_vram_warms_up_primary(self):
+        coordinator = self._coordinator(isolate_resident_vram=True)
+        with (
+            patch.object(coordinator.primary, "running_state", return_value=None),
+            patch.object(coordinator.primary, "start", return_value=RuntimeState(2, "reasoning", "s.exe", "m.gguf", "")) as start_mock,
+            patch.object(coordinator.residents, "start_all", return_value={"ui_butler": object()}),
+        ):
+            states = coordinator.activate_residents()
+            self.assertIn("reasoning", states)
+            start_mock.assert_called_once_with("reasoning")
+
+
+    def test_compute_ready_returns_true_on_slot_processing(self):
+        settings = load_settings()
+        manager = ModelManager(settings, "ui_fast")
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = b'[{"is_processing": true}]'
+        mock_resp.__enter__.return_value = mock_resp
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            self.assertTrue(manager.compute_ready())
+
+    def test_compute_ready_returns_true_on_completion_200(self):
+        settings = load_settings()
+        manager = ModelManager(settings, "ui_fast")
+        slots_resp = MagicMock()
+        slots_resp.status = 200
+        slots_resp.read.return_value = b'[{"is_processing": false}]'
+        slots_resp.__enter__.return_value = slots_resp
+
+        comp_resp = MagicMock()
+        comp_resp.status = 200
+        comp_resp.read.return_value = b'{"content": "."}'
+        comp_resp.__enter__.return_value = comp_resp
+
+        def fake_urlopen(req, timeout=None):
+            if "slots" in req.full_url:
+                return slots_resp
+            return comp_resp
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            self.assertTrue(manager.compute_ready())
+
+    def test_compute_ready_returns_false_on_timeout(self):
+        settings = load_settings()
+        manager = ModelManager(settings, "ui_fast")
+        with patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")):
+            self.assertFalse(manager.compute_ready())
+
+    def test_is_current_returns_false_when_compute_fails(self):
+        settings = load_settings()
+        manager = ModelManager(settings, "ui_fast")
+        profile = settings.model("ui_butler")
+        state = RuntimeState(
+            pid=1234,
+            role="ui_butler",
+            executable="llama-server.exe",
+            model="ui.gguf",
+            started_at="2026-09-19T00:00:00Z",
+            launch_signature=manager.launch_signature(profile),
+        )
+        with (
+            patch.object(manager, "running_state", return_value=state),
+            patch.object(manager, "api_ready", return_value=True),
+            patch.object(manager, "compute_ready", return_value=False),
+        ):
+            self.assertFalse(manager.is_current("ui_butler"))
+
+    def test_start_evicts_zombie_process_when_compute_fails(self):
+        with TemporaryDirectory() as directory:
+            settings = replace(load_settings(), runtime_dir=Path(directory))
+            manager = ModelManager(settings, "ui_fast")
+            profile = replace(
+                settings.model("ui_butler"),
+                expected_size_bytes=None,
+                sha256=None,
+                draft_model_path=None,
+                projector_path=None,
+            )
+            zombie_state = RuntimeState(
+                pid=9999,
+                role="ui_butler",
+                executable="llama-server.exe",
+                model="ui.gguf",
+                started_at="2026-09-17T00:00:00Z",
+                launch_signature=manager.launch_signature(profile),
+            )
+            with (
+                patch.object(type(settings), "model", return_value=profile),
+                patch.object(manager, "running_state", return_value=zombie_state),
+                patch.object(manager, "api_ready", return_value=True),
+                patch.object(manager, "compute_ready", return_value=False),
+                patch.object(manager, "stop", return_value=True) as stop_mock,
+                patch.object(manager, "_wait_port_closed", return_value=True),
+                patch.object(manager, "_port_open", return_value=False),
+                patch.object(manager, "_server_for", return_value=Path("fake/llama-server.exe")),
+                patch.object(manager, "_verify_artifact_integrity"),
+                patch.object(Path, "is_file", return_value=True),
+                patch("butler.model_manager.subprocess.Popen") as popen_mock,
+            ):
+                proc_instance = MagicMock()
+                proc_instance.pid = 1111
+                proc_instance.poll.return_value = None
+                popen_mock.return_value = proc_instance
+                with patch.object(manager, "api_ready", return_value=True):
+                    with patch.object(manager, "compute_ready", return_value=True):
+                        new_state = manager.start("ui_butler")
+                        stop_mock.assert_called_once()
+                        self.assertEqual(new_state.pid, 1111)
 
 
 if __name__ == "__main__":

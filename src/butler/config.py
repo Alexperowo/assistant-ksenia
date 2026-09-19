@@ -149,6 +149,7 @@ class ModelService:
     host: str
     port: int
     state_file: Path
+    device: str = ""
 
 
 @dataclass(frozen=True)
@@ -244,7 +245,7 @@ class Settings:
     @property
     def conversational_silence_timeout_seconds(self) -> float:
         return float(
-            self.raw.get("voice", {}).get("conversational_silence_timeout_seconds", 8.0)
+            self.raw.get("voice", {}).get("conversational_silence_timeout_seconds", 20.0)
         )
 
     @property
@@ -268,6 +269,10 @@ class Settings:
         if configured in self.model_roles():
             return configured
         raise ConfigError(f"Неизвестная роль по умолчанию: {configured}")
+
+    @property
+    def output_device(self) -> str:
+        return str(self.raw.get("voice", {}).get("output_device", "")).strip()
 
     @property
     def state_file(self) -> Path:
@@ -321,11 +326,17 @@ class Settings:
             raise ConfigError(
                 f"model_services.{normalized}.state_file выходит за runtime_dir."
             ) from exc
+        raw_device = item.get("device", "")
+        if raw_device is None:
+            raw_device = ""
+        if not isinstance(raw_device, str):
+            raise ConfigError(f"Параметр device сервиса {normalized} должен быть строкой.")
         return ModelService(
             name=normalized,
             host=host,
             port=port,
             state_file=state_file,
+            device=raw_device.strip(),
         )
 
     def model_service_names(self) -> tuple[str, ...]:
@@ -1026,6 +1037,7 @@ def load_settings(root: Path | None = None) -> Settings:
         "routing": ("enabled",),
         "memory": ("persistent", "compression_enabled"),
         "rag": ("enabled", "auto_index"),
+        "runtime_routing": ("isolate_resident_vram",),
     }
     for section_name, fields in boolean_sections.items():
         section = raw.get(section_name)
@@ -1112,7 +1124,7 @@ def load_settings(root: Path | None = None) -> Settings:
     )
     try:
         conversational_silence_timeout = float(
-            voice.get("conversational_silence_timeout_seconds", 8.0)
+            voice.get("conversational_silence_timeout_seconds", 20.0)
         )
     except (TypeError, ValueError) as exc:
         raise ConfigError(
@@ -1142,6 +1154,13 @@ def load_settings(root: Path | None = None) -> Settings:
     voice["playback_backend"] = playback_backend
     voice["output_device"] = output_device.strip()
     voice["capture_block_ms"] = capture_block_ms
+    try:
+        speech_rate = float(voice.get("speech_rate", 1.05))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("voice.speech_rate должен быть числом.") from exc
+    if not math.isfinite(speech_rate) or not (0.5 <= speech_rate <= 2.0):
+        raise ConfigError("voice.speech_rate должен быть от 0.5 до 2.0.")
+    voice["speech_rate"] = speech_rate
     live = raw.get("live", {})
     if not isinstance(live, dict):
         raise ConfigError("Раздел live должен быть объектом.")
@@ -1173,9 +1192,9 @@ def load_settings(root: Path | None = None) -> Settings:
             live.get("playback_timeout_seconds", 600)
         )
         turn_silences = (
-            float(live.get("turn_complete_silence_seconds", 0.45)),
-            float(live.get("turn_ordinary_silence_seconds", 0.85)),
-            float(live.get("turn_incomplete_silence_seconds", 2.2)),
+            float(live.get("turn_complete_silence_seconds", 0.55)),
+            float(live.get("turn_ordinary_silence_seconds", 1.15)),
+            float(live.get("turn_incomplete_silence_seconds", 2.6)),
         )
         stream_delay_ms = int(audio_processing.get("stream_delay_ms", 0))
         ns_level = int(audio_processing.get("ns_level", 1))
@@ -1462,6 +1481,25 @@ def set_user_microphone(root: Path, selector: str) -> Path:
             voice["wake_device"] = selector
         else:
             voice.pop("wake_device", None)
+            if not voice:
+                value.pop("voice", None)
+
+    return _edit_user_settings(target, edit)
+
+
+def set_user_audio_output(root: Path, selector: str) -> Path:
+    """Persist a stable audio output name fragment without replacing voice settings."""
+    target = root.resolve() / "config" / "user.json"
+    selector = str(selector).strip()
+
+    def edit(value: dict[str, Any]) -> None:
+        voice = value.setdefault("voice", {})
+        if not isinstance(voice, dict):
+            raise ConfigError("Раздел voice в пользовательской конфигурации повреждён.")
+        if selector:
+            voice["output_device"] = selector
+        else:
+            voice.pop("output_device", None)
             if not voice:
                 value.pop("voice", None)
 

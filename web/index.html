@@ -47,9 +47,9 @@
         <div class="muted">Состояние</div>
         <div id="status">Готова</div>
         <div id="task-controls" class="actions" hidden aria-label="Управление текущей задачей">
-          <button id="pause" type="button">Пауза</button>
-          <button id="resume" type="button" hidden>Продолжить</button>
-          <button id="cancel" class="danger" type="button">Отменить задачу</button>
+          <button id="pause" type="button" aria-label="Приостановить выполнение задачи">Пауза</button>
+          <button id="resume" type="button" hidden aria-label="Возобновить выполнение задачи">Продолжить</button>
+          <button id="cancel" class="danger" type="button" aria-label="Отменить текущую задачу">Отменить задачу</button>
         </div>
       </div>
 
@@ -60,9 +60,9 @@
         <button id="send" type="button" aria-keyshortcuts="Control+Enter">Отправить</button>
       </div>
 
-      <div class="card" aria-live="polite">
-        <h2>Ответ</h2>
-        <div id="answer">Здесь появится ответ.</div>
+      <div class="card" aria-live="polite" role="region" aria-labelledby="answer-heading">
+        <h2 id="answer-heading">Ответ</h2>
+        <div id="answer" tabindex="-1">Здесь появится ответ.</div>
         <ul id="events" aria-label="Этапы выполнения"></ul>
       </div>
 
@@ -103,6 +103,7 @@
     let confirmationId = '';
     let confirmationRevision = -1;
     let confirmationDigest = '';
+    let wasDone = true;
 
     async function authenticate(candidate) {
       const response = await fetch('/api/auth', {
@@ -176,6 +177,9 @@
         confirmationDigest = '';
       }
       confirmationWasVisible = Boolean(task.confirmation);
+      const justCompleted = !wasDone && task.done && (task.answer || task.error);
+      wasDone = Boolean(task.done);
+      if (justCompleted) answer.focus();
     }
 
     async function decide(approved) {

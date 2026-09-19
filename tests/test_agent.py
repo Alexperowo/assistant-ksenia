@@ -1,5 +1,6 @@
 import json
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -617,6 +618,31 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(len(confirmations), 2)
         self.assertEqual(reply.tool_events[-1].result.status, "confirmation_limit")
         self.assertIsNone(complete.call_args_list[-1].kwargs["tools"])
+
+    def test_system_prompt_mandates_windows_tools_and_forbids_screen_hallucinations(self):
+        self.assertIn("windows_active_window", SYSTEM_PROMPT)
+        self.assertIn("windows_list_windows", SYSTEM_PROMPT)
+        self.assertIn("Категорически запрещено выдумывать", SYSTEM_PROMPT)
+        self.assertIn("Я не вижу экран", SYSTEM_PROMPT)
+        self.assertIn("Ксения", SYSTEM_PROMPT)
+        self.assertIn("Alibaba", SYSTEM_PROMPT)
+
+    @patch("butler.agent.ToolExecutor")
+    def test_conversation_messages_anchor_identity_and_disclaim_screen_vision(self, _tools):
+        settings = SimpleNamespace(
+            raw={
+                "assistant": {"name": "Ксения", "user_name": "Александр"},
+                "memory": {"compression_enabled": False},
+                "agent": {},
+            }
+        )
+        session = AgentSession(settings)
+        messages = session._conversation_request_messages()
+        sys_msg = messages[0]["content"]
+        self.assertIn("Ксения", sys_msg)
+        self.assertIn("Александр", sys_msg)
+        self.assertIn("не видишь экран", sys_msg)
+        self.assertIn("Alibaba", sys_msg)
 
 
 if __name__ == "__main__":

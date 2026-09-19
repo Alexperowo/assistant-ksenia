@@ -757,14 +757,14 @@ class SpeechRecognizer:
             )
         return event
 
-    def list_devices(self) -> list[dict[str, object]]:
-        return list(self.audio_inventory()["inputs"])
+    def list_devices(self, *, refresh: bool = False) -> list[dict[str, object]]:
+        return list(self.audio_inventory(refresh=refresh)["inputs"])
 
-    def list_output_devices(self) -> list[dict[str, object]]:
-        return list(self.audio_inventory()["outputs"])
+    def list_output_devices(self, *, refresh: bool = False) -> list[dict[str, object]]:
+        return list(self.audio_inventory(refresh=refresh)["outputs"])
 
-    def audio_inventory(self) -> dict[str, list[dict[str, object]]]:
-        if self._audio_inventory_cache is not None:
+    def audio_inventory(self, *, refresh: bool = False) -> dict[str, list[dict[str, object]]]:
+        if not refresh and self._audio_inventory_cache is not None:
             return self._audio_inventory_cache
         event = self._run_audio_device_worker()
         if event.get("event") != "devices":
@@ -783,4 +783,10 @@ class SpeechRecognizer:
         event = self._run_audio_device_worker("--probe", str(selector))
         if event.get("event") != "probe_ready":
             raise SpeechRecognitionError("Микрофон не подтвердил готовность.")
+        return event
+
+    def probe_output_device(self, selector: str) -> dict[str, object]:
+        event = self._run_audio_device_worker("--probe-output", str(selector))
+        if event.get("event") != "probe_output_ready":
+            raise SpeechRecognitionError("Устройство вывода не подтвердило готовность.")
         return event

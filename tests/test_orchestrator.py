@@ -125,8 +125,8 @@ class OrchestratorTests(unittest.TestCase):
             with self.assertRaisesRegex(ChatError, "уже выполняет"):
                 session.ask("Проверка конкурентного запуска")
 
-    def test_reasoning_profile_uses_96k_context(self):
-        self.assertEqual(load_settings().model("reasoning").context_size, 98_304)
+    def test_reasoning_profile_uses_84k_context(self):
+        self.assertEqual(load_settings().model("reasoning").context_size, 86_016)
 
     def test_short_conversation_uses_direct_route_but_actions_do_not(self):
         session = RoutedAgentSession(load_settings())
@@ -235,6 +235,27 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(call["service"].name, "ui_fast")
         self.assertEqual(call["request_mode"].name, "fast")
         self.assertEqual(call["conversation_advisory"], "")
+
+    @patch("butler.orchestrator.ModelManager.for_role")
+    def test_desktop_action_uses_resident_service_with_tools(self, for_role):
+        session = RoutedAgentSession(load_settings())
+        manager = Mock()
+        manager.is_current.return_value = True
+        for_role.return_value = manager
+        session.residency.activate_residents = Mock(return_value={})
+        session.session.ask = Mock(return_value=AgentReply("Окно свёрнуто.", ()))
+        session.residency.primary_window = Mock()
+
+        reply = session._ask_exclusive("Сверни окно терминала")
+
+        self.assertEqual(reply.text, "Окно свёрнуто.")
+        for_role.assert_called_once_with(session.settings, "ui_butler")
+        session.residency.activate_residents.assert_called_once_with()
+        manager.start.assert_not_called()
+        session.residency.primary_window.assert_not_called()
+        call = session.session.ask.call_args.kwargs
+        self.assertFalse(call["conversation_only"])
+        self.assertEqual(call["service"].name, "ui_fast")
 
     @patch("butler.orchestrator.complete_chat")
     @patch("butler.orchestrator.ModelManager.for_role")
@@ -507,6 +528,26 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(reply.text, "Ответ исследования.")
         session.research.run.assert_called_once()
         self.assertEqual(session.research.run.call_args.kwargs.get("assistant_mode"), "thinking")
+
+    def test_desktop_action_allowed_during_background_research(self):
+        settings = load_settings()
+        session = RoutedAgentSession(settings)
+        session.background_research.is_busy = Mock(return_value=True)
+        session._run_resident_conversation = Mock(return_value=AgentReply("На экране открыт блокнот.", ()))
+
+        self.assertFalse(session._is_exclusive_task("что у меня находится на экране компьютера."))
+        reply = session.ask("что у меня находится на экране компьютера.")
+        self.assertEqual(reply.text, "На экране открыт блокнот.")
+        session._run_resident_conversation.assert_called_once()
+
+    def test_exclusive_task_rejects_when_research_busy(self):
+        settings = load_settings()
+        session = RoutedAgentSession(settings)
+        session.background_research.is_busy = Mock(return_value=True)
+
+        with self.assertRaises(ChatError) as ctx:
+            session.ask("напиши код и запусти pytest в workspace")
+        self.assertIn("Выполняется фоновый поиск", str(ctx.exception))
 
 
 if __name__ == "__main__":

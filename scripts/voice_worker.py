@@ -85,6 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-size", type=int, required=True)
     parser.add_argument("--model-sha256", required=True)
     parser.add_argument("--speaker", default="aidar")
+    parser.add_argument("--speech-rate", type=float, default=1.05)
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="cpu")
@@ -102,15 +103,22 @@ def parse_args() -> argparse.Namespace:
 
 
 def write_wav(
-    path: Path, audio, sample_rate: int, torch, *, leading_silence_ms: int = 0
+    path: Path,
+    audio,
+    sample_rate: int,
+    torch,
+    *,
+    leading_silence_ms: int = 0,
+    speech_rate: float = 1.0,
 ) -> None:
     values = audio.detach().cpu().clamp(-1, 1)
     values = (values * 32767).to(dtype=torch.int16).numpy()
+    effective_rate = round(sample_rate * max(0.5, min(2.0, speech_rate)))
     with wave.open(str(path), "wb") as output:
         output.setnchannels(1)
         output.setsampwidth(2)
-        output.setframerate(sample_rate)
-        silence_frames = max(0, int(sample_rate * leading_silence_ms / 1000))
+        output.setframerate(effective_rate)
+        silence_frames = max(0, int(effective_rate * leading_silence_ms / 1000))
         output.writeframes((b"\x00\x00" * silence_frames) + values.tobytes())
 
 
@@ -248,7 +256,7 @@ def main() -> int:
         warmup_started_at = time.monotonic()
         try:
             model.apply_tts(
-                text="Голос готов.",
+                text="Голос гот+ов.",
                 speaker=args.speaker,
                 sample_rate=args.sample_rate,
                 **SILERO_RUSSIAN_QUALITY_OPTIONS,
@@ -265,14 +273,17 @@ def main() -> int:
             torch.cuda.empty_cache()
             active_device = "cpu"
             model.apply_tts(
-                text="Голос готов.",
+                text="Голос гот+ов.",
                 speaker=args.speaker,
                 sample_rate=args.sample_rate,
                 **SILERO_RUSSIAN_QUALITY_OPTIONS,
             )
         warmup_seconds = time.monotonic() - warmup_started_at
+        use_pcm_playback = (
+            args.playback_backend == "pcm" or bool(args.output_device.strip())
+        )
         playback_backend = (
-            PCM_PLAYBACK_BACKEND if args.playback_backend == "pcm" else PLAYBACK_BACKEND
+            PCM_PLAYBACK_BACKEND if use_pcm_playback else PLAYBACK_BACKEND
         )
         output_route = args.output_device.strip() or OUTPUT_ROUTE
         append_worker_log(
@@ -307,7 +318,7 @@ def main() -> int:
 
     counter = 0
     commands: queue.Queue[dict | None] = queue.Queue()
-    if args.playback_backend == "pcm":
+    if use_pcm_playback:
         far_token = os.environ.get(TOKEN_ENVIRONMENT_KEY, "")
         if args.far_port and len(far_token) < 32:
             raise RuntimeError("Не задан ключ локального far-end reference.")
@@ -394,15 +405,17 @@ def main() -> int:
                 if idle_seconds >= 5.0
                 else args.leading_silence_ms
             )
+            effective_rate = round(args.sample_rate * max(0.5, min(2.0, args.speech_rate)))
             write_wav(
                 wav_path,
                 audio,
                 args.sample_rate,
                 torch,
                 leading_silence_ms=leading_silence_ms,
+                speech_rate=args.speech_rate,
             )
             audio_duration_ms = round(
-                (audio.numel() / args.sample_rate) * 1000 + leading_silence_ms
+                (audio.numel() / effective_rate) * 1000 + leading_silence_ms
             )
             letter_count = len(re.findall(r"[A-Za-zА-Яа-яЁё]", text))
             suspiciously_short = (

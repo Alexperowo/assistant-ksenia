@@ -22,6 +22,27 @@ class WindowsBridgeTests(unittest.TestCase):
         except WindowsBridgeError as exc:
             self.assertEqual(str(exc), "Активное окно не найдено.")
 
+    def test_find_window_by_title_with_alias(self):
+        from unittest.mock import patch
+        from butler.windows_bridge import find_window_by_title
+
+        mock_windows = [
+            {"handle": 1234, "title": "Administrator: Windows PowerShell"},
+            {"handle": 5678, "title": "Документ - Блокнот"},
+        ]
+        with patch("butler.windows_bridge.list_windows", return_value=mock_windows):
+            self.assertEqual(find_window_by_title("терминал")["handle"], 1234)
+            self.assertEqual(find_window_by_title("powershell")["handle"], 1234)
+            self.assertEqual(find_window_by_title("блокнот")["handle"], 5678)
+            self.assertIsNone(find_window_by_title("калькулятор"))
+            self.assertIsNone(find_window_by_title(""))
+
+    def test_manage_window_validates_action(self):
+        from butler.windows_bridge import manage_window
+        with self.assertRaises(WindowsBridgeError) as ctx:
+            manage_window(handle=999999, action="unknown_action")
+        self.assertIn("Неподдерживаемое действие", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,6 +7,7 @@ TASK_SCOPES = {
     "undo_last_change": "workspace_changes",
     "run_project_command": "developer_commands",
     "windows_activate_window": "windows_control",
+    "windows_manage_window": "windows_control",
     "windows_type_text": "windows_control",
     "windows_press_keys": "windows_control",
     "windows_invoke_control": "windows_control",
@@ -22,20 +23,18 @@ TASK_SCOPES = {
 ALWAYS_CONFIRM_TOOLS = {
     "delete_workspace_file",
     "install_software",
+    "configure_environment",
     "send_message",
     "financial_action",
     "forget_information",
     "browser_send_message",
     "browser_interact",
-    "windows_activate_window",
     "windows_type_text",
     "windows_press_keys",
     "windows_invoke_control",
     "windows_set_control_value",
     "windows_click_control",
-    "windows_move_pointer",
     "windows_click_pointer",
-    "windows_scroll_pointer",
 }
 
 

@@ -81,6 +81,25 @@ class VoiceWorkerTests(unittest.TestCase):
         self.assertFalse(stopping.is_alive())
         self.assertFalse(playback.is_alive())
 
+    def test_write_wav_scales_sample_rate_for_speech_rate(self):
+        import tempfile
+        import wave
+        from unittest.mock import MagicMock
+        from voice_worker import write_wav
+
+        fake_torch = MagicMock()
+        fake_audio = MagicMock()
+        fake_audio.detach.return_value.cpu.return_value.clamp.return_value = fake_audio
+        mock_numpy = MagicMock()
+        mock_numpy.numpy.return_value.tobytes.return_value = b"\x00\x00" * 480
+        fake_audio.__mul__.return_value.to.return_value = mock_numpy
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            wav_path = Path(temp_dir) / "test.wav"
+            write_wav(wav_path, fake_audio, 48000, fake_torch, speech_rate=1.05)
+            with wave.open(str(wav_path), "rb") as reader:
+                self.assertEqual(reader.getframerate(), 50400)
+
 
 if __name__ == "__main__":
     unittest.main()

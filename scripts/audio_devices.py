@@ -13,6 +13,11 @@ def parse_args() -> argparse.Namespace:
         metavar="NAME",
         help="проверить фактическое открытие микрофона по устойчивой части имени",
     )
+    parser.add_argument(
+        "--probe-output",
+        metavar="NAME",
+        help="проверить фактическое открытие устройства вывода по устойчивой части имени",
+    )
     return parser.parse_args()
 
 
@@ -91,6 +96,43 @@ def main() -> int:
                 )
             finally:
                 opened.close()
+            return 0
+
+        if args.probe_output:
+            from audio_output import ranked_output_devices
+
+            candidates = ranked_output_devices(sd, str(args.probe_output))
+            if not candidates:
+                print(
+                    json.dumps(
+                        {
+                            "event": "error",
+                            "error": f"Устройство вывода «{args.probe_output}» не найдено.",
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                return 1
+            idx, info, host = candidates[0]
+            channels = min(2, int(info.get("max_output_channels", 0)))
+            sd.check_output_settings(
+                device=idx,
+                channels=channels,
+                dtype="int16",
+                samplerate=48000,
+            )
+            print(
+                json.dumps(
+                    {
+                        "event": "probe_output_ready",
+                        "device": str(info.get("name", idx)),
+                        "host_api": host,
+                        "sample_rate": 48000,
+                        "channels": channels,
+                    },
+                    ensure_ascii=False,
+                )
+            )
             return 0
 
         inventory = audio_inventory(sd)

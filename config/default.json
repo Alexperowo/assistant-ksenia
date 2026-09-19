@@ -65,6 +65,7 @@
     "tts_model_expected_size_bytes": 145382211,
     "tts_model_sha256": "7BA04D42340FE0398042EED2E0D12D62E23096D626B1B9FEFF4DCB1309197AB4",
     "speaker": "xenia",
+    "speech_rate": 1.05,
     "sample_rate": 48000,
     "threads": 4,
     "tts_device": "cpu",
@@ -90,16 +91,16 @@
     "playback_backend": "system",
     "output_device": "",
     "confirmation_microphone_handoff_timeout_seconds": 5.0,
-    "conversational_silence_timeout_seconds": 8.0
+    "conversational_silence_timeout_seconds": 20.0
   },
   "live": {
     "enabled": false,
     "speech_barge_in": false,
     "barge_in_probe_seconds": 2.0,
     "semantic_endpointing": true,
-    "turn_complete_silence_seconds": 0.45,
-    "turn_ordinary_silence_seconds": 0.85,
-    "turn_incomplete_silence_seconds": 2.2,
+    "turn_complete_silence_seconds": 0.55,
+    "turn_ordinary_silence_seconds": 1.15,
+    "turn_incomplete_silence_seconds": 2.6,
     "minimum_phrase_chars": 24,
     "maximum_phrase_chars": 220,
     "playback_timeout_seconds": 600,
@@ -260,8 +261,8 @@
     "developer": {
       "label": "Разработчик",
       "purpose": "Работа с файлами, кодом, тестами, терминалом и инструментами агента.",
-      "primary_model": "candidate",
-      "candidate_model": "reasoning",
+      "primary_model": "reasoning",
+      "candidate_model": null,
       "enabled": true
     },
     "planner": {
@@ -274,8 +275,8 @@
     "heavy_brain": {
       "label": "Тяжёлый мозг",
       "purpose": "Редкие задачи, которым нужен тяжёлый long-context профиль и для которых допустима высокая задержка.",
-      "primary_model": "generalist",
-      "candidate_model": "heavy_candidate",
+      "primary_model": "reasoning",
+      "candidate_model": null,
       "enabled": true
     }
   },
@@ -484,7 +485,7 @@
           "sha256": "de0d58cea206add6ff82392027785ff294ad9cca22b74fc949f4eb15add35512"
         }
       },
-      "context_size": 98304,
+      "context_size": 86016,
       "gpu_layers": "auto",
       "enabled": true,
       "experimental": false,
@@ -500,7 +501,7 @@
         "--parallel",
         "1",
         "--cache-type-k",
-        "q8_0",
+        "q5_0",
         "--cache-type-v",
         "q4_0",
         "--fit",

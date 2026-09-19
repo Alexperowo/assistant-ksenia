@@ -341,6 +341,39 @@ class AccessibilityTests(unittest.TestCase):
         self.assertNotIn("JSON.stringify(task.confirmation.arguments", html)
         self.assertIn("Сохранённый PIN не подошёл", html)
         self.assertIn("pinInput.focus()", html)
+        self.assertIn('aria-label="Приостановить выполнение задачи"', html)
+        self.assertIn('aria-label="Отменить текущую задачу"', html)
+        self.assertIn('role="region"', html)
+        self.assertIn("if (justCompleted) answer.focus()", html)
+
+    @patch("butler.cli.set_user_audio_output")
+    @patch("butler.cli.SpeechRecognizer")
+    def test_audio_devices_output_select_and_clear(
+        self, recognizer_class, set_user_audio_output_mock
+    ):
+        recognizer = recognizer_class.return_value
+        recognizer.probe_output_device.return_value = {
+            "device": "JBL Tour One M3",
+            "host_api": "Windows WASAPI",
+            "sample_rate": 48000,
+            "channels": 2,
+        }
+        speech = MagicMock()
+        settings = SimpleNamespace(root=Path("."), raw={"voice": {}}, output_device="")
+
+        # 1. Output select
+        result = _audio_devices(settings, speech, output_select="JBL Tour")
+        self.assertEqual(result, 0)
+        set_user_audio_output_mock.assert_called_with(settings.root, "JBL Tour")
+        speech.switch_output_device.assert_called_with("JBL Tour")
+        self.assertIn("JBL Tour", speech.say_and_wait.call_args.args[0])
+
+        # 2. Output clear
+        result_clear = _audio_devices(settings, speech, clear_output=True)
+        self.assertEqual(result_clear, 0)
+        set_user_audio_output_mock.assert_called_with(settings.root, "")
+        speech.switch_output_device.assert_called_with("")
+        self.assertIn("удален", speech.say_and_wait.call_args.args[0].lower().replace("ё", "е"))
 
 
 if __name__ == "__main__":

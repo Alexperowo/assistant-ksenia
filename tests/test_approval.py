@@ -21,6 +21,13 @@ class ApprovalTests(unittest.TestCase):
     def test_explanation_is_accessible(self):
         self.assertIn("только к одному действию", approval_explanation("windows_type_text"))
 
+    def test_safe_navigation_shares_task_scope_and_allows_reuse(self):
+        self.assertTrue(reusable_approval("windows_activate_window"))
+        self.assertTrue(reusable_approval("windows_move_pointer"))
+        self.assertTrue(reusable_approval("windows_scroll_pointer"))
+        self.assertEqual(approval_scope("windows_activate_window"), "windows_control")
+        self.assertIn("управления Windows", approval_explanation("windows_activate_window"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -63,6 +63,52 @@ PLANNING_HINTS = (
     "исследуй и сделай",
 )
 
+DEVELOPER_TASK_HINTS = (
+    "напиши код",
+    "написать код",
+    "исправь код",
+    "измени код",
+    "отредактируй код",
+    "запусти тест",
+    "прогони тест",
+    "запусти pytest",
+    "запусти команд",
+    "выполни команд",
+    "терминал команд",
+    "консоль команд",
+    "создай файл",
+    "измени файл",
+    "отредактируй файл",
+    "удали файл",
+    "коммит",
+    "рефактор",
+    "скрипт",
+    "в воркспейс",
+    "в workspace",
+    "разработай",
+    "создай проект",
+    "исправь проект",
+)
+
+DESKTOP_ACTION_HINTS = (
+    "сверни",
+    "разверни",
+    "восстанови",
+    "восстановить",
+    "закрой окно",
+    "окно",
+    "окна",
+    "экран",
+    "монитор",
+    "кликни",
+    "мышь",
+    "скриншот",
+    "снимок экрана",
+    "что открыто",
+    "какое окно",
+    "активное окно",
+)
+
 DIRECT_CONVERSATION_BLOCKERS = (
     "найди",
     "поищи",
@@ -105,6 +151,12 @@ DIRECT_CONVERSATION_BLOCKERS = (
     "переключ",
     "включ",
     "выключ",
+    "передавай",
+    "передай",
+    "сгенерируй",
+    "рендер",
+    "видео",
+    "фильм",
 )
 
 
@@ -329,14 +381,15 @@ class RoutedAgentSession:
         on_final_delta: FinalDeltaCallback | None,
         task_id: str | None,
         request_started: float,
+        conversation_only: bool = True,
     ) -> AgentReply:
-        """Answer ordinary conversation on the configured warm assistant service."""
+        """Answer ordinary conversation or everyday assistant actions on the configured warm assistant service."""
 
         manager = ModelManager.for_role(self.settings, assistant_model)
         self.residency.activate_residents()
         if not manager.is_current(assistant_model):
             if on_status:
-                on_status("Запускаю быстрый уровень")
+                on_status("Загружаю модель в память")
             manager.start(assistant_model)
         profile = self.settings.model(assistant_model)
         assistant_mode = self._assistant_mode_override or self.settings.assistant_mode()
@@ -392,7 +445,7 @@ class RoutedAgentSession:
             "orchestrator",
             "execution_started",
             plan_used=False,
-            conversation_only=True,
+            conversation_only=conversation_only,
             model_role=assistant_model,
             model_service=profile.service_name,
             request_mode=(request_mode.name if request_mode is not None else "default"),
@@ -407,7 +460,7 @@ class RoutedAgentSession:
                 on_status=on_status,
                 on_confirmation=on_confirmation,
                 control=control,
-                conversation_only=True,
+                conversation_only=conversation_only,
                 on_final_delta=on_final_delta,
                 reset_tool_state=False,
                 service=self.settings.model_service(profile.service_name),
@@ -422,7 +475,7 @@ class RoutedAgentSession:
                 exc,
                 duration_ms=round((time.monotonic() - request_started) * 1000),
                 plan_used=False,
-                conversation_only=True,
+                conversation_only=conversation_only,
                 model_role=assistant_model,
             )
             raise
@@ -444,7 +497,7 @@ class RoutedAgentSession:
             "execution_completed",
             duration_ms=round((time.monotonic() - request_started) * 1000),
             plan_used=False,
-            conversation_only=True,
+            conversation_only=conversation_only,
             model_role=assistant_model,
             answer=reply.text,
             tool_event_count=len(reply.tool_events),
@@ -530,6 +583,15 @@ class RoutedAgentSession:
         # expensive on partially CPU-offloaded models. Action and research routes
         # remain explicit and are selected before this lightweight profile.
         return bool(normalized)
+
+    def _is_developer_task(self, text: str) -> bool:
+        normalized = " ".join(text.casefold().replace("ё", "е").split())
+        return any(hint in normalized for hint in DEVELOPER_TASK_HINTS)
+
+    def _is_desktop_action(self, text: str) -> bool:
+        normalized = " ".join(text.casefold().replace("ё", "е").split())
+        return any(hint in normalized for hint in DESKTOP_ACTION_HINTS)
+
 
     def _make_plan(
         self,
@@ -905,6 +967,8 @@ class RoutedAgentSession:
             or is_research_resume_command(text)
         ):
             return False
+        if self._is_desktop_action(text):
+            return False
         assistant_model = self._assistant_model()
         if (
             self._is_direct_conversation(text)
@@ -1091,11 +1155,7 @@ class RoutedAgentSession:
             selected_model = assistant_model if direct_conversation else execution_model
             if not self.manager.is_current(selected_model):
                 if on_status:
-                    on_status(
-                        "Запускаю модель-дворецкого"
-                        if direct_conversation
-                        else "Запускаю модель-исполнителя"
-                    )
+                    on_status("Загружаю модель в память")
                 self.manager.start(selected_model)
 
         request = text
@@ -1342,8 +1402,10 @@ class RoutedAgentSession:
             finally:
                 if primary_lease is not None:
                     self.residency.restore_after_primary(primary_lease)
+        is_desktop = self._is_desktop_action(text)
         if (
-            direct_conversation
+            (direct_conversation or is_desktop)
+            and not needs_plan
             and assistant_model in self.settings.resident_model_roles()
         ):
             return self._run_resident_conversation(
@@ -1357,6 +1419,7 @@ class RoutedAgentSession:
                 on_final_delta=on_final_delta,
                 task_id=task_id,
                 request_started=request_started,
+                conversation_only=not is_desktop,
             )
         with self.residency.primary_window():
             return self._run_primary_route(

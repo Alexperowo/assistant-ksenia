@@ -179,25 +179,23 @@ def automatic_input_devices(sd) -> list[tuple[int, dict[str, Any], str]]:
         (candidate, _automatic_input_role(str(candidate[1].get("name", ""))))
         for candidate in candidates
     ]
-    default_index = _default_input_index(sd)
-    default_role = next(
-        (
-            role
-            for (index, _info, _host), role in classified
-            if index == default_index and role in {"communication", "microphone"}
-        ),
-        "",
-    )
-    selected_role = default_role or (
-        "communication"
-        if any(role == "communication" for _candidate, role in classified)
-        else "microphone"
-    )
-    return [
+    valid = [
         candidate
         for candidate, role in classified
-        if role == selected_role
+        if role in {"communication", "microphone"}
     ]
+    default_index = _default_input_index(sd)
+
+    def _sort_key(item: tuple[int, dict[str, Any], str]) -> int:
+        index, info, _host = item
+        role = _automatic_input_role(str(info.get("name", "")))
+        if index == default_index:
+            return 0
+        if role == "communication":
+            return 1
+        return 2
+
+    return sorted(valid, key=_sort_key)
 
 
 def open_best_input_stream(

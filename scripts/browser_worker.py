@@ -96,6 +96,10 @@ def normalize_search_result_url(value: object, base_url: str = "https://duckduck
         target = parse_qs(parsed.query).get("uddg", [""])[0]
         if target:
             absolute = target
+    elif host == "bing.com" or host.endswith(".bing.com"):
+        target = parse_qs(parsed.query).get("url", [""])[0]
+        if target:
+            absolute = target
     return absolute if public_http_url(absolute) else ""
 
 
@@ -153,7 +157,62 @@ class _DuckDuckGoParser(HTMLParser):
         if self.title_depth:
             self.current["title"] += data
         if self.snippet_depth:
+            self.snippet_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.title_depth:
+            self.title_depth -= 1
+        if self.snippet_depth:
+            self.snippet_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self.current is None:
+            return
+        if self.title_depth:
+            self.current["title"] += data
+        if self.snippet_depth:
             self.current["description"] += data
+
+
+def sanitize_web_text(text: str) -> str:
+    """Strip cookie consent banners, GDPR notices, and navigation boilerplate."""
+    if not text:
+        return ""
+    lines = text.splitlines()
+    clean_lines = []
+
+    boilerplate_patterns = (
+        "файлы cookie",
+        "файлов cookie",
+        "используем cookie",
+        "использует cookie",
+        "принять все",
+        "принять файлы cookie",
+        "настройки cookie",
+        "согласен на обработку",
+        "политика конфиденциальности",
+        "политикой конфиденциальности",
+        "пользовательское соглашение",
+        "accept all cookies",
+        "cookie settings",
+        "privacy policy",
+        "terms of service",
+        "gdpr consent",
+    )
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            clean_lines.append("")
+            continue
+        lowered = stripped.casefold()
+        if any(pattern in lowered for pattern in boilerplate_patterns) and len(stripped) < 350:
+            continue
+        clean_lines.append(stripped)
+
+    result = "\n".join(clean_lines)
+    result = re.sub(r"\n{3,}", "\n\n", result).strip()
+    return result or text
 
 
 def parse_duckduckgo_results(document: str) -> list[dict[str, str]]:
@@ -198,7 +257,7 @@ def _download_search_document(url: str) -> str:
         },
     )
     opener = build_opener(_SearchRedirectHandler())
-    with opener.open(request, timeout=25) as response:
+    with opener.open(request, timeout=10) as response:
         if not search_provider_url(response.geturl()):
             raise ValueError("Поисковик перенаправил запрос на неизвестный адрес.")
         payload = response.read(2_000_001)
@@ -211,22 +270,25 @@ def _download_search_document(url: str) -> str:
 def _parse_bing_rss(document: str) -> list[dict[str, str]]:
     root = ElementTree.fromstring(document)
     results: list[dict[str, str]] = []
+    seen: set[str] = set()
     for item in root.findall(".//item")[:10]:
         def text_of(name: str) -> str:
             child = item.find(name)
             return "" if child is None or child.text is None else child.text.strip()
 
         item_url = normalize_search_result_url(text_of("link"), "https://www.bing.com/")
-        if not item_url:
+        if not item_url or item_url in seen:
             continue
+        seen.add(item_url)
+        host = (urlparse(item_url).hostname or "").removeprefix("www.")
         results.append(
             {
                 "title": text_of("title"),
                 "url": item_url,
                 "description": text_of("description"),
                 "published": text_of("pubDate"),
-                "source": "",
-                "source_url": "",
+                "source": host,
+                "source_url": f"https://{host}/" if host else "",
             }
         )
     return results
@@ -242,19 +304,23 @@ def general_search(query: str, max_text: int) -> dict[str, object]:
         errors.append(f"DuckDuckGo: {type(exc).__name__}")
     provider = "DuckDuckGo HTML"
     if not results:
-        has_cyrillic = bool(re.search(r"[А-Яа-яЁё]", query))
-        market = "ru-RU" if has_cyrillic else "en-US"
-        country = "ru" if has_cyrillic else "us"
-        bing_url = (
-            "https://www.bing.com/search?format=rss"
-            f"&mkt={market}&setlang={market}&cc={country}&q=" + quote_plus(query)
+        is_news = bool(re.search(r"(?:новост|news|свеж|latest|релиз|сентябр|август|сегодня)", query, re.I))
+        candidate_endpoints = (
+            ["https://www.bing.com/news/search?format=rss&q=", "https://www.bing.com/search?format=rss&q="]
+            if is_news
+            else ["https://www.bing.com/search?format=rss&q=", "https://www.bing.com/news/search?format=rss&q="]
         )
-        try:
-            results = _parse_bing_rss(_download_search_document(bing_url))
-            provider = "Bing RSS (резерв)"
-            search_url = bing_url
-        except (OSError, ValueError, ElementTree.ParseError) as exc:
-            errors.append(f"Bing: {type(exc).__name__}")
+        for ep in candidate_endpoints:
+            bing_url = ep + quote_plus(query)
+            try:
+                candidate_results = _parse_bing_rss(_download_search_document(bing_url))
+                if candidate_results:
+                    results = candidate_results
+                    provider = "Bing News RSS" if "news" in ep else "Bing RSS"
+                    search_url = bing_url
+                    break
+            except (OSError, ValueError, ElementTree.ParseError) as exc:
+                errors.append(f"Bing: {type(exc).__name__}")
     text = "\n\n".join(
         f"{item['title']}\n{item['description']}\n{item['url']}" for item in results
     )
@@ -358,39 +424,7 @@ async def process_request(context, mode: str, value: str, max_text: int) -> dict
                 await page.route_web_socket("**/*", lambda web_socket: web_socket.close())
             actions = []
             if mode == "search":
-                # Bing otherwise inherits an arbitrary profile/geolocation locale.
-                # In tests that made the abbreviation "VR" mean German banks
-                # (Volksbanken Raiffeisenbanken), not virtual reality.
-                has_cyrillic = bool(re.search(r"[А-Яа-яЁё]", value))
-                news_query = bool(
-                    re.search(r"\b(news|latest|breaking)\b|новост", value, flags=re.IGNORECASE)
-                )
-                if news_query:
-                    search_value = value
-                    fresh_query = bool(
-                        re.search(
-                            r"\b(latest|current|recent|today)\b|последн|свеж|сегодня",
-                            value,
-                            flags=re.IGNORECASE,
-                        )
-                    )
-                    if fresh_query and "when:" not in value.casefold():
-                        search_value += " when:30d"
-                    language = "ru" if has_cyrillic else "en-US"
-                    country = "RU" if has_cyrillic else "US"
-                    edition = "RU:ru" if has_cyrillic else "US:en"
-                    url = (
-                        "https://news.google.com/rss/search?q="
-                        + quote_plus(search_value)
-                        + f"&hl={language}&gl={country}&ceid={edition}"
-                    )
-                    search_provider = "Google News RSS"
-                else:
-                    # DuckDuckGo's HTML endpoint preserves exact technical
-                    # queries better than Bing RSS and exposes result metadata
-                    # without running page scripts.
-                    url = "https://html.duckduckgo.com/html/?q=" + quote_plus(value)
-                    search_provider = "DuckDuckGo HTML"
+                return await asyncio.to_thread(general_search, value, max_text)
             elif mode == "open":
                 if not public_http_url(value):
                     raise ValueError("Разрешены только публичные http:// и https:// адреса.")
@@ -407,12 +441,10 @@ async def process_request(context, mode: str, value: str, max_text: int) -> dict
                     raise ValueError("Нужно от одного до десяти действий.")
             else:
                 raise ValueError(f"Неизвестный режим браузера: {mode}")
-            if mode == "search" and search_provider == "DuckDuckGo HTML":
-                return await asyncio.to_thread(general_search, value, max_text)
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             if not public_http_url(page.url):
                 raise ValueError("Перенаправление на локальный или непубличный адрес запрещено.")
-            if mode in {"search", "open"}:
+            if mode == "open":
                 # Many stores render listings after DOMContentLoaded. A short,
                 # bounded grace period captures them without waiting forever for ads.
                 await page.wait_for_timeout(1500)
@@ -466,7 +498,7 @@ async def process_request(context, mode: str, value: str, max_text: int) -> dict
             result = {
                 "url": page.url,
                 "title": await page.title(),
-                "text": text[:max_text],
+                "text": sanitize_web_text(text)[:max_text],
                 "content_selector": content_selector,
                 "performed": performed,
                 "retrieved_at": datetime.now(timezone.utc).isoformat(),

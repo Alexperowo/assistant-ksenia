@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,13 @@ def ranked_output_devices(sd, selector: str) -> list[tuple[int, dict[str, Any], 
     except ValueError:
         numeric_selector = None
     needle = selector.casefold()
+    needles: tuple[str, ...] = (needle,) if needle else ()
+    is_speaker_alias = needle in {"speaker", "speakers", "динамик", "динамики", "колонка", "колонки"}
+    is_headphone_alias = needle in {"headphone", "headphones", "headset", "наушник", "наушники", "гарнитура"}
+    if is_speaker_alias:
+        needles = ("speaker", "динамик", "колонк", "realtek")
+    elif is_headphone_alias:
+        needles = ("jbl", "tour", "sense", "headphone", "headset", "наушник", "гарнитур")
     candidates = []
     host_priority = {
         "windows wasapi": 0,
@@ -52,14 +60,19 @@ def ranked_output_devices(sd, selector: str) -> list[tuple[int, dict[str, Any], 
         if default_index is not None and index != default_index:
             continue
         name = str(info.get("name", ""))
+        name_lower = name.casefold()
         if numeric_selector is not None and index != numeric_selector:
             continue
-        if needle and numeric_selector is None and needle not in name.casefold():
+        if needles and numeric_selector is None and not any(n in name_lower for n in needles):
+            continue
+        if is_speaker_alias and any(h in name_lower for h in ("headphone", "headset", "наушник", "гарнитур")):
             continue
         host = _host_api_name(sd, info)
         score = host_priority.get(host.casefold(), 50)
-        if needle and name.casefold() == needle:
+        if needle and name_lower == needle:
             score -= 5
+        if is_headphone_alias and any(n in name_lower for n in ("jbl", "tour", "sense")):
+            score -= 10
         candidates.append((score, index, info, host))
     candidates.sort(key=lambda item: (item[0], item[1]))
     return [(index, info, host) for _score, index, info, host in candidates]
@@ -202,40 +215,59 @@ class PcmPlaybackController:
             frame_samples = sample_rate // 100
             if frame_samples * 100 != sample_rate:
                 raise RuntimeError("Частота WAV не поддерживает точные 10-мс кадры.")
-            candidates = ranked_output_devices(sd, self.selector)
-            if not candidates:
-                raise RuntimeError(
-                    "Не найдено выбранное устройство вывода. Проверьте маршрут Windows."
+            all_pcm = source.readframes(source.getnframes())
+
+        candidates = ranked_output_devices(sd, self.selector)
+        if not candidates:
+            raise RuntimeError(
+                "Не найдено выбранное устройство вывода. Проверьте маршрут Windows."
+            )
+        try:
+            publisher = (
+                FarReferencePublisher(
+                    self.far_host or "127.0.0.1",
+                    self.far_port,
+                    self.far_token,
+                    input_rate=sample_rate,
                 )
-            try:
-                publisher = (
-                    FarReferencePublisher(
-                        self.far_host or "127.0.0.1",
-                        self.far_port,
-                        self.far_token,
-                        input_rate=sample_rate,
-                    )
-                    if self.far_port
-                    else None
-                )
-            except (OSError, RuntimeError, TimeoutError, json.JSONDecodeError) as exc:
-                raise RuntimeError(
-                    f"Far-end reference handshake не выполнен: {type(exc).__name__}: {exc}"
-                ) from exc
-            errors = []
-            try:
-                for index, info, host_api in candidates:
-                    channels = min(2, int(info.get("max_output_channels", 0)))
+                if self.far_port
+                else None
+            )
+        except (OSError, RuntimeError, TimeoutError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"Far-end reference handshake не выполнен: {type(exc).__name__}: {exc}"
+            ) from exc
+        errors = []
+        try:
+            for index, info, host_api in candidates:
+                channels = min(2, int(info.get("max_output_channels", 0)))
+                candidate_rates = [sample_rate]
+                def_rate = int(info.get("default_samplerate", 0))
+                for r in (48000, def_rate, 44100):
+                    if r > 0 and r not in candidate_rates and (r // 100 * 100 == r):
+                        candidate_rates.append(r)
+
+                for active_rate in candidate_rates:
+                    active_frame_samples = active_rate // 100
+                    if active_rate == sample_rate:
+                        mono_data = all_pcm
+                    else:
+                        mono_data, _ = ratecv(all_pcm, 2, 1, sample_rate, active_rate, None)
+                    if publisher is not None:
+                        publisher.input_rate = active_rate
+
+                    stream = None
+                    raw_exc = None
                     try:
                         sd.check_output_settings(
                             device=index,
                             channels=channels,
                             dtype="int16",
-                            samplerate=sample_rate,
+                            samplerate=active_rate,
                         )
                         stream = sd.RawOutputStream(
-                            samplerate=sample_rate,
-                            blocksize=frame_samples,
+                            samplerate=active_rate,
+                            blocksize=active_frame_samples,
                             dtype="int16",
                             channels=channels,
                             device=index,
@@ -243,41 +275,127 @@ class PcmPlaybackController:
                         )
                         stream.start()
                     except (OSError, ValueError, sd.PortAudioError) as exc:
-                        errors.append(f"{info.get('name', index)} / {host_api}: {exc}")
-                        source.rewind()
-                        continue
-                    try:
-                        with self._lock:
-                            if generation != self._generation:
-                                stream.abort()
-                                return False
-                            self._stream = stream
-                            self.output_route = (
-                                f"{info.get('name', index)} / {host_api} / {sample_rate} Hz"
-                            )
-                        frame_bytes = frame_samples * 2
-                        while generation == self.generation():
-                            mono = source.readframes(frame_samples)
-                            if not mono:
-                                return True
-                            if len(mono) < frame_bytes:
-                                mono += b"\x00" * (frame_bytes - len(mono))
-                            stream.write(self._stereo_frame(mono, channels))
-                            if publisher is not None:
-                                # Only frames accepted by the output stream are
-                                # valid render reference for echo cancellation.
-                                publisher.publish(mono)
-                        return False
-                    finally:
+                        stream = None
+                        raw_exc = exc
+
+                    if stream is not None:
                         try:
-                            stream.stop()
-                        except Exception:
-                            pass
-                        stream.close()
-                        with self._lock:
-                            if self._stream is stream:
-                                self._stream = None
-                raise RuntimeError("Не удалось открыть PCM output: " + "; ".join(errors[-6:]))
-            finally:
-                if publisher is not None:
-                    publisher.close()
+                            with self._lock:
+                                if generation != self._generation:
+                                    stream.abort()
+                                    return False
+                                self._stream = stream
+                                self.output_route = (
+                                    f"{info.get('name', index)} / {host_api} / {active_rate} Hz"
+                                )
+                            frame_bytes = active_frame_samples * 2
+                            pos = 0
+                            while generation == self.generation():
+                                mono = mono_data[pos : pos + frame_bytes]
+                                pos += len(mono)
+                                if not mono:
+                                    return True
+                                if len(mono) < frame_bytes:
+                                    mono += b"\x00" * (frame_bytes - len(mono))
+                                stream.write(self._stereo_frame(mono, channels))
+                                if publisher is not None:
+                                    # Only frames accepted by the output stream are
+                                    # valid render reference for echo cancellation.
+                                    publisher.publish(mono)
+                            return False
+                        finally:
+                            try:
+                                stream.stop()
+                            except Exception:
+                                pass
+                            stream.close()
+                            with self._lock:
+                                if self._stream is stream:
+                                    self._stream = None
+                    else:
+                        # Fallback to callback-driven OutputStream (e.g. Windows WDM-KS where
+                        # PortAudio blocking API is not supported: 'Blocking API not supported yet')
+                        try:
+                            import numpy as np
+
+                            finished_event = threading.Event()
+                            callback_errors: list[Exception] = []
+                            frame_bytes = active_frame_samples * 2
+                            pos = 0
+
+                            def _callback(outdata, frames, time_info, status):
+                                nonlocal pos
+                                if generation != self.generation():
+                                    outdata.fill(0)
+                                    finished_event.set()
+                                    return
+                                try:
+                                    needed = frames * 2
+                                    mono = mono_data[pos : pos + needed]
+                                    pos += len(mono)
+                                    if not mono:
+                                        outdata.fill(0)
+                                        finished_event.set()
+                                        return
+                                    if len(mono) < needed:
+                                        mono += b"\x00" * (needed - len(mono))
+                                        finished_event.set()
+                                    mono_arr = np.frombuffer(mono, dtype=np.int16)
+                                    if channels == 1:
+                                        outdata[:, 0] = mono_arr
+                                    else:
+                                        outdata[:] = np.repeat(mono_arr[:, None], channels, axis=1)
+                                    if publisher is not None:
+                                        publisher.publish(mono)
+                                except Exception as cb_err:
+                                    callback_errors.append(cb_err)
+                                    outdata.fill(0)
+                                    finished_event.set()
+
+                            cb_stream = sd.OutputStream(
+                                samplerate=active_rate,
+                                blocksize=active_frame_samples,
+                                dtype="int16",
+                                channels=channels,
+                                device=index,
+                                latency="low",
+                                callback=_callback,
+                            )
+                            with self._lock:
+                                if generation != self._generation:
+                                    cb_stream.close()
+                                    return False
+                                self._stream = cb_stream
+                                self.output_route = (
+                                    f"{info.get('name', index)} / {host_api} / {active_rate} Hz"
+                                )
+                            cb_stream.start()
+                        except (OSError, ValueError, sd.PortAudioError) as exc:
+                            errors.append(
+                                f"{info.get('name', index)} / {host_api} @ {active_rate} Hz: raw failed ({raw_exc}); callback failed ({exc})"
+                            )
+                            continue
+
+                        started_at = time.monotonic()
+                        max_duration = max(5.0, (len(mono_data) / (2 * active_rate)) * 3.0 + 3.0)
+                        try:
+                            while generation == self.generation():
+                                if finished_event.wait(timeout=0.05):
+                                    time.sleep(0.08)
+                                    return len(callback_errors) == 0
+                                if time.monotonic() - started_at > max_duration:
+                                    break
+                            return False
+                        finally:
+                            try:
+                                cb_stream.stop()
+                            except Exception:
+                                pass
+                            cb_stream.close()
+                            with self._lock:
+                                if self._stream is cb_stream:
+                                    self._stream = None
+            raise RuntimeError("Не удалось открыть PCM output: " + "; ".join(errors[-6:]))
+        finally:
+            if publisher is not None:
+                publisher.close()

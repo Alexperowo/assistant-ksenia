@@ -44,6 +44,7 @@
 | `sensitive_data.py` | запрет секретных путей и расширений |
 | `processes.py` | идентификация Windows-процесса; `OwnedProcessJob`/`join_process_job` для владения деревом отдельного browser worker, без претензии на sandbox |
 | `procedures.py` | чтение проверенных процедур без traversal |
+| `software_manager.py` | четырёхуровневая установка и настройка программ (winget, прямая загрузка с SHA-256, UI Automation, portable/PATH) и эшелонированная валидация команд (D-037) |
 
 ## Интернет и Windows
 
@@ -68,6 +69,7 @@
 | `live.py` | независимая state machine Live, streaming TTS, barge-in и разделение generated/spoken; cancellation event ставится до audio stop, произнесённым считается только непрерывный завершённый префикс |
 | `turn_detection.py` | чистое накопление Vosk partial/final сегментов и hybrid turn detector по транскрипту, VAD и времени тишины |
 | `speech_text.py` | русское произношение чисел, дат и времени |
+| `audio_routing.py` | маршрутизация аудиопотоков, сопоставление устройств и отслеживание активного вывода Windows |
 | `media_buttons.py` | AVRCP/медиакнопка как опциональная активация |
 | `resilience.py` | bounded backoff повторяющихся ошибок |
 | `scripts/audio_capture_service.py` | единственный физический input stream, точные 10-мс near frames, аутентифицированные capture/render loopback-каналы, bounded queues и opt-in WebRTC AEC/NS |
