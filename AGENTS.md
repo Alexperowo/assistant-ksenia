@@ -102,6 +102,32 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/check.ps1
 
 Физический микрофон, динамик, Bluetooth, сенсор наушников и телефон проверяет Александр. Это не разрешает заменять доступные программные проверки ручными.
 
+## Правило COMPLETE и правило PRISM
+
+### COMPLETE Rule
+Never declare a task COMPLETE based only on a successful command, successful installation, or absence of an error.
+
+A task is COMPLETE only when:
+1. The requested change has actually been made.
+2. The real result matches the user's requirements and intended behavior.
+3. The result has been tested in the actual Ksenia environment and usage scenario.
+4. No relevant regression, conflict, or side effect has been found.
+
+If any of these points is not verified, use UNVERIFIED, PARTIAL, BLOCKED, or FAILED instead of COMPLETE.
+
+Before declaring COMPLETE, explicitly check:
+“What could still be wrong, and how can I prove it?”
+
+### PRISM Rule
+Before making an important decision or declaring success, evaluate the solution across the whole PRISM:
+- **P — Purpose**: Does this actually solve what the user wants?
+- **R — Reality**: Does it work in the real Ksenia environment, with the actual hardware, software, network, resources, and constraints?
+- **I — Integrity**: Does it preserve the existing project architecture and avoid breaking unrelated functionality?
+- **S — Side effects**: Could it introduce new problems, conflicts, unnecessary complexity, resource usage, or inconvenience for the user?
+- **M — Match**: Does the final result match the intended user experience, not merely the technical specification?
+
+A solution is not complete just because it passes one lens. Important decisions must be checked across the whole PRISM.
+
 ## Как оставить проект следующему исполнителю
 
 - `AUDIT.cmd` зелёный или причина красного результата явно записана.
