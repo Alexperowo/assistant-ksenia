@@ -69,6 +69,10 @@ for (const srv of [httpsServer, httpServer]) {
 
 // Dual HTTP/HTTPS Socket Sniffer
 const netServer = createNetServer((socket) => {
+  socket.on('error', (_err) => {
+    // Gracefully absorb client ECONNRESET / EPIPE from mobile browsers or network switches
+  });
+
   socket.once('data', (buf) => {
     socket.pause();
     socket.unshift(buf);
@@ -82,7 +86,14 @@ const netServer = createNetServer((socket) => {
 });
 
 netServer.on('error', (err) => {
-  console.error('[Ксения Gateway] Ошибка сокета:', err);
+  console.error('[Ксения Gateway] Ошибка сокета сервера:', err);
+});
+
+process.on('uncaughtException', (err) => {
+  if (['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'ERR_STREAM_DESTROYED'].includes(err.code)) {
+    return;
+  }
+  console.error('[Ксения Gateway] Предупреждение:', err.message);
 });
 
 netServer.listen(GATEWAY_PORT, '0.0.0.0', () => {
