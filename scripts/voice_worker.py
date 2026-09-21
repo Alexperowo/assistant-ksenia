@@ -422,6 +422,16 @@ def main() -> int:
                 letter_count >= 80
                 and audio_duration_ms - leading_silence_ms < letter_count * 25
             )
+            output_wav = str(command.get("output_wav", "")).strip()
+            should_play = bool(command.get("play", True))
+            if output_wav:
+                try:
+                    out_path = Path(output_wav)
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    import shutil
+                    shutil.copyfile(wav_path, out_path)
+                except Exception as copy_exc:
+                    append_worker_log(log_path, f"Ошибка сохранения output_wav {output_wav}: {copy_exc!r}\n")
             try:
                 if request_id:
                     print(
@@ -437,16 +447,20 @@ def main() -> int:
                                 "audio_suspiciously_short": suspiciously_short,
                                 "leading_silence_ms": leading_silence_ms,
                                 "playback_backend": playback_backend,
-                                "output_route": controller.output_route,
+                                "output_route": controller.output_route if should_play else "file",
                             }
                         ),
                         flush=True,
                     )
-                playback_started_at = time.monotonic()
-                succeeded = controller.play(wav_path, generation)
-                playback_seconds = time.monotonic() - playback_started_at
-                cancelled = generation != controller.generation()
-                last_playback_at = time.monotonic()
+                if should_play:
+                    playback_started_at = time.monotonic()
+                    succeeded = controller.play(wav_path, generation)
+                    playback_seconds = time.monotonic() - playback_started_at
+                    cancelled = generation != controller.generation()
+                    last_playback_at = time.monotonic()
+                else:
+                    succeeded = True
+                    cancelled = False
             finally:
                 wav_path.unlink(missing_ok=True)
         except Exception as exc:  # pragma: no cover - depends on audio device/model

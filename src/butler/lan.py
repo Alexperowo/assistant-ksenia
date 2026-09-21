@@ -59,6 +59,7 @@ class LanTask:
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
     revision: int = 0
+    tts_mode: str = ""
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -73,6 +74,8 @@ class LanTask:
             "updated_at": self.updated_at,
             "revision": self.revision,
             "done": self.status in {"Готово", "Ошибка", "Отменено"},
+            "tts_mode": self.tts_mode,
+            "audio_url": f"/api/tasks/{self.id}/audio" if self.status == "Готово" and self.answer else "",
         }
 
 
@@ -82,13 +85,14 @@ class LanTaskStore:
         self._lock = threading.Lock()
         self.journal = journal
 
-    def create(self, message: str) -> LanTask:
+    def create(self, message: str, tts_mode: str = "") -> LanTask:
         journal_task = (
             self.journal.create(message, channel="lan") if self.journal else None
         )
         task = LanTask(
             id=journal_task.id if journal_task else uuid.uuid4().hex,
             message=message,
+            tts_mode=tts_mode,
         )
         task.events.append({"status": task.status, "at": task.created_at})
         with self._lock:
@@ -210,6 +214,7 @@ class LanTaskStore:
                         TaskState.PLANNING,
                         TaskState.RUNNING,
                         TaskState.VERIFYING,
+                        TaskState.WAITING_CONFIRMATION,
                     },
                 )
             except ValueError as exc:
@@ -286,7 +291,7 @@ class LanApplication:
         self.task_journal = DurableTaskStore(settings.runtime_dir)
         self.store = LanTaskStore(self.task_journal)
         self._queue: queue.Queue[str] = queue.Queue()
-        self._session = RoutedAgentSession(settings)
+        self._session = RoutedAgentSession(settings, speech=self.speech)
         self._confirmation_lock = threading.Lock()
         self._confirmations: dict[str, dict[str, Any]] = {}
         self._auth_lock = threading.Lock()
@@ -328,8 +333,8 @@ class LanApplication:
             )
             return allowed
 
-    def submit(self, message: str) -> dict[str, Any]:
-        task = self.store.create(message)
+    def submit(self, message: str, tts_mode: str = "") -> dict[str, Any]:
+        task = self.store.create(message, tts_mode=tts_mode)
         self._queue.put(task.id)
         diagnostic_event(
             self.settings,
@@ -339,6 +344,7 @@ class LanApplication:
             trace_id=task.id,
             turn_id=task.id,
             message=message,
+            tts_mode=tts_mode,
             queue_size=self._queue.qsize(),
         )
         return task.snapshot()
@@ -524,7 +530,18 @@ class LanApplication:
                     turn_id=task_id,
                     task_id=task_id,
                 ):
-                    self.speech.say(reply.text)
+                    audio_dir = self.settings.root / "runtime" / "voice" / "tasks"
+                    audio_dir.mkdir(parents=True, exist_ok=True)
+                    task_wav = audio_dir / f"{task_id}.wav"
+                    mode = str(task.get("tts_mode", "")).strip().casefold()
+                    if mode in {"android", "off"}:
+                        pass
+                    elif mode == "silero_phone":
+                        self.speech.synthesize(reply.text, task_wav, play=False, wait=True)
+                    elif mode == "pc":
+                        self.speech.say(reply.text, output_wav=task_wav, play=True)
+                    else:
+                        self.speech.say(reply.text, output_wav=task_wav, play=True)
             except TaskCancelled:
                 diagnostic_event(
                     self.settings,
@@ -542,7 +559,7 @@ class LanApplication:
                     task_id=task_id,
                 ):
                     self.speech.say("Задача отменена.")
-            except (ChatError, ModelManagerError, OSError, KeyError) as exc:
+            except Exception as exc:
                 diagnostic_exception(
                     self.settings,
                     "lan",
@@ -650,7 +667,7 @@ class ButlerLanHandler(BaseHTTPRequestHandler):
         if path == "/":
             self._send_page()
             return
-        if path in {"/manifest.webmanifest", "/manifest.json"}:
+        if path in {"/manifest.webmanifest", "/manifest.json", "/site.webmanifest"}:
             self._send_static(
                 self.server.app.settings.root / "web" / "manifest.webmanifest",
                 "application/manifest+json; charset=utf-8",
@@ -685,8 +702,10 @@ class ButlerLanHandler(BaseHTTPRequestHandler):
                 "public, max-age=86400",
             )
             return
-        if path in {"/openhands-ca.crt", "/ca.crt"}:
-            ca_path = self.server.app.settings.root / "certs" / "openhands-ca.crt"
+        if path in {"/ksenia-ca.crt", "/openhands-ca.crt", "/ca.crt"}:
+            ca_path = self.server.app.settings.root / "certs" / "ksenia-ca.crt"
+            if not ca_path.is_file():
+                ca_path = self.server.app.settings.root / "certs" / "openhands-ca.crt"
             pwa_env = os.environ.get("OPENHANDS_PWA_DIR", "")
             if not ca_path.is_file() and pwa_env:
                 ca_path = Path(pwa_env) / "certs" / "openhands-ca.crt"
@@ -707,7 +726,28 @@ class ButlerLanHandler(BaseHTTPRequestHandler):
             if not self._authorized():
                 self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "Неверный PIN"})
                 return
-            task_id = path.rsplit("/", 1)[-1]
+            parts = path.strip("/").split("/")
+            if len(parts) == 4 and parts[3] == "audio":
+                task_id = parts[2]
+                task = self.server.app.store.get(task_id)
+                if task is None:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"error": "Задача не найдена"})
+                    return
+                audio_path = (
+                    self.server.app.settings.root / "runtime" / "voice" / "tasks" / f"{task_id}.wav"
+                )
+                if not audio_path.is_file() and task.get("answer"):
+                    self.server.app.speech.synthesize(
+                        task["answer"], audio_path, play=False, wait=True
+                    )
+                if audio_path.is_file():
+                    self._send_static(audio_path, "audio/wav", "public, max-age=3600")
+                    return
+                self._send_json(
+                    HTTPStatus.NOT_FOUND, {"error": "Аудиозапись ещё не готова"}
+                )
+                return
+            task_id = parts[-1]
             task = self.server.app.store.get(task_id)
             if task is None:
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "Задача не найдена"})
@@ -735,10 +775,43 @@ class ButlerLanHandler(BaseHTTPRequestHandler):
                 return
             value = self._read_json()
             message = str((value or {}).get("message", "")).strip()
+            tts_mode = str((value or {}).get("tts_mode", "")).strip()
             if not message or len(message) > 12000:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Введите сообщение"})
                 return
-            self._send_json(HTTPStatus.ACCEPTED, self.server.app.submit(message))
+            self._send_json(
+                HTTPStatus.ACCEPTED,
+                self.server.app.submit(message, tts_mode=tts_mode),
+            )
+            return
+        if path == "/api/tts":
+            if not self._authorized():
+                self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "Неверный PIN"})
+                return
+            value = self._read_json()
+            text = str((value or {}).get("text", "")).strip()
+            if not text:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Пустой текст"})
+                return
+            audio_dir = self.server.app.settings.root / "runtime" / "voice" / "temp"
+            audio_dir.mkdir(parents=True, exist_ok=True)
+            out_wav = audio_dir / f"tts-{uuid.uuid4().hex}.wav"
+            ok = self.server.app.speech.synthesize(text, out_wav, play=False, wait=True)
+            if ok and out_wav.is_file():
+                try:
+                    payload = out_wav.read_bytes()
+                finally:
+                    out_wav.unlink(missing_ok=True)
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Ошибка синтеза речи"}
+            )
             return
         if path.startswith("/api/tasks/") and path.endswith("/confirmation"):
             if not self._authorized():

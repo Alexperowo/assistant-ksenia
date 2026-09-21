@@ -85,6 +85,17 @@ def exclusive_file_lock(target: Path, *, timeout: float = 10.0) -> Iterator[None
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
+def _safe_replace(source: Path, destination: Path) -> None:
+    for attempt in range(6):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt == 5:
+                raise
+            time.sleep(0.025 * (attempt + 1))
+
+
 def atomic_write_text(
     target: Path,
     content: str,
@@ -111,7 +122,7 @@ def atomic_write_text(
                 os.fsync(stream.fileno())
             if mode is not None:
                 os.chmod(temporary, mode)
-            os.replace(temporary, target)
+            _safe_replace(temporary, target)
         except BaseException:
             try:
                 temporary.unlink(missing_ok=True)
@@ -145,7 +156,7 @@ def atomic_copy_file(source: Path, target: Path) -> None:
                 output_stream.flush()
                 os.fsync(output_stream.fileno())
             shutil.copystat(source, temporary)
-            os.replace(temporary, target)
+            _safe_replace(temporary, target)
         except BaseException:
             try:
                 temporary.unlink(missing_ok=True)

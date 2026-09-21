@@ -53,6 +53,8 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(assistant_mode_command("Переключись на thinking"), "thinking")
         self.assertEqual(assistant_mode_command("Режим thinking"), "thinking")
         self.assertEqual(assistant_mode_command("Режим рассуждения"), "thinking")
+        self.assertEqual(assistant_mode_command("Переключись на медленное рассуждение"), "thinking")
+        self.assertEqual(assistant_mode_command("Включи глубокое мышление"), "thinking")
 
         # Status queries
         self.assertEqual(assistant_mode_command("Какой режим дворецкого?"), "status")
@@ -548,6 +550,22 @@ class OrchestratorTests(unittest.TestCase):
         with self.assertRaises(ChatError) as ctx:
             session.ask("напиши код и запусти pytest в workspace")
         self.assertIn("Выполняется фоновый поиск", str(ctx.exception))
+
+    def test_desktop_inspection_query_and_audio_routing(self):
+        settings = load_settings()
+        session = RoutedAgentSession(settings)
+        self.assertFalse(session._is_exclusive_task("Переключись на динамики."))
+        self.assertFalse(session._is_exclusive_task("Что у меня сейчас на экране компьютера?"))
+        self.assertFalse(session._is_exclusive_task("Какое сейчас рассуждение?"))
+
+        reply_audio = session.ask("Переключись на динамики.")
+        self.assertIn("динамики", reply_audio.text.lower())
+
+        reply_mode = session.ask("Какое сейчас рассуждение?")
+        self.assertIn("режим", reply_mode.text.lower())
+
+        reply_screen = session.ask("Что у меня сейчас на экране компьютера?")
+        self.assertTrue(len(reply_screen.text) > 0)
 
 
 if __name__ == "__main__":

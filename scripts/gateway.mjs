@@ -8,8 +8,13 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
 
-const crtPath = join(projectRoot, 'certs', 'openhands-lan.crt');
-const keyPath = join(projectRoot, 'certs', 'openhands-lan.key');
+const kseniaCrt = join(projectRoot, 'certs', 'ksenia-lan.crt');
+const kseniaKey = join(projectRoot, 'certs', 'ksenia-lan.key');
+const openhandsCrt = join(projectRoot, 'certs', 'openhands-lan.crt');
+const openhandsKey = join(projectRoot, 'certs', 'openhands-lan.key');
+
+const crtPath = existsSync(kseniaCrt) ? kseniaCrt : openhandsCrt;
+const keyPath = existsSync(kseniaKey) ? kseniaKey : openhandsKey;
 
 if (!existsSync(crtPath) || !existsSync(keyPath)) {
   console.error('[Gateway] Сертификаты не найдены в certs/');
@@ -54,6 +59,18 @@ const httpsServer = createHttpsServer({ cert, key, minVersion: 'TLSv1.2' }, (req
 });
 
 const httpServer = createHttpServer((req, res) => {
+  const accept = req.headers.accept || '';
+  const isHtmlNavigation = (req.method === 'GET' && (req.url === '/' || req.url.startsWith('/?') || accept.includes('text/html')));
+  if (isHtmlNavigation) {
+    const host = req.headers.host || `192.168.0.14:${GATEWAY_PORT}`;
+    const targetUrl = `https://${host}${req.url}`;
+    res.writeHead(302, {
+      'Location': targetUrl,
+      'Content-Type': 'text/plain; charset=utf-8',
+    });
+    res.end(`Перенаправление на защищённое соединение: ${targetUrl}`);
+    return;
+  }
   handleProxy(req, res, 'http');
 });
 

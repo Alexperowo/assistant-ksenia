@@ -496,6 +496,8 @@ class SpeechAnnouncer:
         wait: bool = False,
         original_text: str | None = None,
         on_complete: SpeechCompletionCallback | None = None,
+        output_wav: str | Path | None = None,
+        play: bool = True,
     ) -> bool:
         waiter = threading.Event() if wait else None
         result: dict[str, bool] = {}
@@ -515,17 +517,17 @@ class SpeechAnnouncer:
                 on_complete=on_complete,
                 trace_fields=current_trace_fields(),
             )
+            payload: dict[str, object] = {
+                "text": text,
+                "speaker": speaker or self.speaker,
+                "id": request_id,
+                "play": play,
+            }
+            if output_wav is not None:
+                payload["output_wav"] = str(output_wav)
             try:
                 self._worker.stdin.write(
-                    json.dumps(
-                        {
-                            "text": text,
-                            "speaker": speaker or self.speaker,
-                            "id": request_id,
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
+                    json.dumps(payload, ensure_ascii=False) + "\n"
                 )
                 self._worker.stdin.flush()
                 diagnostic_event(
@@ -536,6 +538,8 @@ class SpeechAnnouncer:
                     wait=wait,
                     speaker=speaker or self.speaker,
                     spoken_chars=len(text),
+                    output_wav=str(output_wav) if output_wav is not None else "",
+                    play=play,
                 )
             except (BrokenPipeError, OSError):
                 if request_id:
@@ -751,7 +755,47 @@ class SpeechAnnouncer:
                 silero_running=worker is not None and worker.poll() is None,
             )
 
-    def say(self, text: str) -> None:
+    def synthesize(
+        self,
+        text: str,
+        output_wav: str | Path,
+        *,
+        play: bool = False,
+        speaker: str | None = None,
+        wait: bool = True,
+    ) -> bool:
+        if not self.enabled or not text.strip():
+            return False
+        spoken_text = normalize_for_speech(text)
+        if not spoken_text.strip():
+            return False
+        diagnostic_event(
+            self.diagnostics_source,
+            "tts",
+            "synthesize_request",
+            speaker=speaker or self.speaker,
+            output_wav=str(output_wav),
+            play=play,
+            wait=wait,
+            **_speech_metadata(text, spoken_text),
+        )
+        return self._send_silero(
+            spoken_text,
+            speaker=speaker,
+            wait=wait,
+            original_text=text,
+            output_wav=output_wav,
+            play=play,
+        )
+
+    def say(
+        self,
+        text: str,
+        *,
+        output_wav: str | Path | None = None,
+        play: bool = True,
+        wait: bool = False,
+    ) -> None:
         if not self.enabled or not text.strip() or not self.script.exists():
             return
         spoken_text = normalize_for_speech(text)
@@ -761,10 +805,17 @@ class SpeechAnnouncer:
             "request_prepared",
             engine=self.engine,
             speaker=self.speaker,
-            wait=False,
+            wait=wait,
+            output_wav=str(output_wav) if output_wav is not None else "",
+            play=play,
             **_speech_metadata(text, spoken_text),
         )
-        if self._send_silero(spoken_text):
+        if self._send_silero(
+            spoken_text,
+            output_wav=output_wav,
+            play=play,
+            wait=wait,
+        ):
             return
         if self.is_pcm_playback:
             diagnostic_event(

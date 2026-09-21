@@ -92,14 +92,20 @@ def parse_audio_output_command(text: str) -> str | None:
         "вывод",
         "переключи",
         "переключить",
+        "переключись",
         "переведи",
         "перевести",
+        "переведись",
         "выведи",
         "вывести",
+        "выводи",
         "включи",
         "включить",
         "говори",
         "играй",
+        "звучи",
+        "вруби",
+        "поставь",
     )
     has_action = any(act in normalized for act in action_keywords)
     has_preposition = normalized.startswith(("на ", "в ")) or " на " in normalized or " в " in normalized

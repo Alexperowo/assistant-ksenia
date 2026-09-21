@@ -16,6 +16,7 @@ from butler.agent import (
     FinalDeltaCallback,
     StatusCallback,
 )
+from butler.audio_routing import execute_audio_output_command, parse_audio_output_command
 from butler.background_research import (
     BackgroundResearchManager,
     is_research_cancel_command,
@@ -43,6 +44,7 @@ from butler.research import (
     is_web_research_request,
     select_research_mode,
 )
+from butler.speech import SpeechAnnouncer
 from butler.tasking import DurableTaskStore, TaskCancelled, TaskControl
 from butler.tools import ToolResult, tool_schemas
 from butler.trusted_task import (
@@ -51,6 +53,7 @@ from butler.trusted_task import (
     TrustedTaskStore,
 )
 from butler.weather import extract_weather_location
+from butler.windows_bridge import active_window, list_windows
 
 
 PLANNING_HINTS = (
@@ -157,6 +160,12 @@ DIRECT_CONVERSATION_BLOCKERS = (
     "рендер",
     "видео",
     "фильм",
+    "диск",
+    "мест",
+    "памят",
+    "процесс",
+    "папк",
+    "директ",
 )
 
 
@@ -200,6 +209,10 @@ def assistant_mode_command(text: str) -> str | None:
         r"^текущий\s+режим$",
         r"^статус\s+режима$",
         r"^в\s+каком\s+(?:ты\s+)?режиме$",
+        r"^какое\s+(?:сейчас\s+)?рассуждение$",
+        r"^какой\s+(?:сейчас\s+)?режим\s+рассуждения$",
+        r"^статус\s+рассуждения$",
+        r"^(?:включено|активно)\s+ли\s+рассуждение$",
     )
     if any(re.search(p, normalized) for p in status_patterns):
         return "status"
@@ -219,13 +232,74 @@ def assistant_mode_command(text: str) -> str | None:
         return "fast"
 
     switch_to_thinking = (
-        r"^(?:включи|переключи(?:сь)?(?:\s+(?:в|на))?|активируй)\s+(?:режим\s+)?(?:thinking|reasoning|рассуждени[яйе]?|мышлени[яйе]?)$",
+        r"^(?:включи|переключи(?:сь)?(?:\s+(?:в|на))?|активируй)\s+(?:режим\s+)?(?:медленн[оы][ей]|глубок[ои][ей]|длинн[оы][ей])?\s*(?:thinking|reasoning|рассуждени[яйе]?|мышлени[яйе]?)$",
         r"^(?:режим\s+)?(?:thinking|reasoning)$",
         r"^режим\s+(?:рассуждени[яйе]|мышлени[яйе])$",
+        r"^(?:медленн[оы][ей]|глубок[ои][ей])\s+(?:режим|рассуждени[яйе]|мышлени[яйе])$",
     )
     if any(re.search(p, normalized) for p in switch_to_thinking):
         return "thinking"
 
+    return None
+
+
+def desktop_inspection_query(text: str) -> str | None:
+    tokens = re.findall(r"[а-яёa-z0-9]+", text.casefold().replace("ё", "е"))
+    if not tokens:
+        return None
+    while tokens and tokens[0] in {"ксения", "сеня", "пожалуйста", "скажи", "подскажи"}:
+        tokens = tokens[1:]
+    if not tokens:
+        return None
+    normalized = " ".join(tokens)
+
+    patterns = (
+        r"^(?:что\s+)?(?:у\s+меня\s+)?(?:сейчас\s+)?на\s+экране(?:\s+компьютера)?$",
+        r"^что\s+(?:сейчас\s+)?на\s+мониторе$",
+        r"^(?:какие\s+)?(?:окна|программы|приложения)\s+(?:сейчас\s+)?открыты$",
+        r"^что\s+(?:сейчас\s+)?открыто(?:\s+на\s+компьютере|\s+на\s+экране)?$",
+        r"^какое\s+(?:сейчас\s+)?(?:окно\s+)?активно(?:е)?(?:\s+окно)?$",
+        r"^какое\s+(?:сейчас\s+)?активное\s+окно$",
+        r"^(?:посмотри|взгляни|проверь)\s+(?:на\s+)?экран$",
+    )
+    if any(re.search(p, normalized) for p in patterns):
+        try:
+            active = active_window()
+            active_title = active.get("title", "").strip()
+        except Exception:
+            active_title = ""
+
+        try:
+            windows = list_windows()
+        except Exception:
+            windows = []
+
+        ignored_titles = {"program manager", "setup", ""}
+        filtered = [
+            w["title"].strip()
+            for w in windows
+            if w.get("title", "").strip()
+            and w["title"].strip().casefold() not in ignored_titles
+        ]
+
+        seen = set()
+        unique_titles = []
+        for t in filtered:
+            if t not in seen:
+                seen.add(t)
+                unique_titles.append(t)
+
+        if active_title and active_title.casefold() not in ignored_titles:
+            other_windows = [t for t in unique_titles if t != active_title]
+            if other_windows:
+                others_str = ", ".join(f"«{t}»" for t in other_windows[:5])
+                return f"Сейчас активно окно «{active_title}». Также на экране открыты: {others_str}."
+            return f"Сейчас на экране активно окно «{active_title}». Других окон не открыто."
+        elif unique_titles:
+            windows_str = ", ".join(f"«{t}»" for t in unique_titles[:6])
+            return f"На экране открыты следующие окна: {windows_str}."
+        else:
+            return "На экране сейчас активен рабочий стол, открытых окон приложений нет."
     return None
 
 PLANNING_TOOLS = {
@@ -312,8 +386,13 @@ def bounded_tool_payload(result: ToolResult, *, max_chars: int) -> str:
 class RoutedAgentSession:
     """Route one shared session through resident, research and primary model tiers."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        speech: SpeechAnnouncer | None = None,
+    ) -> None:
         self.settings = settings
+        self.speech = speech
         self.manager = ModelManager(settings)
         self.session = AgentSession(settings)
         self.residency = ModelResidencyCoordinator(settings)
@@ -955,6 +1034,10 @@ class RoutedAgentSession:
             return True
         if assistant_mode_command(text) is not None:
             return False
+        if parse_audio_output_command(text) is not None:
+            return False
+        if desktop_inspection_query(text) is not None:
+            return False
         if fast_intent_reply(text) is not None:
             return False
         active_mode = self._assistant_mode_override or self.settings.assistant_mode()
@@ -1298,6 +1381,41 @@ class RoutedAgentSession:
             if on_final_delta is not None:
                 on_final_delta(resume_reply)
             return AgentReply(resume_reply, ())
+        audio_output_cmd = parse_audio_output_command(text)
+        if audio_output_cmd is not None:
+            speech_announcer = self.speech or SpeechAnnouncer(self.settings.root, enabled=False)
+            reply = execute_audio_output_command(
+                audio_output_cmd,
+                settings=self.settings,
+                speech=speech_announcer,
+            )
+            self.session.record_exchange(text, reply)
+            if on_final_delta is not None:
+                on_final_delta(reply)
+            if task_id:
+                self.handoffs.append(task_id, "assistant", "result", reply)
+            diagnostic_event(
+                self.settings,
+                "orchestrator",
+                "audio_routing_completed",
+                command=audio_output_cmd,
+                answer=reply,
+            )
+            return AgentReply(reply, ())
+        desktop_summary = desktop_inspection_query(text)
+        if desktop_summary is not None:
+            self.session.record_exchange(text, desktop_summary)
+            if on_final_delta is not None:
+                on_final_delta(desktop_summary)
+            if task_id:
+                self.handoffs.append(task_id, "assistant", "result", desktop_summary)
+            diagnostic_event(
+                self.settings,
+                "orchestrator",
+                "desktop_inspection_completed",
+                answer=desktop_summary,
+            )
+            return AgentReply(desktop_summary, ())
         fast_reply = fast_intent_reply(text)
         routing = self.settings.raw.get("routing", {})
         fast_lookup_signals = routing.get("fast_lookup_signals", ())

@@ -253,6 +253,20 @@ class LanTaskStoreTests(unittest.TestCase):
         self.assertTrue(all(a.startswith("https://") for a in addrs))
         self.assertTrue(all(":8443" in a for a in addrs))
 
+    def test_lan_task_tts_mode_and_audio_url(self):
+        store = LanTaskStore()
+        task = store.create("Тест задачи", tts_mode="silero_phone")
+        self.assertEqual(task.tts_mode, "silero_phone")
+        snap = task.snapshot()
+        self.assertEqual(snap["tts_mode"], "silero_phone")
+        self.assertEqual(snap["audio_url"], "")
+        
+        # When task is done with answer
+        store.update(task.id, "Готово", answer="Ответ задачи")
+        snap_done = store.get(task.id)
+        self.assertTrue(snap_done["done"])
+        self.assertEqual(snap_done["audio_url"], f"/api/tasks/{task.id}/audio")
+
     def test_static_pwa_assets_exist(self):
         project_root = Path(__file__).resolve().parents[1]
         self.assertTrue((project_root / "web" / "manifest.webmanifest").is_file())
@@ -260,6 +274,8 @@ class LanTaskStoreTests(unittest.TestCase):
         self.assertTrue((project_root / "web" / "icon.svg").is_file())
         self.assertTrue((project_root / "web" / "icon-192x192.png").is_file())
         self.assertTrue((project_root / "web" / "icon-512x512.png").is_file())
+        self.assertTrue((project_root / "certs" / "ksenia-ca.crt").is_file())
+        self.assertTrue((project_root / "certs" / "ksenia-lan.crt").is_file())
 
 
 if __name__ == "__main__":
