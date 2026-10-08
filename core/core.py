@@ -23,9 +23,9 @@ from aiohttp import web
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-from tools import music  # noqa: E402  (инструменты — отдельные модули в core/tools)
+from tools import music, screen  # noqa: E402  (инструменты — отдельные модули в core/tools)
 
-TOOL_MODULES = [music]
+TOOL_MODULES = [music, screen]
 TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
 TOOL_INDEX = {sch["function"]["name"]: m for m in TOOL_MODULES for sch in m.SCHEMAS}
 
@@ -80,6 +80,28 @@ def split_first_sentence(buf: str, min_len: int = 12):
         if len(buf[:end].strip()) >= min_len and (m.group(0).strip() == "" or end < len(buf)):
             return buf[:end].strip(), buf[end:]
     return None, buf
+
+
+def split_for_reading(text: str, max_len: int = 220):
+    """Длинный текст -> куски по предложениям (одна озвучка s2 — не больше ~45 с звука)."""
+    parts, cur = [], ""
+    for sent in re.split(r"(?<=[.!?…])\s+|\n+", text):
+        sent = sent.strip()
+        if not sent:
+            continue
+        while len(sent) > max_len:  # очень длинное предложение режем по запятым/пробелам
+            cut = max(sent.rfind(", ", 0, max_len), sent.rfind(" ", 0, max_len))
+            cut = cut if cut > max_len // 3 else max_len
+            parts.append((cur + " " + sent[:cut]).strip()) if cur else parts.append(sent[:cut].strip())
+            cur, sent = "", sent[cut:].lstrip(", ")
+        if len(cur) + len(sent) + 1 > max_len and cur:
+            parts.append(cur)
+            cur = sent
+        else:
+            cur = (cur + " " + sent).strip()
+    if cur:
+        parts.append(cur)
+    return parts
 
 
 def pick_output_sink():
@@ -271,7 +293,12 @@ class Ksenia:
             for c in calls:
                 result = await run_tool(c["function"]["name"], c["function"].get("arguments") or "{}", self.session)
                 any_error = any_error or not result.get("ok", False)
-                log.info("Инструмент %s(%s) -> %s", c["function"]["name"], c["function"].get("arguments"), result)
+                log.info("Инструмент %s(%s) -> %s", c["function"]["name"], c["function"].get("arguments"),
+                         {k: (v[:200] + "…" if isinstance(v, str) and len(v) > 200 else v) for k, v in result.items()})
+                if result.get("speak_verbatim"):
+                    # дословное чтение: текст идёт прямо в голос кусками по предложениям, без пересказа мозгом
+                    for part in split_for_reading(result["speak_verbatim"]):
+                        await queue.put(part)
                 self.history.append({"role": "tool", "tool_call_id": c.get("id", ""),
                                      "content": json.dumps(result, ensure_ascii=False)})
             # после инструмента — подумать чуть больше; после ошибки — ещё больше
