@@ -6,6 +6,7 @@
 программно (Action), текст вписывается через EditableText — без координат мыши.
 """
 import json
+import re
 import sys
 
 import gi
@@ -71,7 +72,7 @@ def norm(s):
     return " ".join((s or "").lower().replace("ё", "е").replace("&", "").split())
 
 
-def find(win, name, want_editable=False):
+def find(win, name, want_editable=False, exact=False):
     q = norm(name)
     best, best_score = None, 0
     for node in walk(win):
@@ -87,6 +88,8 @@ def find(win, name, want_editable=False):
             score = 1 if (want_editable and inf["focused"]) else 0
         elif nm == q:
             score = 3
+        elif exact:
+            score = 0
         elif nm.startswith(q) or q in nm:
             score = 2
         elif all(w in nm for w in q.split()):
@@ -131,6 +134,8 @@ def text_of(node):
 
 
 def main():
+    # имена из чужих программ бывают с битыми символами (суррогаты): print не должен падать на всём списке
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     cmd = sys.argv[1]
     args = json.loads(sys.stdin.read() or "{}")
     Atspi.init()
@@ -160,17 +165,31 @@ def main():
                 break
         print(json.dumps({"ok": True, "app": appname, "window": title, "elements": items}, ensure_ascii=False))
     elif cmd == "click":
-        node = find(win, args.get("name", ""))
+        if args.get("expect_window") is not None and title != args["expect_window"]:
+            print(json.dumps({"ok": False, "error": f"активно уже другое окно («{title}») — нажимать не стала"},
+                             ensure_ascii=False))
+            return
+        node = find(win, args.get("name", ""), exact=bool(args.get("exact")))
         if not node:
             print(json.dumps({"ok": False, "error": f"не нашла «{args.get('name')}» в окне «{title}»"}, ensure_ascii=False))
             return
-        inf = info(node)
+        inf = info(node) or {"name": "", "role": ""}
+        if args.get("risky") and re.search(args["risky"], f"{args.get('name', '')} {inf['name']}", re.I):
+            # рискованная кнопка: не нажимаем, ядро спросит Александра и пришлёт точное имя и окно
+            print(json.dumps({"ok": False, "needs_confirm": True, "matched": inf["name"], "role": inf["role"],
+                              "window": title}, ensure_ascii=False))
+            return
         ok = do_action(node)
         print(json.dumps({"ok": ok, "clicked": inf["name"], "role": inf["role"], "window": title}, ensure_ascii=False))
     elif cmd == "type":
         node = find(win, args.get("field", ""), want_editable=True)
         if not node:
             print(json.dumps({"ok": False, "error": "не нашла поле для ввода"}, ensure_ascii=False))
+            return
+        if (info(node) or {}).get("role") == "terminal" or "konsole" in appname.lower() or "terminal" in appname.lower():
+            # терминал — только проверенные команды (принцип проекта), вписывать туда текст нельзя
+            print(json.dumps({"ok": False, "error": "в терминал я не печатаю: команды там — только проверенные"},
+                             ensure_ascii=False))
             return
         try:
             node.grab_focus()

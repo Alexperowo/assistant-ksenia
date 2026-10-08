@@ -1,0 +1,109 @@
+/* Ксения на планшете: тёмная тема с высоким контрастом, крупный шрифт, большие цели касания.
+   Цвет — не единственный признак: у каждого состояния есть слово, значок формы, звук и вибрация. */
+:root {
+  --font: 26px;
+  --bg: #000;
+  --fg: #fff;
+  --muted: #d0d0d0;
+  --panel: #111;
+  --line: #9a9a9a;
+  --focus: #ffd400;
+  --talk: #ffd400;
+  --talk-fg: #000;
+  --yes: #33d17a;
+  --no: #ff6b6b;
+  --listening: #33d17a;
+  --thinking: #6cb4ff;
+  --speaking: #ffd400;
+  --offline: #ff6b6b;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  /* светлую тему не навязываем, но и не ломаем: контраст тот же */
+  :root:not([data-theme="dark"]) { --bg: #fff; --fg: #000; --muted: #222; --panel: #f2f2f2; --line: #555;
+    --focus: #0039a6; --talk: #000; --talk-fg: #ffd400; color-scheme: light; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--fg); }
+body {
+  font: var(--font)/1.4 system-ui, "Roboto", sans-serif;
+  padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+           max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  -webkit-text-size-adjust: 100%;
+  touch-action: manipulation;
+}
+main { max-width: 1100px; margin: 0 auto; }
+[hidden] { display: none !important; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+:focus-visible { outline: 6px solid var(--focus); outline-offset: 4px; }
+h1 { font-size: 1.6em; margin: 0; }
+h2 { font-size: 1em; margin: 1em 0 .4em; color: var(--muted); }
+.lead { font-size: 1.1em; }
+
+/* состояние: слово + значок формы (круг/квадрат/треугольник/крест), не только цвет */
+.state { display: flex; align-items: center; gap: .6em; padding: .4em .6em; border: 3px solid var(--line);
+  border-radius: 18px; margin-bottom: .6em; }
+.state-mark { width: 1.2em; height: 1.2em; flex: none; background: var(--line); border-radius: 50%; }
+.state[data-state="listening"] { border-color: var(--listening); }
+.state[data-state="listening"] .state-mark { background: var(--listening); border-radius: 50%;
+  animation: pulse 1s ease-in-out infinite; }
+.state[data-state="thinking"] { border-color: var(--thinking); }
+.state[data-state="thinking"] .state-mark { background: var(--thinking); border-radius: 4px; animation: spin 1.6s linear infinite; }
+.state[data-state="speaking"] { border-color: var(--speaking); }
+.state[data-state="speaking"] .state-mark { background: var(--speaking); clip-path: polygon(0 0, 100% 50%, 0 100%); border-radius: 0; }
+.state[data-state="offline"] { border-color: var(--offline); }
+.state[data-state="offline"] .state-mark { background: var(--offline); border-radius: 0;
+  clip-path: polygon(20% 0, 50% 30%, 80% 0, 100% 20%, 70% 50%, 100% 80%, 80% 100%, 50% 70%, 20% 100%, 0 80%, 30% 50%, 0 20%); }
+@keyframes pulse { 50% { transform: scale(.7); } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .state-mark { animation: none !important; } }
+
+button { font: inherit; color: inherit; cursor: pointer; border-radius: 22px; border: 3px solid var(--line);
+  background: var(--panel); min-height: 64px; padding: .3em .8em; }
+button:active { transform: scale(.98); }
+.big { width: 100%; min-height: 96px; font-size: 1.25em; font-weight: 700; margin: .3em 0; }
+.small { min-height: 64px; font-size: .9em; margin: .3em .3em .3em 0; }
+
+/* главная кнопка: огромная, видна при лупе и на вытянутую руку */
+.talk { display: block; width: 100%; min-height: 34vh; font-size: 2.2em; font-weight: 800; margin: .3em 0;
+  background: var(--talk); color: var(--talk-fg); border: 6px solid var(--fg); border-radius: 36px; }
+.talk[aria-pressed="true"] { background: var(--listening); color: #000; }
+.talk:disabled { opacity: .5; }
+.hint { color: var(--muted); font-size: .85em; margin: 0 0 .4em; }
+.stop { background: var(--panel); border-color: var(--no); color: var(--fg); }
+
+.confirm { border: 5px solid var(--focus); border-radius: 24px; padding: .5em .7em; margin: .4em 0 .6em; background: var(--panel); }
+.confirm-q { font-size: 1.25em; font-weight: 700; margin: .2em 0 .5em; }
+.confirm-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: .5em; }
+.yes { background: var(--yes); color: #000; border-color: var(--fg); min-height: 140px; font-size: 1.6em; }
+.no { background: var(--no); color: #000; border-color: var(--fg); min-height: 140px; font-size: 1.6em; }
+
+.last { border-top: 3px solid var(--line); margin-top: .6em; padding-top: .3em; }
+.who { color: var(--muted); font-size: .8em; margin: .5em 0 0; }
+.said { font-size: 1.15em; margin: .1em 0; }
+.ksenia { font-size: 1.3em; font-weight: 600; }
+.history ol { list-style: none; padding: 0; margin: 0; }
+.history li { padding: .4em 0; border-bottom: 1px solid var(--line); }
+.history li .who { display: block; }
+
+.settings { margin-top: 1em; border-top: 3px solid var(--line); padding-top: .5em; }
+.settings summary { min-height: 64px; display: flex; align-items: center; font-weight: 700; cursor: pointer; }
+fieldset { border: 2px solid var(--line); border-radius: 16px; margin: .4em 0; }
+.option { display: flex; align-items: center; gap: .5em; min-height: 64px; }
+.option input { width: 40px; height: 40px; accent-color: var(--focus); }
+.font-buttons { display: flex; flex-wrap: wrap; }
+
+.pin-label { display: block; margin-top: 1em; font-weight: 700; }
+#pin { width: 100%; font: inherit; font-size: 1.6em; letter-spacing: .3em; text-align: center; min-height: 96px;
+  background: var(--bg); color: var(--fg); border: 4px solid var(--line); border-radius: 18px; margin: .2em 0; }
+.error { color: var(--no); font-weight: 700; min-height: 1.4em; }
+
+@media (orientation: landscape) and (min-width: 1000px) {
+  /* планшет лёжа: кнопка слева, разговор справа */
+  #app { display: grid; grid-template-columns: 1fr 1fr; column-gap: 1.2em; align-items: start; }
+  #app > .state, #app > .confirm { grid-column: 1 / -1; }
+  .talk { min-height: 52vh; }
+  #app > .last, #app > .history, #app > .settings { grid-column: 2; }
+  #app > .talk, #app > .hint, #app > .stop { grid-column: 1; }
+  #app > .last { grid-row: 3 / span 2; margin-top: 0; }
+}

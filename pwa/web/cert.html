@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ксения: подключить планшет</title>
+  <style>
+    body { margin: 0; padding: 20px; background: #000; color: #fff; font: 26px/1.45 system-ui, sans-serif; }
+    a.big { display: block; margin: 16px 0; padding: 28px; text-align: center; font-weight: 800; color: #000;
+      background: #ffd400; border-radius: 24px; text-decoration: none; }
+    a:focus-visible { outline: 6px solid #fff; outline-offset: 4px; }
+    li { margin: .5em 0; }
+  </style>
+</head>
+<body>
+  <h1>Подключить планшет к Ксении</h1>
+  <p>Один раз нужно установить сертификат Ксении — без него браузер не даст включить микрофон.</p>
+  <a class="big" href="/ksenia-ca.crt" download="ksenia-ca.crt">1. Скачать сертификат Ксении</a>
+  <ol start="2">
+    <li>Откройте «Настройки» планшета. В поиске настроек напишите «сертификат».</li>
+    <li>Выберите «Установить из памяти устройства» (или «Установка сертификатов»), затем «Сертификат ЦС».</li>
+    <li>Согласитесь с предупреждением и выберите файл «ksenia-ca.crt» в папке «Загрузки».</li>
+    <li>Вернитесь сюда и нажмите кнопку ниже.</li>
+  </ol>
+  <a class="big" href="{{https}}">5. Открыть Ксению</a>
+  <p>Адрес Ксении: {{https}}</p>
+  <p>В Chrome откройте меню (три точки) и выберите «Добавить на главный экран» — Ксения станет отдельным приложением.</p>
+</body>
+</html>

@@ -6,6 +6,8 @@
 import asyncio
 import os
 
+from tools import net_guard
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.normpath(os.path.join(ROOT, "..", "..", "data"))
 PROFILE = os.path.join(DATA, "browser-profile")
@@ -15,6 +17,13 @@ _pw = None
 _ctx = None
 _pages = {}
 _lock = asyncio.Lock()
+
+
+def _forget(*_):
+    """Chromium упал или закрылся: следующий вызов запустит его заново (раньше ядро держало мёртвый контекст)."""
+    global _ctx
+    _ctx = None
+    _pages.clear()
 
 
 async def context():
@@ -29,8 +38,12 @@ async def context():
         from playwright.async_api import async_playwright
         if _pw is None:
             _pw = await async_playwright().start()
+        # вся сеть браузера — через сторож: только публичные адреса, и на каждом шаге перенаправления
+        port = await net_guard.start()
         _ctx = await _pw.chromium.launch_persistent_context(
-            PROFILE, headless=True, locale="ru-RU", viewport={"width": 1280, "height": 900})
+            PROFILE, headless=True, locale="ru-RU", viewport={"width": 1280, "height": 900},
+            proxy=net_guard.browser_proxy(port))
+        _ctx.on("close", _forget)
         _pages.clear()
         return _ctx
 

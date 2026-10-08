@@ -11,7 +11,8 @@ import core
 class FakeSpeaker:
     instances = []
 
-    def __init__(self, session):
+    def __init__(self, session, output="local"):
+        self.output = output
         self.cancelled = False
         self.spoken = []
         self.finished = False

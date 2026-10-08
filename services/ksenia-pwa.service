@@ -1,0 +1,14 @@
+[Unit]
+Description=Ксения: шлюз планшета (PWA, HTTPS :18140 в домашней сети)
+After=ksenia-core.service ksenia-voice-in.service network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/user/Agents/Ksenia/pwa/run_pwa.sh
+Restart=on-failure
+RestartSec=10s
+StandardOutput=append:/home/user/Agents/Ksenia/logs/pwa.log
+StandardError=append:/home/user/Agents/Ksenia/logs/pwa.log
+
+[Install]
+WantedBy=default.target

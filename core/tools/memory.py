@@ -5,7 +5,10 @@
 """
 import json
 import os
+import re
 import time
+
+from tools import confirm
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 FILE = os.path.normpath(os.path.join(ROOT, "..", "..", "data", "memory.json"))
@@ -32,12 +35,16 @@ SCHEMAS = [
 def _load():
     try:
         with open(FILE, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except FileNotFoundError:
         return []
     except Exception:
         os.replace(FILE, FILE + time.strftime(".bad-%Y%m%d-%H%M%S"))
         return []
+    # файл правят руками: неверная структура не должна ронять ядро при старте (prompt_block в __init__)
+    if not isinstance(data, list):
+        return []
+    return [f for f in data if isinstance(f, dict) and isinstance(f.get("fact"), str) and f["fact"].strip()]
 
 
 def _save(facts):
@@ -64,6 +71,32 @@ def _norm(s):
 changed = {"flag": False}  # ядро смотрит: если память изменилась — обновить системную подсказку
 
 
+def _asked_to_remember():
+    """Александр сам сказал «запомни…» или ответил «да» на «Запомнить?» — решает ядро по его словам, не модель."""
+    ctx = confirm.CONTEXT
+    return not ctx.get("internal") and (ctx.get("affirmative") or re.search(r"запомн", ctx.get("user_text", "").lower()))
+
+
+async def _remember(fact):
+    facts = _load()
+    if any(_norm(f["fact"]) == _norm(fact) for f in facts):
+        return {"ok": True, "already": True}
+    facts.append({"fact": fact, "added": time.strftime("%Y-%m-%d")})
+    _save(facts)
+    changed["flag"] = True
+    return {"ok": True, "remembered": fact}
+
+
+async def _forget(texts):
+    facts = _load()
+    keep = [f for f in facts if f["fact"] not in texts]
+    removed = len(facts) - len(keep)
+    if removed:
+        _save(keep)
+        changed["flag"] = True
+    return {"ok": bool(removed), "forgotten": removed, **({} if removed else {"error": "такого не помню"})}
+
+
 async def call(name, args, session):
     facts = _load()
     if name == "memory_remember":
@@ -72,18 +105,22 @@ async def call(name, args, session):
             return {"ok": False, "error": "пустой факт"}
         if any(_norm(f["fact"]) == _norm(fact) for f in facts):
             return {"ok": True, "already": True}
-        facts.append({"fact": fact, "added": time.strftime("%Y-%m-%d")})
-        _save(facts)
-        changed["flag"] = True
-        return {"ok": True, "remembered": fact}
+        if not _asked_to_remember():
+            # факт навсегда попадает в системную подсказку: «запомнить» по подсказке со страницы или из
+            # сообщения ВК было бы долговременной подменой поведения — без слова Александра только с его «да»
+            return confirm.ask(f"запомнить: {fact}", lambda: _remember(fact), question=f"Запомнить: {fact}?")
+        return await _remember(fact)
     if name == "memory_forget":
         q = _norm(args.get("query"))
-        keep = [f for f in facts if not (q and all(w in _norm(f["fact"]) for w in q.split()))]
-        removed = len(facts) - len(keep)
-        if removed:
-            _save(keep)
-            changed["flag"] = True
-        return {"ok": bool(removed), "forgotten": removed, **({} if removed else {"error": "такого не помню"})}
+        hit = [f["fact"] for f in facts if q and all(w in _norm(f["fact"]) for w in q.split())]
+        if not hit:
+            return {"ok": False, "forgotten": 0, "error": "такого не помню"}
+        if len(hit) > 1:
+            # запрос из одной буквы стёр бы почти всю память; несколько фактов — только после «да»
+            listed = "; ".join(hit[:5]) + (f" и ещё {len(hit) - 5}" if len(hit) > 5 else "")
+            return confirm.ask(f"забыть {len(hit)} фактов", lambda: _forget(set(hit)),
+                               question=f"Забыть {len(hit)}: {listed}?")
+        return await _forget(set(hit))
     if name == "memory_list":
         return {"ok": True, "facts": [f["fact"] for f in facts]}
     return {"ok": False, "error": f"неизвестный инструмент {name}"}

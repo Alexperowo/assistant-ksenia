@@ -187,3 +187,35 @@ def test_window_never_empty_after_long_tool_chain(ks):
     w = ks._window()  # 13 > 10: прыжок на len-5 — это внутри цепочки инструментов, реплик пользователя дальше нет
     assert w and w[0]["role"] == "user" and w[0]["content"] == "u"
     assert ks._window() == w  # и окно стабильно
+
+
+def test_window_jumps_by_size(ks, monkeypatch):
+    monkeypatch.setitem(core.CONFIG, "history_max", 1000)
+    monkeypatch.setitem(core.CONFIG, "history_max_chars", 1000)
+    ks.history = [{"role": r, "content": "x" * 100} for r in ["user", "assistant"] * 6]  # 1200 символов
+    w = ks._window()
+    assert sum(len(m["content"]) for m in w) <= 600 and w[0]["role"] == "user"
+    start = ks.window_start
+    ks.history.append({"role": "user", "content": "y"})
+    assert ks._window()[0] is w[0] and ks.window_start == start  # дальше только дописывается
+
+
+def test_window_huge_last_message_keeps_last_user(ks, monkeypatch):
+    monkeypatch.setitem(core.CONFIG, "history_max_chars", 1000)
+    ks.history = [{"role": "user", "content": "u1"}, {"role": "assistant", "content": "a"},
+                  {"role": "user", "content": "прочитай"}, {"role": "tool", "content": "t" * 5000}]
+    w = ks._window()
+    assert w[0]["content"] == "прочитай"
+
+
+def test_server_disconnect_before_answer_is_retried_once(ks):
+    import aiohttp
+    lines = [sse({"content": "Повторила, всё хорошо."})]
+    ((content, _, failed), _), reqs = run_step(ks, aiohttp.ServerDisconnectedError(), FakeResponse(200, lines))
+    assert not failed and content == "Повторила, всё хорошо." and len(reqs) == 2
+
+
+def test_server_disconnect_twice_is_a_failure(ks):
+    import aiohttp
+    ((content, _, failed), items), reqs = run_step(ks, aiohttp.ServerDisconnectedError(), aiohttp.ServerDisconnectedError())
+    assert failed and len(reqs) == 2 and "Мозг не отвечает" in queued_text(items)

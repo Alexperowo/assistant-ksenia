@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <meta name="color-scheme" content="dark light">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon-192x192.png">
+  <link rel="stylesheet" href="/styles.css">
+  <title>Ксения</title>
+</head>
+<body>
+  <!-- Объявления для TalkBack: состояние — сразу (assertive), реплики — по очереди (polite) -->
+  <div id="announce-now" class="sr-only" role="alert" aria-live="assertive" aria-atomic="true"></div>
+  <div id="announce" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+  <main id="app" hidden>
+    <header class="state" id="state-box" data-state="idle">
+      <span class="state-mark" aria-hidden="true"></span>
+      <h1 id="state" tabindex="-1">Готова</h1>
+    </header>
+
+    <!-- Подтверждение рискованного действия: решает ядро, кнопки просто говорят «да» / «нет» -->
+    <section id="confirm" class="confirm" hidden aria-labelledby="confirm-q">
+      <p id="confirm-q" class="confirm-q" tabindex="-1"></p>
+      <div class="confirm-buttons">
+        <button id="yes" class="big yes" type="button">Да</button>
+        <button id="no" class="big no" type="button">Нет</button>
+      </div>
+    </section>
+
+    <button id="talk" class="talk" type="button" aria-describedby="talk-hint">Говорить</button>
+    <p id="talk-hint" class="hint">Нажмите и говорите после сигнала. Я сама пойму, когда вы закончили.</p>
+    <button id="stop" class="big stop" type="button" hidden>Стоп</button>
+
+    <section class="last" aria-label="Последний обмен">
+      <p class="who">Вы сказали</p>
+      <p id="last-user" class="said">—</p>
+      <p class="who">Ксения</p>
+      <p id="last-ksenia" class="said ksenia">—</p>
+    </section>
+
+    <section class="history" aria-labelledby="history-title">
+      <h2 id="history-title">Разговор, новые сверху</h2>
+      <ol id="history" role="log" aria-live="off" reversed></ol>
+    </section>
+
+    <details class="settings">
+      <summary>Настройки</summary>
+      <fieldset>
+        <legend>Как говорить</legend>
+        <label class="option"><input type="radio" name="mode" value="tap" checked>
+          Нажал — говорю до паузы</label>
+        <label class="option"><input type="radio" name="mode" value="hold">
+          Держу кнопку, пока говорю</label>
+      </fieldset>
+      <label class="option"><input type="checkbox" id="vibrate" checked> Вибрация</label>
+      <label class="option"><input type="checkbox" id="earcons" checked> Звуковые сигналы</label>
+      <div class="font-buttons">
+        <button id="font-down" class="small" type="button">Шрифт меньше</button>
+        <button id="font-up" class="small" type="button">Шрифт крупнее</button>
+      </div>
+      <button id="logout" class="small" type="button">Выйти на этом планшете</button>
+    </details>
+  </main>
+
+  <main id="login" hidden>
+    <h1>Ксения</h1>
+    <p class="lead">Чтобы подключиться, введите код. Его скажет Ксения у компьютера.</p>
+    <button id="speak-pin" class="big" type="button">Произнести код на компьютере</button>
+    <label for="pin" class="pin-label">Код из шести цифр</label>
+    <input id="pin" inputmode="numeric" autocomplete="one-time-code" maxlength="12" aria-describedby="login-error">
+    <button id="login-button" class="big" type="button">Войти</button>
+    <p id="login-error" class="error" role="alert"></p>
+  </main>
+
+  <main id="nolink" hidden>
+    <h1>Нет связи с компьютером</h1>
+    <p class="lead">Проверьте, что планшет в домашней сети Wi-Fi и компьютер включён. Я подключусь сама.</p>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
