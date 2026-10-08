@@ -188,13 +188,17 @@ class Ear:
                 if elapsed < CONFIG.get("ignore_start_s", 0.35):
                     continue  # хвост сигнала ещё звучит в наушниках и попадает в микрофон
                 if noise is None:
-                    noise = rms
+                    # первый кадр может быть хвостом сигнала (громко): шум с потолком, иначе порог
+                    # взлетал выше голоса и короткое «привет» сразу после сигнала терялось (2026-10-08)
+                    noise = min(rms, CONFIG.get("noise_init_max", 0.03))
                 if not speech_started:
-                    noise = 0.95 * noise + 0.05 * rms if elapsed > 0.1 else noise
                     thr = max(noise * 3.0, CONFIG.get("min_speech_rms", 0.012))
+                    voiced = rms > thr
+                    if not voiced:
+                        noise = 0.95 * noise + 0.05 * rms  # шум учим только по тихим кадрам, не по голосу
                     # окно 300 мс: речь засчитывается, если в нём набралось >= min_voiced_ms голоса
                     # (с провалами — микрофон JBL глушит паузы до нуля)
-                    voiced_win.append(rms > thr)
+                    voiced_win.append(voiced)
                     if len(voiced_win) > 15:
                         voiced_win.pop(0)
                     if sum(voiced_win) * 20 >= CONFIG.get("min_voiced_ms", 120):

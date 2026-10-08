@@ -125,6 +125,14 @@ def test_beep_echo_in_first_350ms_is_ignored(rec):
     assert audio is None and info["reason"] == "no_speech"
 
 
+def test_quick_word_right_after_loud_beep_tail(rec):
+    # живой тест 2026-10-08: хвост сигнала длиннее 350 мс, тишина JBL (ровный ноль), «привет» 0,3 с
+    audio, info = rec(pcm(speech(0.4, amp=0.2), np.zeros(int(RATE * 0.55)), speech(0.3, amp=0.2),
+                          np.zeros(int(RATE * 2.0))))
+    assert audio is not None
+    assert info["speech_start_s"] == pytest.approx(1.07, abs=0.05)
+
+
 def test_short_click_is_not_speech(rec):
     audio, info = rec(pcm(noise(1.0), speech(0.06, amp=0.5), noise(3.0)))
     assert audio is None and info["reason"] == "no_speech"
