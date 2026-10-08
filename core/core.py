@@ -93,6 +93,61 @@ def strip_thinking(text: str) -> str:
     return THINK_RE.sub("", text or "")
 
 
+class ThinkFilter:
+    """Поток ответа -> только то, что можно говорить. Размышления <think>…</think> вырезаются по ходу потока,
+    теги могут прийти разрезанными между кусками («<thi» + «nk>»). Раньше вырезалось по фразам: первая фраза
+    «<think>Хм…» глушилась целиком, а остаток рассуждений до «</think>» звучал вслух.
+    Одинокий «</think>» без открывающего (шаблон открыл размышления ещё в запросе) значит: всё до него — мысли;
+    тогда reset=True, и уже накопленный текст надо выбросить."""
+    OPEN, CLOSE = "<think>", "</think>"
+
+    def __init__(self):
+        self.inside = False
+        self.pending = ""
+        self.reset = False
+
+    @staticmethod
+    def _partial(s, tags):
+        """Длина хвоста s, который может оказаться началом одного из тегов."""
+        best = 0
+        for tag in tags:
+            for k in range(min(len(tag) - 1, len(s)), 0, -1):
+                if s.endswith(tag[:k]):
+                    best = max(best, k)
+                    break
+        return best
+
+    def feed(self, chunk: str) -> str:
+        s, self.pending, out = self.pending + chunk, "", []
+        while s:
+            if self.inside:
+                i = s.find(self.CLOSE)
+                if i < 0:
+                    k = self._partial(s, [self.CLOSE])
+                    self.pending = s[len(s) - k:] if k else ""
+                    return "".join(out)
+                s, self.inside = s[i + len(self.CLOSE):], False
+                continue
+            i, j = s.find(self.OPEN), s.find(self.CLOSE)
+            if j >= 0 and (i < 0 or j < i):
+                out, self.reset = [], True  # одинокое закрытие: всё раньше — размышления
+                s = s[j + len(self.CLOSE):]
+                continue
+            if i >= 0:
+                out.append(s[:i])
+                s, self.inside = s[i + len(self.OPEN):], True
+                continue
+            k = self._partial(s, [self.OPEN, self.CLOSE])
+            out.append(s[:len(s) - k] if k else s)
+            self.pending = s[len(s) - k:] if k else ""
+            break
+        return "".join(out)
+
+    def flush(self) -> str:
+        rest, self.pending = ("" if self.inside else self.pending), ""
+        return rest
+
+
 def clean_for_speech(text: str, verbatim: bool = False) -> str:
     """Убрать разметку и эмодзи; оставить только разрешённые пометки эмоций.
 
@@ -563,6 +618,7 @@ class Ksenia:
         full, buf, first_sent = "", "", False
         calls = {}
         failed = False
+        think = ThinkFilter()
         try:
             async with self.session.post(CONFIG["brain_url"] + "/v1/chat/completions", json=body,
                                          headers={"Authorization": "Bearer " + BRAIN_KEY},
@@ -583,7 +639,10 @@ class Ksenia:
                             continue
                         for tc in d.get("tool_calls") or []:
                             merge_tool_call(calls, tc)
-                        delta = d.get("content") or ""
+                        delta = think.feed(d.get("content") or "")
+                        if think.reset:
+                            think.reset = False
+                            full, buf = "", ""  # всё до одинокого </think> было размышлениями
                         if not delta:
                             continue
                         if "first_token_s" not in timings:
@@ -613,6 +672,8 @@ class Ksenia:
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:  # общий таймаут aiohttp — TimeoutError, не ClientError
             log.error("brain недоступен: %r", e)
             failed = True
+        tail = think.flush()
+        full, buf = full + tail, buf + tail
         if failed:
             buf = (buf.strip() + " " + BRAIN_FAIL_PHRASE).strip()
         # Промежуточный шаг (после первого и с вызовом инструмента) — это «рассуждения вслух»: не озвучиваем.
