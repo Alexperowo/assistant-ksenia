@@ -32,6 +32,7 @@
 | `ksenia-voice-out` | 18110 | голос: Fish Audio S2 Pro через s2.cpp (ускоренная ветка) | RTX 2080 Ti |
 | `ksenia-voice-in` | 18120 | слух: faster-whisper large-v3-turbo, Bluetooth-гарнитура | RTX 2080 Ti |
 | `ksenia-core` | 18130 | ядро: характер, диалог, инструменты, динамический бюджет рассуждений | CPU |
+| `ksenia-pwa` | 18140 | шлюз планшета: HTTPS в домашней сети, вход по коду, голос Ксении на планшете ([docs/pwa-tablet.md](docs/pwa-tablet.md)) | CPU |
 
 Инструменты — модули в `core/tools/` (музыка, зрение). Управление: команда `ksenia talk | stop | say "…" | status`.
 
