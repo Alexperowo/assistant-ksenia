@@ -22,3 +22,12 @@ def test_goodbye(text):
 ])
 def test_not_goodbye(text):
     assert not core.is_goodbye(text)
+
+
+def test_affirmative_confirmation():
+    from core import is_affirmative
+    for t in ["Да", "да, отправляй", "Отправляй.", "Давай", "Ну да", "Ага"]:
+        assert is_affirmative(t), t
+    for t in ["Нет", "да нет, погоди", "Не надо", "Да. Только поправь текст на завтра", "Да, но лучше завтра",
+              "Расскажи, что ты умеешь, а потом отправь Диме привет", ""]:
+        assert not is_affirmative(t), t

@@ -24,9 +24,9 @@ from aiohttp import web
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-from tools import music, screen  # noqa: E402  (инструменты — отдельные модули в core/tools)
+from tools import music, screen, vk  # noqa: E402  (инструменты — отдельные модули в core/tools)
 
-TOOL_MODULES = [music, screen]
+TOOL_MODULES = [music, screen, vk]
 TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
 TOOL_INDEX = {sch["function"]["name"]: m for m in TOOL_MODULES for sch in m.SCHEMAS}
 
@@ -372,6 +372,28 @@ class Ksenia:
             json.dump(self.history[-CONFIG.get("history_keep", 200):], f, ensure_ascii=False, indent=1)
         os.replace(tmp, HISTORY_FILE)
 
+    async def _resolve_confirmation(self, user_text: str) -> str:
+        """Подтверждение рискованного действия решает ЯДРО, не модель: если ждёт отправка и Александр
+        ответил согласием — ядро отправляет само; любой другой ответ отменяет отправку."""
+        p = vk.pending.get("item")
+        if not p:
+            return ""
+        if time.time() > p["expires"]:
+            vk.pending.clear()
+            return "; подготовленное сообщение устарело и не отправлено"
+        if is_affirmative(user_text):
+            try:
+                res = await vk.confirm_and_send(p["id"])
+            except Exception as e:
+                log.exception("отправка ВК")
+                res = {"ok": False, "error": f"сбой отправки: {e!r}"[:200]}
+            log.info("Подтверждено Александром, отправка ВК -> %s", res)
+            if res.get("ok"):
+                return f"; Александр подтвердил, ядро ОТПРАВИЛО сообщение для {res.get('to')}. Коротко скажи, что отправила"
+            return f"; Александр подтвердил, но отправка НЕ удалась: {res.get('error')}. Скажи честно"
+        vk.pending.clear()
+        return "; подготовленное сообщение НЕ отправлено (Александр не сказал «да»)"
+
     def _window(self):
         """Окно истории для мозга. Гибридный Nex пересчитывает всё при любом изменении начала,
         поэтому окно не скользит каждую реплику, а изредка прыгает вперёд большим шагом."""
@@ -400,7 +422,8 @@ class Ksenia:
     async def respond(self, user_text: str, timings: dict):
         # Nex — гибридная модель: её рекуррентное состояние нельзя откатить, поэтому запрос обязан
         # в точности продолжать прошлый. Время пишем в реплику и сохраняем её в истории как есть.
-        self.history.append({"role": "user", "content": f"{user_text}\n\n(служебно: {now_context()})"})
+        note = await self._resolve_confirmation(user_text)
+        self.history.append({"role": "user", "content": f"{user_text}\n\n(служебно: {now_context()}{note})"})
         speaker = Speaker(self.session)
         self.speaker = speaker
         queue: asyncio.Queue = asyncio.Queue()
@@ -574,6 +597,20 @@ async def say_notice(text: str):
 
 
 BYE_WORDS = ("пока", "хватит", "стоп", "ксения стоп", "ксения, стоп", "до свидания", "отбой", "спокойной ночи", "всё, спасибо", "стоп разговор")
+
+
+AFFIRM = {"да", "ага", "угу", "отправляй", "отправь", "отправить", "подтверждаю", "давай", "конечно", "верно",
+          "ок", "окей", "можно", "отправляем", "yes"}
+NEGATE = {"нет", "не", "отмена", "отмени", "стоп", "погоди", "подожди", "измени", "исправь", "только", "но", "поправь",
+          "замени", "поменяй", "перепиши", "добавь", "убери", "кроме", "лучше", "сначала"}
+
+
+def is_affirmative(text: str) -> bool:
+    """Ясное согласие: короткая реплика, начинается со «да/отправляй/…» и без отрицаний."""
+    words = _words(text).split()
+    if not words or len(words) > 6 or any(w in NEGATE for w in words):
+        return False
+    return words[0] in AFFIRM or (len(words) > 1 and words[0] in ("ну", "так") and words[1] in AFFIRM)
 
 
 def _words(text: str) -> str:
