@@ -29,7 +29,7 @@ SCHEMAS = [
                         "Конкретные песни по названию сейчас недоступны — честно скажи об этом и предложи радио."),
         "parameters": {"type": "object", "properties": {
             "query": {"type": "string"},
-            "russian": {"type": "boolean", "description": "предпочесть российские станции"}},
+            "russian": {"type": "boolean", "description": "российские станции (по умолчанию да; false — если просят зарубежное)"}},
             "required": ["query"]}}},
     {"type": "function", "function": {
         "name": "music_control",
@@ -118,7 +118,7 @@ async def duck(on: bool):
 async def call(name: str, args: dict, session) -> dict:
     if name == "music_play":
         query = args.get("query") or "pop"
-        res = await _search(session, query, bool(args.get("russian")))
+        res = await _search(session, query, args.get("russian", True) is not False)
         if not res:
             return {"ok": False, "error": f"не нашла радиостанций по запросу «{query}»"}
         _state["last_query"], _state["last_results"] = query, res
