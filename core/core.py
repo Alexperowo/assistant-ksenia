@@ -1224,7 +1224,148 @@ class Conversation:
             waiting_event.set()  # разговор кончился — то, что пришло во время него, сказать сразу
 
 
+# «Ага», «угу» во время речи Ксении — знак, что слушает, а не просьба замолчать
+BACKCHANNEL = {_words(w) for w in ("ага", "угу", "ага ага", "угу угу", "да", "да да", "понятно", "ясно", "ну", "хм",
+                                    "м", "мм", "ммм", "ок", "окей", "так", "ну да", "ага понятно")}
+
+
+def is_backchannel(text: str) -> bool:
+    return _words(text) in BACKCHANNEL
+
+
+class LiveConversation(Conversation):
+    """Живой режим (наушники в LE Audio: звук и микрофон одновременно). Микрофон открыт всё время:
+    Александр перебивает Ксению голосом (она замолкает и слушает), договаривает, пока она думает
+    (новая реплика заменяет недодуманный ответ), «ага» её не перебивает. Без сигналов между репликами.
+    Кончается на «пока», на «стоп», когда Ксения молчит, или после live_idle_s тишины."""
+
+    def __init__(self):
+        super().__init__()
+        self.cur = None
+
+    def busy(self):
+        return self.cur is not None and not self.cur.done()
+
+    @staticmethod
+    def speaking():
+        sp = ks.speaker
+        return sp is not None and bool(sp.recorded) and not sp.cancelled
+
+    async def cancel_turn(self):
+        if self.busy():
+            await ks.stop()
+            self.cur.cancel()
+            await asyncio.wait({self.cur}, timeout=3)
+
+    async def live_turn(self, text, listen_info, speaker):
+        await music.duck(True)
+        try:
+            await turn(text, {"_t0": time.time(), "listen": listen_info}, speaker=speaker)
+            self.turns += 1
+            await deliver_waiting()
+        finally:
+            await music.duck(False)
+
+    async def live_waiting(self):
+        await music.duck(True)
+        try:
+            await deliver_waiting()
+        finally:
+            await music.duck(False)
+
+    async def run(self):
+        self.turns, self.cur = 0, None
+        url = CONFIG["voice_in_url"].replace("http", "ws", 1) + "/stream"
+        try:
+            async with ks.session.ws_connect(url, heartbeat=20) as ws:
+                first = await ws.receive_json(timeout=15)
+                if first.get("type") != "ready":
+                    log.info("Живой режим недоступен (%s) — обычный разговор", first)
+                    await ws.close()
+                    return await Conversation.run(self)
+                log.info("Живой режим: слушаю постоянно")
+                hub.emit({"type": "state", "state": "listening", "where": "pc"})
+                last = time.time()
+                while True:
+                    try:
+                        msg = await ws.receive(timeout=1.0)
+                    except asyncio.TimeoutError:
+                        if self.busy():
+                            last = time.time()
+                        elif waiting:
+                            self.cur = asyncio.create_task(self.live_waiting())
+                        elif time.time() - last > CONFIG.get("live_idle_s", 60):
+                            log.info("Живой режим: долго тихо — микрофон закрываю")
+                            return
+                        continue
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        log.warning("Живой режим: слух закрыл поток (%s)", msg.type)
+                        return
+                    ev = json.loads(msg.data)
+                    kind = ev.get("type")
+                    if kind in ("speech_start", "speech_long"):
+                        last = time.time()
+                        if kind == "speech_long" and self.busy() and self.speaking():
+                            log.info("Александр перебил — Ксения замолкает")
+                            await ks.stop()
+                        continue
+                    if kind == "error":
+                        log.warning("Живой режим: %s", ev)
+                        if ev.get("reason") == "mic_lost":
+                            await say_notice(LISTEN_FAIL["mic_lost"])
+                        return
+                    if kind != "utterance":
+                        continue
+                    last = time.time()
+                    text = str(ev.get("text") or "").strip()
+                    speaker = ev.get("speaker") or {}
+                    if len(text) < 2:
+                        continue
+                    if speaker.get("owner") is False and voicectl.STATE["mode"] == "owner_only":
+                        log.info("Чужой голос — режим «только Александр»: %s", text)
+                        continue
+                    if self.busy() and self.speaking() and is_backchannel(text):
+                        continue  # «ага» — слушает, не перебивает
+                    note = agent_note(text)
+                    if note is not None:
+                        last_reply = next((m.get("content") or "" for m in reversed(ks.history)
+                                           if m.get("role") == "assistant" and m.get("content")), "")
+                        save_agent_note(note, last_reply)
+                        log.info("Заметка для агента: %s", note)
+                        if not self.busy():
+                            await say_notice("Записала.")
+                        continue
+                    if is_stop(text):
+                        if self.busy():
+                            await self.cancel_turn()  # замолчать и слушать дальше
+                            continue
+                        if not music.playing():
+                            log.info("«%s» — живой режим окончен", text)
+                            return
+                    # новая реплика важнее недоговорённого ответа: перебил или договорил, пока Ксения думала
+                    await self.cancel_turn()
+                    if voicectl.STATE["enrolling"] > 0 and speaker.get("owner") is not False:
+                        await self.enroll_step()
+                    self.cur = asyncio.create_task(self.live_turn(text, ev.get("timings") or {}, speaker))
+                    if is_goodbye(text):
+                        await asyncio.wait({self.cur})
+                        return
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            log.error("Живой режим: слух недоступен: %r", e)
+            await say_notice(LISTEN_DOWN)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.exception("Сбой живого режима: %s", e)
+            await say_notice(CONV_CRASH)
+        finally:
+            if self.busy():
+                await self.cancel_turn()
+            waiting_event.set()
+
+
 conv = Conversation()
+live = LiveConversation()
 waiting = []  # служебные реплики, ждущие паузы: находки помощников и напоминания
 waiting_event = asyncio.Event()
 
@@ -1316,8 +1457,18 @@ async def handle_talk(request):
     async with talk_lock:
         if await stop_conversation():
             await asyncio.sleep(0.2)
-        conv.task = asyncio.create_task(conv.run())
-    return web.json_response({"ok": True, "mode": "conversation"})
+        # наушники в LE Audio — живой режим (слушает всегда, можно перебивать); иначе — обычный разговор
+        runner = live if CONFIG.get("live_mode", True) and await live_possible() else conv
+        conv.task = asyncio.create_task(runner.run())
+    return web.json_response({"ok": True, "mode": "live" if runner is live else "conversation"})
+
+
+async def live_possible() -> bool:
+    try:
+        async with ks.session.get(CONFIG["voice_in_url"] + "/status", timeout=aiohttp.ClientTimeout(total=3)) as r:
+            return (await r.json(content_type=None)).get("profile") == "bap-duplex"
+    except Exception:
+        return False
 
 
 async def handle_stop(request):

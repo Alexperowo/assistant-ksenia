@@ -178,6 +178,7 @@ class Ear:
         log.info("Конец реплики: %s", "Smart Turn v3.2" if self.turn else f"тишина {CONFIG.get('silence_ms', 800)} мс")
         self.lock = asyncio.Lock()
         self.busy = False
+        self.streaming = False  # живой режим держит микрофон
 
     @staticmethod
     def _max_rms(frames):
@@ -325,6 +326,89 @@ class Ear:
                      **({"turn_text": turn_texts} if turn_texts else {})}
 
 
+class LiveSegmenter:
+    """Живой режим (LE Audio): микрофон открыт всё время, реплики режутся из непрерывного потока.
+
+    push(кадр 20 мс) -> None | "start" (пошла речь) | "long" (речь дольше barge_ms — повод перебить
+    Ксению) | "check" (пауза: спросить turn_check и вызвать decide) | "end" (реплика готова: utterance()).
+    Логика порогов — как в record_utterance; плюс 300 мс до начала речи, чтобы не терять первый слог."""
+
+    def __init__(self, config=None):
+        c = config or CONFIG
+        self.c = c
+        self.noise = None
+        self.voiced_win, self.pre = [], []
+        self.reset()
+
+    def reset(self):
+        self.frames, self.speaking, self.silent_ms, self.voiced_ms = [], False, 0, 0
+        self.long_sent, self.checked, self.ended = False, False, False
+        self.wait_ms = self.c.get("turn_wait_ms", 2000)
+        self.probs, self.texts = [], []
+
+    def push(self, x: np.ndarray):
+        rms = float(np.sqrt(np.mean((x.astype(np.float32) / 32768.0) ** 2)))
+        if self.noise is None:
+            self.noise = min(rms, self.c.get("noise_init_max", 0.03))
+        if not self.speaking:
+            thr = max(self.noise * 3.0, self.c.get("min_speech_rms", 0.012))
+            voiced = rms > thr
+            if not voiced:
+                self.noise = 0.95 * self.noise + 0.05 * rms
+            self.voiced_win = (self.voiced_win + [voiced])[-15:]
+            self.pre = (self.pre + [x])[-15:]  # 300 мс до начала речи
+            if sum(self.voiced_win) * 20 >= self.c.get("min_voiced_ms", 120):
+                self.speaking, self.frames = True, list(self.pre)
+                self.voiced_ms = sum(self.voiced_win) * 20
+                self.pre, self.voiced_win = [], []
+                return "start"
+            return None
+        self.frames.append(x)
+        thr = max(self.noise * 2.0, self.c.get("min_speech_rms", 0.012) * 0.7)
+        if rms >= thr:
+            self.silent_ms, self.checked = 0, False
+            self.wait_ms = self.c.get("turn_wait_ms", 2000)
+            self.voiced_ms += 20
+            if not self.long_sent and self.voiced_ms >= self.c.get("barge_ms", 400):
+                self.long_sent = True
+                return "long"
+            return None
+        self.silent_ms += 20
+        if len(self.frames) * 20 >= self.c.get("max_s", 120) * 1000:
+            return "end"
+        if not self.checked and self.silent_ms >= self.c.get("turn_check_ms", 800):
+            self.checked = True
+            return "check"
+        if self.silent_ms >= self.wait_ms:
+            return "end"
+        return None
+
+    def pcm(self):
+        return np.concatenate(self.frames) if self.frames else np.zeros(0, dtype=np.int16)
+
+    def decide(self, p: float, partial: str):
+        """Ответ turn_check на паузе: "end" — договорил, None — ждём продолжения."""
+        self.probs.append(round(p, 2))
+        if partial:
+            self.texts.append(partial[-40:])
+        hang = hanging(partial)
+        if p >= self.c.get("turn_threshold", 0.5) and not hang:
+            return "end"
+        self.wait_ms = self.c.get("turn_hang_wait_ms", 3000) if hang else self.c.get("turn_wait_ms", 2000)
+        return None
+
+    def utterance(self):
+        """(pcm без хвоста тишины, сведения) и сброс к ожиданию следующей реплики."""
+        pcm = self.pcm()
+        cut = max(0, self.silent_ms - 200) * RATE // 1000
+        if cut:
+            pcm = pcm[:-cut]
+        info = {"audio_s": round(len(pcm) / RATE, 2), "voiced_s": round(self.voiced_ms / 1000, 2),
+                **({"turn_p": self.probs} if self.probs else {}), **({"turn_text": self.texts} if self.texts else {})}
+        self.reset()
+        return pcm, info
+
+
 ear: Ear = None
 
 
@@ -348,7 +432,7 @@ async def restore_a2dp(card, profile):
 
 
 async def handle_listen(request):
-    if ear.lock.locked():
+    if ear.lock.locked() or ear.streaming:
         return web.json_response({"error": "busy"}, status=409)
     async with ear.lock:
         t0 = time.time()
@@ -429,6 +513,81 @@ async def handle_vp(request):
     return web.json_response({"ok": True, "enrolled": ear.vp.centroid is not None, "collected": len(ear.vp.pending)})
 
 
+async def handle_stream(request):
+    """Живой режим: WebSocket с событиями слуха, пока ядро держит соединение. Только LE Audio
+    (звук и микрофон сразу): в обычном Bluetooth пришлось бы держать наушники в режиме гарнитуры.
+    События: ready, speech_start, speech_long, utterance {text, speaker, timings}, error {reason}."""
+    ws = web.WebSocketResponse(heartbeat=20)
+    await ws.prepare(request)
+    card = await asyncio.to_thread(find_bt_card) if CONFIG.get("bluetooth", True) else None
+    if not card or "bap-duplex" not in await asyncio.to_thread(card_profiles, card):
+        await ws.send_json({"type": "error", "reason": "not_duplex"})
+        await ws.close()
+        return ws
+    if ear.lock.locked() or ear.streaming:
+        await ws.send_json({"type": "error", "reason": "busy"})
+        await ws.close()
+        return ws
+    if await asyncio.to_thread(card_profile, card) != "bap-duplex":
+        await set_profile(card, "bap-duplex")
+        await asyncio.sleep(CONFIG.get("le_settle_s", 0.5))
+    source = await asyncio.to_thread(find_source, card)
+    sink = await asyncio.to_thread(bt_node, card, "sinks")
+    ear.streaming = True
+    rec = None
+    try:
+        if sink and CONFIG.get("beep", True):
+            p = await asyncio.create_subprocess_exec(
+                "pacat", "--playback", "-d", sink, "--raw", f"--rate={RATE}", "--channels=1", "--format=s16le",
+                "--latency-msec=30", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL)
+            p.stdin.write(BEEP)
+            await p.stdin.drain()
+            p.stdin.close()
+            await p.wait()
+        rec = await asyncio.create_subprocess_exec(
+            "parec", "-d", source, "--raw", f"--rate={RATE}", "--channels=1", "--format=s16le",
+            "--latency-msec=20", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        seg = LiveSegmenter()
+        await ws.send_json({"type": "ready", "source": source})
+        log.info("Живой режим: микрофон открыт (%s)", source)
+        while not ws.closed:
+            try:
+                buf = await asyncio.wait_for(rec.stdout.readexactly(FRAME * 2), timeout=3)
+            except (asyncio.IncompleteReadError, asyncio.TimeoutError) as e:
+                log.warning("Живой режим: микрофон оборвался: %r", e)
+                await ws.send_json({"type": "error", "reason": "mic_lost"})
+                break
+            ev = seg.push(np.frombuffer(buf, dtype=np.int16))
+            if ev == "check":
+                ev = seg.decide(*await asyncio.to_thread(ear.turn_check, seg.pcm()))
+            if ev == "start":
+                await ws.send_json({"type": "speech_start"})
+            elif ev == "long":
+                await ws.send_json({"type": "speech_long"})
+            elif ev == "end":
+                pcm, info = seg.utterance()
+                t1 = time.time()
+                ear._save_debug([pcm])
+                spk = asyncio.create_task(asyncio.to_thread(ear.vp.check, pcm)) if ear.vp else None
+                text = await asyncio.to_thread(ear.transcribe, pcm)
+                info["stt_s"] = round(time.time() - t1, 2)
+                speaker = await spk if spk else {"owner": None, "enrolled": False}
+                log.info("Живой режим, услышала (%s, голос %s): %s", info, speaker, text)
+                await ws.send_json({"type": "utterance", "text": text, "speaker": speaker, "timings": info})
+    except (ConnectionResetError, asyncio.CancelledError):
+        pass
+    finally:
+        ear.streaming = False
+        if rec and rec.returncode is None:
+            rec.kill()
+            await rec.wait()
+        log.info("Живой режим: микрофон закрыт")
+        if not ws.closed:
+            await ws.close()
+    return ws
+
+
 async def handle_status(request):
     card = find_bt_card()
     return web.json_response({"busy": ear.lock.locked(), "bt_card": card,
@@ -464,7 +623,7 @@ def main():
     app = web.Application(client_max_size=50 * 1024 * 1024, middlewares=[local_only])
     app.add_routes([web.post("/listen", handle_listen), web.post("/transcribe", handle_transcribe),
                     web.post("/voiceprint/{action}", handle_vp),
-                    web.get("/status", handle_status)])
+                    web.get("/status", handle_status), web.get("/stream", handle_stream)])
     web.run_app(app, host="127.0.0.1", port=CONFIG.get("port", 18120), print=None)
 
 
