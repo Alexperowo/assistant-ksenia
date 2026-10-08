@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 import uuid
 
@@ -140,9 +141,12 @@ def split_for_reading(text: str, max_len: int = 220):
 def pick_output_sink():
     """Куда говорить: настройка, иначе A2DP-выход Bluetooth-наушников, иначе HDMI, иначе по умолчанию."""
     want = CONFIG.get("output_sink", "auto")
-    import subprocess
-    sinks = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True).stdout.split("\n")
-    names = [s.split("\t")[1] for s in sinks if "\t" in s]
+    try:
+        out = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, timeout=3).stdout
+    except (OSError, subprocess.SubprocessError) as e:  # нет pactl или PipeWire завис — играем в выход по умолчанию
+        log.warning("pactl: %s", e)
+        return want if want != "auto" else None
+    names = [s.split("\t")[1] for s in out.split("\n") if "\t" in s]
     if want != "auto" and want in names:
         return want
     for n in names:
@@ -157,6 +161,8 @@ def pick_output_sink():
 class Speaker:
     """Озвучка ответа: фразы по очереди -> voice-out (поток PCM) -> pacat в выбранный выход."""
 
+    FINISH_TIMEOUT_S = 15
+
     def __init__(self, session):
         self.session = session
         self.player = None
@@ -165,7 +171,7 @@ class Speaker:
 
     async def _ensure_player(self):
         if self.player is None or self.player.returncode is not None:
-            sink = pick_output_sink()
+            sink = await asyncio.to_thread(pick_output_sink)  # pactl — не в цикле событий
             args = ["pacat", "--playback", "--raw", "--rate=44100", "--channels=1", "--format=s16le",
                     "--latency-msec=60"]
             if sink:
@@ -174,7 +180,18 @@ class Speaker:
                 *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL)
 
+    async def _drop_player(self):
+        """Закрыть сломанный плеер: следующая фраза откроет новый (возможно, уже в другой выход)."""
+        p, self.player = self.player, None
+        if p and p.returncode is None:
+            try:
+                p.kill()
+                await asyncio.wait_for(p.wait(), timeout=2)
+            except (ProcessLookupError, asyncio.TimeoutError):
+                pass
+
     async def speak(self, text: str, timings: dict, verbatim: bool = False):
+        """Озвучить одну фразу. Никогда не бросает исключений: сбой одной фразы не должен глушить остальные."""
         text = clean_for_speech(text, verbatim=verbatim)
         if not text or self.cancelled:
             return
@@ -189,8 +206,9 @@ class Speaker:
             return f
         form = make_form()
         deadline = time.time() + 15
-        while not self.cancelled:
-            try:
+        written = 0
+        try:
+            while not self.cancelled:
                 async with self.session.post(CONFIG["voice_out_url"] + "/generate", data=form,
                                              timeout=aiohttp.ClientTimeout(total=120)) as r:
                     if r.status == 503 and time.time() < deadline:
@@ -207,12 +225,23 @@ class Speaker:
                         if "first_audio_s" not in timings:
                             timings["first_audio_s"] = round(time.time() - timings["_t0"], 2)
                         self.player.stdin.write(chunk)
+                        written += len(chunk)
                         self.recorded.extend(chunk)
                         await self.player.stdin.drain()
                     return
-            except aiohttp.ClientError as e:
-                log.error("voice-out недоступен: %s", e)
-                return
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            log.error("voice-out недоступен или оборвал поток: %r", e)
+        except OSError as e:  # pacat закрылся (наушники отключились) — BrokenPipe/ConnectionReset при drain
+            log.error("плеер закрылся: %r", e)
+            await self._drop_player()
+        except Exception:
+            log.exception("сбой озвучки")
+            await self._drop_player()
+        finally:
+            if written % 2 and self.player and self.player.returncode is None and not self.cancelled:
+                # поток оборвался посреди сэмпла: без выравнивания все следующие фразы зазвучат треском
+                self.player.stdin.write(b"\x00")
+                self.recorded.append(0)
 
     def save_recording(self):
         if not CONFIG.get("record_replies", True) or not self.recorded:
@@ -228,19 +257,24 @@ class Speaker:
             os.remove(os.path.join(d, old))
 
     async def finish(self):
-        self.save_recording()
+        try:
+            self.save_recording()
+        except OSError as e:
+            log.warning("запись ответа не сохранена: %s", e)
         if self.player and self.player.returncode is None:
             try:
                 self.player.stdin.close()
-                await self.player.wait()
+                # pacat доигрывает свой буфер (около секунды); если завис — не держим разговор вечно
+                await asyncio.wait_for(self.player.wait(), timeout=self.FINISH_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                log.warning("pacat не закончил за 15 с — останавливаю")
+                await self._drop_player()
             except Exception:
                 pass
 
     async def cancel(self):
         self.cancelled = True
-        if self.player and self.player.returncode is None:
-            self.player.kill()
-            await self.player.wait()
+        await self._drop_player()
 
 
 ACTION_PATTERNS = [r"\bвключ", r"\bвыключ", r"\bпостав", r"\bпауз", r"\bпродолж", r"\bнайди",
@@ -256,6 +290,7 @@ ACTION_PATTERNS = [r"\bвключ", r"\bвыключ", r"\bпостав", r"\bп
 HISTORY_FILE = os.path.join(ROOT, "..", "data", "history.json")
 
 
+CANCELLED_RESULT = {"ok": False, "error": "отменено: Александр перебил, инструмент не выполнен или выполнен не до конца"}
 BRAIN_FAIL_PHRASE = "[sigh] Ой, у меня что-то с головой. Мозг не отвечает, проверь, пожалуйста, сервис."
 
 
@@ -345,44 +380,66 @@ class Ksenia:
         queue: asyncio.Queue = asyncio.Queue()
 
         async def tts_worker():
-            while True:
-                item = await queue.get()
-                if item is None:
-                    break
-                part, verbatim = item
-                await speaker.speak(part, timings, verbatim=verbatim)
-            await speaker.finish()
+            try:
+                while True:
+                    item = await queue.get()
+                    if item is None:
+                        break
+                    part, verbatim = item
+                    await speaker.speak(part, timings, verbatim=verbatim)
+            finally:
+                await speaker.finish()
 
         worker = asyncio.create_task(tts_worker())
         spoken_all = []
+        pending = []  # вызовы инструментов, на которые ещё нет ответа в истории
         budget = self.budget_for(user_text)  # динамический бюджет: болтовня 0, задача — больше
-        for step in range(CONFIG.get("max_steps", 6)):
-            content, calls, failed = await self._step(budget, queue, speaker, timings, first_step=(step == 0))
-            spoken_all.append(content)
-            msg = {"role": "assistant", "content": content}
-            if calls:
-                msg["tool_calls"] = calls
-            self.history.append(msg)
-            if not calls or speaker.cancelled:
-                break
-            any_error = False
-            for c in calls:
-                result = await run_tool(c["function"]["name"], c["function"].get("arguments") or "{}", self.session)
-                any_error = any_error or not result.get("ok", False)
-                log.info("Инструмент %s(%s) -> %s", c["function"]["name"], c["function"].get("arguments"),
-                         {k: (v[:200] + "…" if isinstance(v, str) and len(v) > 200 else v) for k, v in result.items()})
-                if result.get("speak_verbatim"):
-                    # дословное чтение: текст идёт прямо в голос кусками по предложениям, без пересказа мозгом
-                    for part in split_for_reading(result["speak_verbatim"]):
-                        await queue.put((part, True))
+        try:
+            for step in range(CONFIG.get("max_steps", 6)):
+                content, calls, failed = await self._step(budget, queue, speaker, timings, first_step=(step == 0))
+                spoken_all.append(content)
+                msg = {"role": "assistant", "content": content}
+                if calls:
+                    msg["tool_calls"] = calls
+                self.history.append(msg)
+                pending = list(calls)
+                if not calls or speaker.cancelled:
+                    break
+                any_error = False
+                for c in calls:
+                    if speaker.cancelled:  # «стоп» посреди цепочки — остальные вызовы не исполняем
+                        break
+                    result = await run_tool(c["function"]["name"], c["function"].get("arguments") or "{}", self.session)
+                    any_error = any_error or not result.get("ok", False)
+                    log.info("Инструмент %s(%s) -> %s", c["function"]["name"], c["function"].get("arguments"),
+                             {k: (v[:200] + "…" if isinstance(v, str) and len(v) > 200 else v) for k, v in result.items()})
+                    if result.get("speak_verbatim") and not speaker.cancelled:
+                        # дословное чтение: текст идёт прямо в голос кусками по предложениям, без пересказа мозгом
+                        for part in split_for_reading(result["speak_verbatim"]):
+                            await queue.put((part, True))
+                    self.history.append({"role": "tool", "tool_call_id": c.get("id", ""),
+                                         "content": json.dumps(result, ensure_ascii=False)})
+                    pending.remove(c)
+                if speaker.cancelled:
+                    break
+                # после инструмента — подумать чуть больше; после ошибки — ещё больше
+                budget = CONFIG.get("budget_hard", 4096) if any_error else CONFIG.get("budget_task", 512)
+            await queue.put(None)
+            await worker
+        finally:
+            # Перебили или упали посреди хода. История по-прежнему только дописывается, но каждый вызов
+            # инструмента обязан получить ответ — иначе следующий запрос к мозгу будет с «висящим» вызовом.
+            for c in pending:
                 self.history.append({"role": "tool", "tool_call_id": c.get("id", ""),
-                                     "content": json.dumps(result, ensure_ascii=False)})
-            # после инструмента — подумать чуть больше; после ошибки — ещё больше
-            budget = CONFIG.get("budget_hard", 4096) if any_error else CONFIG.get("budget_task", 512)
-        await queue.put(None)
-        await worker
+                                     "content": json.dumps(CANCELLED_RESULT, ensure_ascii=False)})
+            if not worker.done():  # озвучка не должна жить дольше хода (и держать pacat)
+                await speaker.cancel()
+                worker.cancel()
+            try:
+                self.save_history()
+            except OSError as e:
+                log.error("история не сохранена: %s", e)
         timings["llm_done_s"] = round(time.time() - timings["_t0"], 2)
-        self.save_history()
         full = " ".join(x for x in spoken_all if x).strip()
         self.last_tag = (re.match(r"\s*\[(\w+)\]", full) or [None, None])[1]
         return full
