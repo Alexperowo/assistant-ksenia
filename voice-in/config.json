@@ -1,0 +1,19 @@
+{
+  "port": 18120,
+  "model_dir": "/home/user/Models/Speech/whisper/large-v3-turbo",
+  "compute_type": "int8_float16",
+  "language": "ru",
+  "beam_size": 5,
+  "initial_prompt": "Ксения, привет. Разговор с Ксенией по-русски.",
+  "bluetooth": true,
+  "source": "auto",
+  "hfp_profile": "headset-head-unit",
+  "hfp_settle_s": 0.6,
+  "beep": true,
+  "silence_ms": 700,
+  "max_s": 30,
+  "start_timeout_s": 12,
+  "min_speech_rms": 0.008,
+  "ignore_start_s": 0.35,
+  "min_voiced_ms": 120
+}

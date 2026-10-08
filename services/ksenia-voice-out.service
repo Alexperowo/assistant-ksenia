@@ -1,0 +1,13 @@
+[Unit]
+Description=Ксения: голос (Fish S2 Pro через s2.cpp на RTX 2080 Ti, :18110)
+
+[Service]
+Type=simple
+ExecStart=/home/user/Agents/Ksenia/voice-out/run_voice_out.sh
+Restart=on-failure
+RestartSec=10s
+StandardOutput=append:/home/user/Agents/Ksenia/logs/voice-out.log
+StandardError=append:/home/user/Agents/Ksenia/logs/voice-out.log
+
+[Install]
+WantedBy=default.target

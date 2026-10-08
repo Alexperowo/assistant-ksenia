@@ -1,0 +1,14 @@
+{
+  "port": 18130,
+  "brain_url": "http://127.0.0.1:18100",
+  "brain_key_file": "/home/user/Agents/Ksenia/brain/api_key",
+  "voice_out_url": "http://127.0.0.1:18110",
+  "voice_in_url": "http://127.0.0.1:18120",
+  "voice": "masha",
+  "output_sink": "auto",
+  "tts_stride": 8,
+  "budget_chat": 0,
+  "max_tokens": 400,
+  "history_messages": 30,
+  "max_turns": 50
+}

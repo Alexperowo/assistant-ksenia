@@ -1,0 +1,15 @@
+[Unit]
+Description=Ксения: ядро (разговор, характер, озвучка, :18130)
+After=ksenia-brain.service ksenia-voice-out.service ksenia-voice-in.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/user/Agents/Ksenia/core
+ExecStart=/home/user/Agents/Ksenia/.venv/bin/python core.py
+Restart=on-failure
+RestartSec=5s
+StandardOutput=append:/home/user/Agents/Ksenia/logs/core.log
+StandardError=append:/home/user/Agents/Ksenia/logs/core.log
+
+[Install]
+WantedBy=default.target
