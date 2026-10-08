@@ -13,7 +13,7 @@
   "hfp_settle_s": 0.6,
   "beep": true,
   "silence_ms": 700,
-  "max_s": 30,
+  "max_s": 120,
   "start_timeout_s": 12,
   "min_speech_rms": 0.008,
   "ignore_start_s": 0.35,

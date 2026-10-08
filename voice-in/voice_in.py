@@ -60,13 +60,42 @@ def card_profile(card):
     return None
 
 
+def bt_node(card, kind):
+    """Настоящее имя выхода/микрофона гарнитуры: в классическом Bluetooth — «bluez_input.88:92:…»,
+    в LE Audio — «bluez_input.88_92_….0». kind: "sinks" | "sources"."""
+    mac = card[len("bluez_card."):]
+    prefix = "bluez_output." if kind == "sinks" else "bluez_input."
+    for line in sh("pactl", "list", kind, "short").splitlines():
+        parts = line.split("\t")
+        if len(parts) > 1 and parts[1].startswith(prefix) and not parts[1].endswith(".monitor") \
+                and mac.replace("_", "") in parts[1].replace("_", "").replace(":", ""):
+            return parts[1]
+    return None
+
+
+def card_profiles(card):
+    """Имена профилей карты (чтобы понять, есть ли LE Audio «звук + микрофон сразу»)."""
+    out, cur, names, inside = sh("pactl", "list", "cards"), None, [], False
+    for line in out.splitlines():
+        st = line.strip()
+        if st.startswith("Name: "):
+            cur = st[6:]
+        elif cur == card and st == "Profiles:":
+            inside = True
+        elif inside and cur == card:
+            if not line.startswith("\t\t"):
+                inside = False
+            elif ":" in st:
+                names.append(st.split(":", 1)[0])
+    return names
+
+
 def find_source(card):
     """Источник микрофона: из конфига или bluez_input той же гарнитуры."""
     if CONFIG.get("source") and CONFIG["source"] != "auto":
         return CONFIG["source"]
     if card:
-        mac = card[len("bluez_card."):].replace("_", ":")
-        return f"bluez_input.{mac}"
+        return bt_node(card, "sources") or "bluez_input." + card[len("bluez_card."):].replace("_", ":")
     return None
 
 
@@ -94,8 +123,8 @@ def clean_gigaam(t: str) -> str:
     return " ".join(t.split()).strip()
 
 
-# Микрофон JBL глушит тихое начало слова: «Ксения» доходит как «Сеня» (живой тест 2026-10-08)
-NAME_SLIPS = r"(?<!\w)(?:сеня|сенея|сения|сенья|ксеня|ксенья|ксенея|ксени)(?!\w)"
+# Микрофон JBL глушит тихое начало слова: «Ксения» доходит как «Сеня», в LE Audio — «Седия» (живой тест 2026-10-08)
+NAME_SLIPS = r"(?<!\w)(?:сеня|сенея|сения|сенья|ксеня|ксенья|ксенея|ксени|седия|седяя|кседия|ксеню)(?!\w)"
 
 
 def fix_name(t: str) -> str:
@@ -325,19 +354,26 @@ async def handle_listen(request):
         t0 = time.time()
         timings = {}
         card = await asyncio.to_thread(find_bt_card) if CONFIG.get("bluetooth", True) else None
-        source = find_source(card)
-        if not source:
-            return web.json_response({"error": "no_microphone"}, status=503)
         restore = None
         beep_sink = CONFIG.get("beep_sink") or None
         if card:
             prof = await asyncio.to_thread(card_profile, card)
-            if prof != CONFIG.get("hfp_profile", "headset-head-unit"):
+            if "bap-duplex" in await asyncio.to_thread(card_profiles, card):
+                # LE Audio: звук и микрофон одновременно — ничего не переключаем, начало ответа не теряется
+                if prof != "bap-duplex":
+                    await set_profile(card, "bap-duplex")
+                    await asyncio.sleep(CONFIG.get("le_settle_s", 0.5))
+                timings["mode"] = "le"
+            elif prof != CONFIG.get("hfp_profile", "headset-head-unit"):
                 restore = prof
                 await set_profile(card, CONFIG.get("hfp_profile", "headset-head-unit"))
                 await asyncio.sleep(CONFIG.get("hfp_settle_s", 0.6))
             if not beep_sink:
-                beep_sink = "bluez_output." + card[len("bluez_card."):].replace("_", ":")
+                beep_sink = await asyncio.to_thread(bt_node, card, "sinks") or \
+                    "bluez_output." + card[len("bluez_card."):].replace("_", ":")
+        source = await asyncio.to_thread(find_source, card)
+        if not source:
+            return web.json_response({"error": "no_microphone"}, status=503)
         timings["mic_ready_s"] = round(time.time() - t0, 2)
         restore_task = None
         try:
