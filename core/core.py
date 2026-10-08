@@ -22,6 +22,26 @@ import aiohttp
 from aiohttp import web
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+
+from tools import music  # noqa: E402  (инструменты — отдельные модули в core/tools)
+
+TOOL_MODULES = [music]
+TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
+TOOL_INDEX = {sch["function"]["name"]: m for m in TOOL_MODULES for sch in m.SCHEMAS}
+
+
+async def run_tool(name, arguments, session):
+    try:
+        args = json.loads(arguments) if arguments.strip() else {}
+    except json.JSONDecodeError:
+        return {"ok": False, "error": "аргументы инструмента — не JSON"}
+    mod = TOOL_INDEX.get(name)
+    if not mod:
+        return {"ok": False, "error": f"нет такого инструмента: {name}"}
+    try:
+        return await asyncio.wait_for(mod.call(name, args, session), timeout=30)
+    except Exception as e:
+        return {"ok": False, "error": f"сбой инструмента: {e}"}
 CONFIG = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
 PERSONA = open(os.path.join(ROOT, "prompts", "persona.md"), encoding="utf-8").read()
 BRAIN_KEY = open(CONFIG["brain_key_file"]).read().strip()
@@ -202,10 +222,6 @@ class Ksenia:
         # Nex — гибридная модель: её рекуррентное состояние нельзя откатить, поэтому запрос обязан
         # в точности продолжать прошлый. Время пишем в реплику и сохраняем её в истории как есть.
         self.history.append({"role": "user", "content": f"{user_text}\n\n(служебно: {now_context()})"})
-        msgs = [{"role": "system", "content": PERSONA}]
-        msgs += self.history[-CONFIG.get("history_messages", 30):]
-        body = {"messages": msgs, "stream": True, "max_tokens": CONFIG.get("max_tokens", 400),
-                "thinking_budget_tokens": self.budget_for(user_text)}
         speaker = Speaker(self.session)
         self.speaker = speaker
         queue: asyncio.Queue = asyncio.Queue()
@@ -219,7 +235,42 @@ class Ksenia:
             await speaker.finish()
 
         worker = asyncio.create_task(tts_worker())
+        spoken_all = []
+        budget = self.budget_for(user_text)  # динамический бюджет: болтовня 0, задача — больше
+        for step in range(CONFIG.get("max_steps", 6)):
+            content, calls, failed = await self._step(budget, queue, speaker, timings, first_step=(step == 0))
+            spoken_all.append(content)
+            msg = {"role": "assistant", "content": content}
+            if calls:
+                msg["tool_calls"] = calls
+            self.history.append(msg)
+            if not calls or speaker.cancelled:
+                break
+            any_error = False
+            for c in calls:
+                result = await run_tool(c["function"]["name"], c["function"].get("arguments") or "{}", self.session)
+                any_error = any_error or not result.get("ok", False)
+                log.info("Инструмент %s(%s) -> %s", c["function"]["name"], c["function"].get("arguments"), result)
+                self.history.append({"role": "tool", "tool_call_id": c.get("id", ""),
+                                     "content": json.dumps(result, ensure_ascii=False)})
+            # после инструмента — подумать чуть больше; после ошибки — ещё больше
+            budget = CONFIG.get("budget_hard", 4096) if any_error else CONFIG.get("budget_task", 512)
+        await queue.put(None)
+        await worker
+        timings["llm_done_s"] = round(time.time() - timings["_t0"], 2)
+        self.save_history()
+        full = " ".join(x for x in spoken_all if x).strip()
+        self.last_tag = (re.match(r"\s*\[(\w+)\]", full) or [None, None])[1]
+        return full
+
+    async def _step(self, budget, queue, speaker, timings, first_step):
+        """Один запрос к мозгу: речь идёт в озвучку по ходу, вызовы инструментов собираются."""
+        msgs = [{"role": "system", "content": PERSONA}]
+        msgs += self.history[-CONFIG.get("history_messages", 30):]
+        body = {"messages": msgs, "stream": True, "max_tokens": CONFIG.get("max_tokens", 400),
+                "thinking_budget_tokens": budget, "tools": TOOL_SCHEMAS}
         full, buf, first_sent = "", "", False
+        calls = {}
         try:
             async with self.session.post(CONFIG["brain_url"] + "/v1/chat/completions", json=body,
                                          headers={"Authorization": "Bearer " + BRAIN_KEY},
@@ -228,37 +279,38 @@ class Ksenia:
                     line = raw.decode("utf-8", "ignore").strip()
                     if not line.startswith("data:") or line.endswith("[DONE]"):
                         continue
-                    delta = json.loads(line[5:])["choices"][0]["delta"].get("content") or ""
+                    d = json.loads(line[5:])["choices"][0]["delta"]
+                    for tc in d.get("tool_calls") or []:
+                        slot = calls.setdefault(tc.get("index", 0), {"id": "", "type": "function",
+                                                                     "function": {"name": "", "arguments": ""}})
+                        if tc.get("id"):
+                            slot["id"] = tc["id"]
+                        fn = tc.get("function") or {}
+                        slot["function"]["name"] += fn.get("name") or ""
+                        slot["function"]["arguments"] += fn.get("arguments") or ""
+                    delta = d.get("content") or ""
                     if not delta:
                         continue
                     if "first_token_s" not in timings:
                         timings["first_token_s"] = round(time.time() - timings["_t0"], 2)
                     full += delta
                     buf += delta
-                    if not first_sent and self.last_tag and buf.lstrip().startswith(f"[{self.last_tag}]") \
-                            and len(buf.strip()) > len(self.last_tag) + 2:
+                    if first_step and not first_sent and self.last_tag and \
+                            buf.lstrip().startswith(f"[{self.last_tag}]") and len(buf.strip()) > len(self.last_tag) + 2:
                         buf = buf.lstrip()[len(self.last_tag) + 2:]  # та же эмоция, что в прошлый раз, — не повторяем
                     if not first_sent:
                         sent, buf = split_first_sentence(buf)
                         if sent:
-                            # первая фраза — сразу в озвучку, чтобы Ксения заговорила как можно раньше
-                            await queue.put(sent)
+                            await queue.put(sent)  # первая фраза — сразу, чтобы заговорить как можно раньше
                             first_sent = True
                     if speaker.cancelled:
                         break
         except aiohttp.ClientError as e:
             log.error("brain недоступен: %s", e)
             buf = "[sigh] Ой, у меня что-то с головой. Мозг не отвечает, проверь, пожалуйста, сервис."
-        # остаток ответа одним куском: генерация намного быстрее речи, так меньше пауз между фразами
         if buf.strip():
-            await queue.put(buf.strip())
-        await queue.put(None)
-        await worker
-        timings["llm_done_s"] = round(time.time() - timings["_t0"], 2)
-        self.history.append({"role": "assistant", "content": full.strip()})
-        self.save_history()
-        self.last_tag = (re.match(r"\s*\[(\w+)\]", full) or [None, None])[1]
-        return full.strip()
+            await queue.put(buf.strip())  # остаток одним куском: меньше пауз между фразами
+        return full.strip(), [calls[i] for i in sorted(calls)], False
 
     async def stop(self):
         if self.speaker:
@@ -280,7 +332,11 @@ async def handle_say(request):
     data = await request.json()
     timings = {"_t0": time.time()}
     await ks.stop()
-    reply = await turn(data["text"], timings)
+    await music.duck(True)
+    try:
+        reply = await turn(data["text"], timings)
+    finally:
+        await music.duck(False)
     return web.json_response({"reply": reply, "timings": timings})
 
 
@@ -304,6 +360,7 @@ class Conversation:
 
     async def run(self):
         self.turns = 0
+        await music.duck(True)
         try:
             while True:
                 async with ks.session.post(CONFIG["voice_in_url"] + "/listen",
@@ -322,6 +379,8 @@ class Conversation:
             pass
         except Exception as e:
             log.exception("Сбой разговора: %s", e)
+        finally:
+            await music.duck(False)
 
 
 conv = Conversation()

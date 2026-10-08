@@ -10,5 +10,8 @@
   "budget_chat": 0,
   "max_tokens": 400,
   "history_messages": 30,
-  "max_turns": 50
+  "max_turns": 50,
+  "max_steps": 6,
+  "budget_task": 512,
+  "budget_hard": 4096
 }
