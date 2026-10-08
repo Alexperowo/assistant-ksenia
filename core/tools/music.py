@@ -26,6 +26,31 @@ _book = {"id": None, "title": None, "search": [], "first": 0}
 _state = {"playlist": [],
           "station": None, "volume": NORMAL_VOLUME, "ducked": False, "last_query": None, "last_results": []}
 _proc = None
+_play = {"gen": 0, "task": None}  # номер текущего включения и фоновая дозагрузка его очереди
+
+
+def _new_playback():
+    """Новое включение: прошлая дозагрузка очереди больше не должна дописывать свои треки в mpv."""
+    _play["gen"] += 1
+    if _play["task"] and not _play["task"].done():
+        _play["task"].cancel()
+    _play["task"] = None
+    return _play["gen"]
+
+
+def _start_append(gen, items, label_of):
+    """Дописать треки в очередь mpv в фоне (прямые ссылки получаются по одной, это медленно)."""
+    async def append_rest():
+        for t, label in items:
+            try:
+                link = await asyncio.to_thread(_direct_link, t)
+            except Exception:
+                continue
+            if _play["gen"] != gen:  # пока ждали ссылку, включили другое
+                return
+            await _ipc("loadfile", link, "append")
+            _state["playlist"].append(label_of(t, label))
+    _play["task"] = asyncio.create_task(append_rest())
 
 SCHEMAS = [
     {"type": "function", "function": {
@@ -184,9 +209,10 @@ def _ym_collect(kind, query=None, liked=False, limit=12):
 
 
 async def _play_tracks(tracks, label):
+    """Первый трек — сразу, остальные дописываем в очередь mpv в фоне (ссылки получаются по одной)."""
+    gen = _new_playback()
     await save_book_position()
     _book["id"] = None
-    """Первый трек — сразу, остальные дописываем в очередь mpv в фоне (ссылки получаются по одной)."""
     await _ensure_mpv()
     first_link = await asyncio.to_thread(_direct_link, tracks[0])
     await _ipc("loadfile", first_link, "replace")
@@ -194,16 +220,7 @@ async def _play_tracks(tracks, label):
     _state["playlist"] = [_track_name(tracks[0])]
     _state["station"] = f"Яндекс Музыка: {label}"
     await _apply_volume()
-
-    async def append_rest():
-        for t in tracks[1:]:
-            try:
-                link = await asyncio.to_thread(_direct_link, t)
-            except Exception:
-                continue
-            await _ipc("loadfile", link, "append")
-            _state["playlist"].append(_track_name(t))
-    asyncio.create_task(append_rest())
+    _start_append(gen, [(t, None) for t in tracks[1:]], lambda t, _: _track_name(t))
 
 
 def _books_load():
@@ -256,6 +273,7 @@ async def _play_book(album_id, chapter=0, seconds=0.0):
     tracks, title = await asyncio.to_thread(_ym_book_tracks, album_id)
     if not tracks:
         return {"ok": False, "error": "в книге нет глав"}
+    gen = _new_playback()
     await save_book_position()
     chapter = max(0, min(chapter, len(tracks) - 1))
     _book["id"], _book["title"], _book["first"] = album_id, title, chapter
@@ -267,15 +285,8 @@ async def _play_book(album_id, chapter=0, seconds=0.0):
     _state["station"] = f"Аудиокнига: {title}"
     await _apply_volume()
 
-    async def append_rest():
-        for i, t in enumerate(tracks[chapter + 1:chapter + 40], start=chapter + 1):
-            try:
-                l2 = await asyncio.to_thread(_direct_link, t)
-            except Exception:
-                continue
-            await _ipc("loadfile", l2, "append")
-            _state["playlist"].append(f"{title}, глава {i + 1}")
-    asyncio.create_task(append_rest())
+    _start_append(gen, [(t, i) for i, t in enumerate(tracks[chapter + 1:chapter + 40], start=chapter + 1)],
+                  lambda t, i: f"{title}, глава {i + 1}")
     return {"ok": True, "book": title, "chapter": chapter + 1, "chapters_total": len(tracks),
             "from_minute": round(seconds / 60, 1)}
 
@@ -290,6 +301,7 @@ async def book_autosave_loop():
 
 
 async def _play_station(st):
+    _new_playback()
     _state["playlist"] = []
     await _ensure_mpv()
     await _ipc("loadfile", st["url_resolved"], "replace")
@@ -393,6 +405,7 @@ async def call(name: str, args: dict, session) -> dict:
         elif a == "resume":
             await _ipc("set_property", "pause", False)
         elif a == "stop":
+            _new_playback()
             await _ipc("stop")
             await _ipc("playlist-clear")
             _state["station"] = None
