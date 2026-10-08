@@ -24,10 +24,10 @@ from aiohttp import web
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-from tools import confirm, desktop, memory, music, research, screen, vk  # noqa: E402  (инструменты — отдельные модули в core/tools)
+from tools import confirm, daily, desktop, memory, music, research, screen, vk  # noqa: E402  (инструменты — отдельные модули в core/tools)
 from tools import web as webtool  # noqa: E402  (не путать с aiohttp.web)
 
-TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research]
+TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research, daily]
 TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
 TOOL_INDEX = {sch["function"]["name"]: m for m in TOOL_MODULES for sch in m.SCHEMAS}
 
@@ -359,7 +359,8 @@ class Ksenia:
         self.history = self._load_history()
         self.window_start = 0
         self.system = PERSONA + memory.prompt_block()
-        self.last_turn_t = 0.0
+        # время последней реплики переживает перезапуск ядра (иначе «Доброе утро» после каждого перезапуска)
+        self.last_turn_t = os.path.getmtime(HISTORY_FILE) if os.path.exists(HISTORY_FILE) and self.history else 0.0
         self.lock = asyncio.Lock()
         self.speaker = None
         self.session = None
@@ -451,8 +452,12 @@ class Ksenia:
         if memory.changed["flag"] and time.time() - getattr(self, "last_turn_t", 0.0) > CONFIG.get("memory_refresh_idle_s", 300):
             self.system = PERSONA + memory.prompt_block()
             memory.changed["flag"] = False
+        first_today = datetime.date.fromtimestamp(getattr(self, "last_turn_t", 0.0) or 0) != datetime.date.today()
         self.last_turn_t = time.time()
         note = await self._resolve_confirmation(user_text)
+        if first_today and not user_text.startswith("(служебно"):
+            note += ("; это первый разговор за сегодня — тепло поздоровайся по времени суток; можешь коротко "
+                     "предложить погоду и напомнить, что стоит на сегодня (remind_list), если это к месту")
         self.history.append({"role": "user", "content": f"{user_text}\n\n(служебно: {now_context()}{note})"})
         speaker = Speaker(self.session)
         self.speaker = speaker
@@ -576,6 +581,18 @@ class Ksenia:
                             if sent:
                                 await queue.put((sent, False))  # первая фраза — сразу, чтобы заговорить как можно раньше
                                 first_sent = True
+        except aiohttp.ServerDisconnectedError as e:
+            # сервер закрыл соединение, которое aiohttp пытался переиспользовать: если ещё ничего не пришло —
+            # это не сбой мозга, просто повторяем запрос один раз
+            if not full and not calls and not getattr(self, "_retrying", False):
+                log.warning("brain: соединение закрыто сервером до ответа — повтор")
+                self._retrying = True
+                try:
+                    return await self._step(budget, queue, speaker, timings, first_step)
+                finally:
+                    self._retrying = False
+            log.error("brain недоступен: %r", e)
+            failed = True
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:  # общий таймаут aiohttp — TimeoutError, не ClientError
             log.error("brain недоступен: %r", e)
             failed = True
@@ -765,6 +782,28 @@ async def deliver_waiting():
         await turn(finding_prompt(f), {"_t0": time.time(), "finding": True})
 
 
+async def reminders_loop():
+    """Напоминания: в срок — уведомление на экране и голосом (через служебную реплику, чтобы Ксения сказала по-живому)."""
+    while True:
+        await asyncio.sleep(5)
+        try:
+            ready = daily.due()
+        except Exception:
+            log.exception("напоминания")
+            continue
+        for r in ready:
+            daily.notify(r["text"])
+            log.info("Напоминание: %s", r["text"])
+            while ks.lock.locked():
+                await asyncio.sleep(0.3)
+            await music.duck(True)
+            try:
+                await turn(f"(служебно: пришло время напоминания, которое Александр просил: «{r['text']}». "
+                           f"Скажи ему об этом коротко и по-живому. Это не его реплика.)", {"_t0": time.time(), "reminder": True})
+            finally:
+                await music.duck(False)
+
+
 async def findings_loop():
     """Находки фоновых помощников: в разговоре — после текущей реплики, без разговора — сразу голосом."""
     while True:
@@ -857,9 +896,12 @@ BACKGROUND = []
 
 
 async def on_start(app):
-    ks.session = aiohttp.ClientSession()
+    # force_close: llama-server закрывает простаивающие соединения, а переиспользование закрытого
+    # давало ServerDisconnected на шаге после инструмента (локальные соединения дёшевы)
+    ks.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True))
     research.CTX.update({"brain_url": CONFIG["brain_url"], "brain_key": BRAIN_KEY})
     asyncio.create_task(findings_loop())
+    asyncio.create_task(reminders_loop())
     # ссылки на фоновые задачи храним: цикл событий держит задачи только слабыми ссылками
     BACKGROUND.extend([asyncio.create_task(music.book_autosave_loop()), asyncio.create_task(warmup())])
 
