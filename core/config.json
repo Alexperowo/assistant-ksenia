@@ -8,11 +8,12 @@
   "output_sink": "auto",
   "tts_stride": 8,
   "budget_chat": 0,
-  "budget_action": 256,
+  "budget_action": 0,
+  "brain_reasoning_levels": true,
   "max_tokens": 400,
   "history_max": 60,
   "max_turns": 50,
-  "max_steps": 6,
+  "max_steps": 12,
   "budget_task": 512,
   "budget_hard": 4096
 }

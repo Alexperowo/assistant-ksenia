@@ -85,7 +85,8 @@ def now_context():
     return f"Сейчас {WEEKDAYS[n.weekday()]}, {n.day} {MONTHS[n.month - 1]} {n.year} года, {n.strftime('%H:%M')}."
 
 
-THINK_RE = re.compile(r"<think>.*?</think>|<think>.*$|</?think>", re.S)
+THINK_RE = re.compile(r"<think>.*?</think>|<think>.*$|</?think>"
+                      r"|(?:Conclude reasoning\s*)?immediately and output the final answer now\.?", re.S | re.I)
 
 
 def strip_thinking(text: str) -> str:
@@ -488,6 +489,9 @@ class Ksenia:
                     content, calls, failed = await self._step(0, queue, speaker, timings, first_step=False)
                 spoken_all.append(content)
                 msg = {"role": "assistant", "content": content}
+                # история должна совпадать с тем, что модель сгенерировала, иначе гибридный мозг пересчитывает хвост
+                if getattr(self, "_last_reasoning", "").strip():
+                    msg["reasoning_content"] = self._last_reasoning
                 if calls:
                     msg["tool_calls"] = calls
                 self.history.append(msg)
@@ -543,9 +547,21 @@ class Ksenia:
         # обрывается на 400-м, и ответа нет вовсе (тишина после ошибки инструмента)
         body = {"messages": msgs, "stream": True, "max_tokens": CONFIG.get("max_tokens", 400) + budget,
                 "thinking_budget_tokens": budget, "tools": TOOL_SCHEMAS}
+        # Бюджет 0 — размышления выключаются шаблоном (Qwen3.8/Bonsai: ни одного служебного токена).
+        # Nex этот выключатель игнорирует, но слушается бюджета — поэтому шлём оба.
+        # Бюджет > 0 — уровень рассуждения как подсказка шаблону (low/medium/xhigh; «high» шаблон Bonsai не принимает),
+        # а жёсткий потолок по-прежнему thinking_budget_tokens (одни уровни размышления не укорачивают).
+        if CONFIG.get("brain_reasoning_levels", False):
+            if budget <= 0:
+                body["chat_template_kwargs"] = {"enable_thinking": False}
+                # без бюджета: иначе сервер вставляет фразу-«стоп размышлений» прямо в ответ
+                body.pop("thinking_budget_tokens", None)
+            else:
+                body["reasoning_effort"] = "low" if budget <= 512 else ("medium" if budget <= 2048 else "xhigh")
         full, buf, first_sent = "", "", False
         calls = {}
         failed = False
+        self._last_reasoning = ""  # размышления шага: шаблон Qwen3.8 рисует их в истории (preserve_thinking)
         try:
             async with self.session.post(CONFIG["brain_url"] + "/v1/chat/completions", json=body,
                                          headers={"Authorization": "Bearer " + BRAIN_KEY},
@@ -566,6 +582,7 @@ class Ksenia:
                             continue
                         for tc in d.get("tool_calls") or []:
                             merge_tool_call(calls, tc)
+                        self._last_reasoning += d.get("reasoning_content") or ""
                         delta = d.get("content") or ""
                         if not delta:
                             continue
