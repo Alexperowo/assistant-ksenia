@@ -23,6 +23,7 @@ import time
 import urllib.parse
 
 import aiohttp
+import numpy as np
 from aiohttp import web
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -392,6 +393,7 @@ class Speaker:
         self.player = None
         self.cancelled = False
         self.recorded = bytearray()  # копия всего, что ушло в наушники (для разбора помех)
+        self.gain, self._carry = 1.0, b""
 
     async def _ensure_player(self):
         if self.player is None or self.player.returncode is not None:
@@ -470,6 +472,8 @@ class Speaker:
                             return
                         if "first_audio_s" not in timings:
                             timings["first_audio_s"] = round(time.time() - timings["_t0"], 2)
+                        if self.gain != 1.0 or self._carry:
+                            chunk = self._apply_gain(chunk)
                         self.player.stdin.write(chunk)
                         written += len(chunk)
                         self.recorded.extend(chunk)
@@ -519,22 +523,19 @@ class Speaker:
             except Exception:
                 pass
 
-    async def set_volume(self, percent: int):
-        """Громкость своей озвучки (живой режим: тише, пока Александр говорит; обратно — если это было «ага»)."""
-        p = self.player
-        if p is None or isinstance(p, ClientPlayer) or p.returncode is not None:
-            return
-        try:
-            out = (await asyncio.to_thread(subprocess.run, ["pactl", "list", "sink-inputs"], capture_output=True,
-                                           text=True, timeout=3)).stdout
-        except (OSError, subprocess.SubprocessError):
-            return
-        for block in out.split("Sink Input #")[1:]:
-            if f'application.process.id = "{p.pid}"' in block:
-                idx = block.split("\n", 1)[0].strip()
-                await asyncio.to_thread(subprocess.run, ["pactl", "set-sink-input-volume", idx, f"{percent}%"],
-                                        capture_output=True, timeout=3)
-                return
+    def set_volume(self, percent: int):
+        """Громкость своей озвучки (живой режим: тише, пока Александр говорит). Меняется в самих данных,
+        а не громкостью потока: PipeWire запоминал приглушённую громкость для всех следующих фраз (3 %)."""
+        self.gain = max(0.0, percent / 100)
+
+    def _apply_gain(self, chunk: bytes) -> bytes:
+        if self.gain == 1.0 and not self._carry:
+            return chunk
+        data = self._carry + chunk
+        cut = len(data) - len(data) % 2
+        self._carry = data[cut:]
+        x = np.frombuffer(data[:cut], dtype=np.int16)
+        return (x * self.gain).astype(np.int16).tobytes() if self.gain != 1.0 else data[:cut]
 
     async def cancel(self):
         self.cancelled = True
@@ -1297,7 +1298,7 @@ class LiveConversation(Conversation):
     async def unduck(self):
         sp, self.ducked = self.ducked, None
         if sp is not None and not sp.cancelled:
-            await sp.set_volume(100)
+            sp.set_volume(100)
 
     @staticmethod
     def speaking():
@@ -1362,7 +1363,7 @@ class LiveConversation(Conversation):
                         if kind == "speech_long" and self.busy() and self.speaking() and not self.ducked:
                             # как человек: не обрывать на полуслове, а говорить тише и понять, что он сказал
                             self.ducked = ks.speaker
-                            await ks.speaker.set_volume(CONFIG.get("live_duck_percent", 30))
+                            ks.speaker.set_volume(CONFIG.get("live_duck_percent", 30))
                         continue
                     if kind == "error":
                         log.warning("Живой режим: %s", ev)

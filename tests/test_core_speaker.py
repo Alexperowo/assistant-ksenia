@@ -153,3 +153,14 @@ def test_warm_opens_player_with_silence_before_speech(players):
     assert len(made) == 1
     silence = 44100 * core.CONFIG.get("bt_warm_ms", 400) // 1000 * 2
     assert made[0].stdin.data == b"\x00" * silence + b"\x01\x02"
+
+
+def test_gain_scales_samples_across_odd_chunks():
+    import numpy as np
+    sp = core.Speaker(None)
+    sp.set_volume(50)
+    x = np.array([1000, -2000, 3000], dtype=np.int16).tobytes()
+    out = sp._apply_gain(x[:3]) + sp._apply_gain(x[3:])  # поток разрезан посреди сэмпла
+    assert np.frombuffer(out, dtype=np.int16).tolist() == [500, -1000, 1500]
+    sp.set_volume(100)
+    assert sp._apply_gain(x) == x
