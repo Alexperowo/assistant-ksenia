@@ -81,3 +81,20 @@ def test_typing_without_enter_is_immediate(page):
     pg = page("https://site.example/form", [{"kind": "field", "role": "textbox", "label": "Имя", "placeholder": "Имя"}])
     r = call("web_type", {"field": "Имя", "text": "Александр"})
     assert r["ok"] and pg.log == [("fill", "Имя", "Александр")]
+
+
+def test_open_refuses_redirect_into_home_network(page, monkeypatch):
+    pg = page("about:blank", [])
+
+    async def goto(url):
+        pg.url = "http://192.168.0.1/admin"  # публичная страница перенаправила на роутер
+        return pg
+
+    async def blank(url, **kw):
+        pg.url = url
+
+    monkeypatch.setattr(web, "_goto", goto)
+    monkeypatch.setattr(web, "_public_url", lambda url: not url.startswith("http://192.168."))
+    pg.goto = blank
+    r = call("web_open", {"url": "https://public.example/r"})
+    assert r["ok"] is False and "домашней сети" in r["error"] and pg.url == "about:blank"

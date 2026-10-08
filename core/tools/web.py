@@ -229,6 +229,11 @@ async def call(name, args, session):
         if not await asyncio.to_thread(_public_url, url):
             return {"ok": False, "error": "такой адрес открывать нельзя (не публичный сайт)"}
         pg = await _goto(url)
+        if not await asyncio.to_thread(_public_url, pg.url):
+            # перенаправили на локальный адрес: сторож сети его не пустил, но и страницу оставлять нельзя
+            await pg.goto("about:blank")
+            _state["url"] = None
+            return {"ok": False, "error": "страница перенаправила на адрес домашней сети — не открываю"}
         page = await pg.evaluate(EXTRACT_JS)
         text = page["text"]
         if not text:
