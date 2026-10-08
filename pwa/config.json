@@ -1,0 +1,12 @@
+{
+  "https_port": 18140,
+  "http_port": 18141,
+  "host": "0.0.0.0",
+  "core_url": "http://127.0.0.1:18130",
+  "voice_in_url": "http://127.0.0.1:18120",
+  "data_dir": "../data/pwa",
+  "session_days": 180,
+  "pin_attempts": 5,
+  "pin_window_s": 600,
+  "pin_global_attempts": 20
+}
