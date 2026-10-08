@@ -103,3 +103,12 @@ def test_play_and_next_station(no_mpv, monkeypatch):
     a, b = asyncio.run(go())
     assert a["ok"] and a["station"] == "Rock 1" and b["station"] == "Rock 2"
     assert ("loadfile", "https://r2.example", "replace") in no_mpv
+
+
+def test_clean_title_drops_station_junk():
+    from tools import music
+    assert music._clean_title('{"status":1,"message":"Ok"}\r\n0\r\n') is None
+    assert music._clean_title("http://stream.example/live.mp3") is None
+    assert music._clean_title("live.aac") is None
+    assert music._clean_title("Чайф — Аргентина-Ямайка 5:0") == "Чайф — Аргентина-Ямайка 5:0"
+    assert music._clean_title(None) is None

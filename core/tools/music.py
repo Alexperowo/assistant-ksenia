@@ -192,6 +192,17 @@ def _music_only(stations, query):
     return songs or stations
 
 
+def _clean_title(title):
+    """Название трека из метаданных станции — недоверенный текст: служебный мусор (JSON, адреса, коды) отбрасываем."""
+    if not isinstance(title, str):
+        return None
+    t = " ".join(title.split())
+    if not t or len(t) > 150 or any(c in t for c in "{}<>\\") or t.startswith(("http", "/")) or \
+            t.lower().endswith((".mp3", ".aac", ".m3u8", ".pls")):
+        return None
+    return t
+
+
 def _ym_client():
     global _ym
     if _ym is None:
@@ -468,7 +479,7 @@ async def call(name: str, args: dict, session) -> dict:
             await _play_station(random.choice(others[:8]))
         return {"ok": True, "action": a, "station": _state["station"], "volume": _state["volume"]}
     if name == "music_status":
-        title = (await _ipc("get_property", "media-title") or {}).get("data")
+        title = _clean_title((await _ipc("get_property", "media-title") or {}).get("data"))
         if _state["playlist"]:
             pos = (await _ipc("get_property", "playlist-pos") or {}).get("data")
             offset = sum(1 for x in _state["playlist"] if x is None)  # книга начата не с первой главы
