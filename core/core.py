@@ -393,7 +393,9 @@ class Ksenia:
         Возвращает (текст, вызовы, сбой). При сбое или перебивании вызовы отбрасываются: их аргументы
         могли оборваться на полуслове, а исполнять половину команды нельзя."""
         msgs = [{"role": "system", "content": PERSONA}] + self._window()
-        body = {"messages": msgs, "stream": True, "max_tokens": CONFIG.get("max_tokens", 400),
+        # max_tokens у llama-server считает и токены рассуждений: без запаса на бюджет мысль на 512/4096 токенов
+        # обрывается на 400-м, и ответа нет вовсе (тишина после ошибки инструмента)
+        body = {"messages": msgs, "stream": True, "max_tokens": CONFIG.get("max_tokens", 400) + budget,
                 "thinking_budget_tokens": budget, "tools": TOOL_SCHEMAS}
         full, buf, first_sent = "", "", False
         calls = {}
