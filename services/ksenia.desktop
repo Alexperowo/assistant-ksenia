@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Ксения
+Comment=Включить Ксению (модели Nexus выключатся)
+Exec=/home/user/.local/bin/ksenia-mode ksenia
+Icon=audio-headset
+Terminal=false
+Type=Application

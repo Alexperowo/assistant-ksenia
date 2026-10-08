@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Сказать фразу голосом Ксении напрямую через voice-out (без мозга) — для переключений и служебных сообщений.
+TEXT="$*"
+python3 - "$TEXT" <<'PY'
+import json, sys, subprocess, urllib.request, uuid
+text = sys.argv[1]
+b = uuid.uuid4().hex
+params = {"stream": True, "chunked": True, "stream_start_buffer_ms": 0, "output_format": "pcm_s16le",
+          "stream_holdback_frames": 0, "stream_decode_stride_frames": 8}
+parts = [("text", text), ("voice", "masha"), ("params", json.dumps(params))]
+body = b"".join(f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode() for k, v in parts) + f"--{b}--\r\n".encode()
+req = urllib.request.Request("http://127.0.0.1:18110/generate", data=body,
+                             headers={"Content-Type": f"multipart/form-data; boundary={b}"})
+try:
+    with urllib.request.urlopen(req, timeout=60) as r:
+        p = subprocess.Popen(["pacat", "--playback", "--raw", "--rate=44100", "--channels=1", "--format=s16le"],
+                             stdin=subprocess.PIPE)
+        while True:
+            chunk = r.read(8192)
+            if not chunk:
+                break
+            p.stdin.write(chunk)
+        p.stdin.close()
+        p.wait()
+except Exception as e:
+    subprocess.run(["notify-send", "-a", "Ксения", "Ксения", text])
+PY

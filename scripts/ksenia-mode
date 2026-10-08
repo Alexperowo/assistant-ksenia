@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Переключение видеокарт: ksenia-mode ksenia | nexus
+# ksenia — Ксения (мозг на RTX 5060 Ti, голос и слух на RTX 2080 Ti), модели Nexus выключаются.
+# nexus  — Antigravity-Nexus: Ксения освобождает обе видеокарты, запускается Antigravity.
+KSENIA="ksenia-voice-out ksenia-voice-in ksenia-brain ksenia-core"
+NEXUS_MODELS="nexus-llama nexus-tinfield nexus-nex nexus-ornith"
+case "${1:-ksenia}" in
+  nexus)
+    systemctl --user is-active --quiet ksenia-voice-out && /home/user/Agents/Ksenia/scripts/ksenia-announce "Переключаюсь на Антигравити. Позови меня ярлыком, когда понадоблюсь."
+    systemctl --user stop ksenia-core ksenia-brain ksenia-voice-in ksenia-voice-out ksenia-pwa 2>/dev/null
+    notify-send -a "Ксения" -i applications-development "Antigravity-Nexus" "Ксения выключена, видеокарты свободны для Nexus."
+    pgrep -f /opt/antigravity/antigravity >/dev/null || setsid /opt/antigravity/antigravity >/dev/null 2>&1 &
+    ;;
+  ksenia)
+    systemctl --user stop $NEXUS_MODELS 2>/dev/null
+    systemctl --user start ksenia-voice-out ksenia-voice-in ksenia-brain ksenia-core
+    for i in $(seq 1 90); do
+      curl -s -m 2 -H "Authorization: Bearer $(cat /home/user/Agents/Ksenia/brain/api_key)" http://127.0.0.1:18100/health | grep -q ok \
+        && curl -s -m 2 http://127.0.0.1:18110/ >/dev/null 2>&1; [ $? -eq 0 ] && break; sleep 2
+    done
+    /home/user/Agents/Ksenia/scripts/ksenia-announce "Я снова с тобой."
+    ;;
+  *) echo "использование: ksenia-mode ksenia|nexus" >&2; exit 2 ;;
+esac
