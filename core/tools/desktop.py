@@ -47,12 +47,17 @@ SCHEMAS = [
         "parameters": {"type": "object", "properties": {
             "action": {"type": "string", "enum": ["close", "minimize", "maximize"]}}, "required": ["action"]}}},
     {"type": "function", "function": {
+        "name": "app_menu",
+        "description": ("Открыть или закрыть меню приложений внизу экрана (как «Пуск» в Windows). Чтобы запустить "
+                        "конкретную программу, меню не нужно — сразу app_open."),
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
         "name": "window_read",
         "description": "Прочитать вслух дословно текст активного окна (через доступность; если её нет — распознаванием).",
         "parameters": {"type": "object", "properties": {}}}},
 ]
 
-TIMEOUTS = {"window_action": 15, "app_open": 20, "ui_elements": 25, "ui_click": 25, "ui_type": 25, "window_read": 60}
+TIMEOUTS = {"app_menu": 10, "window_action": 15, "app_open": 20, "ui_elements": 25, "ui_click": 25, "ui_type": 25, "window_read": 60}
 
 
 HELPER_TIMEOUT_S = 20
@@ -181,6 +186,12 @@ async def call(name, args, session):
         await p.wait()
         await asyncio.sleep(0.6)
         return {"ok": p.returncode == 0, "action": args.get("action"), "window": before}
+    if name == "app_menu":
+        p = await asyncio.create_subprocess_exec("qdbus6", "org.kde.plasmashell", "/PlasmaShell",
+                                                 "org.kde.PlasmaShell.activateLauncherMenu",
+                                                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await p.wait()
+        return {"ok": p.returncode == 0, "note": "меню открыто, в нём сразу поиск: можно вписать название (ui_type)"}
     if name == "window_read":
         res = await _helper("read")
         text = (res.get("text") or "").strip() if res.get("ok") else ""

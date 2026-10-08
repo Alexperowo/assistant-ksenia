@@ -61,6 +61,18 @@ NEW_TOOLS = _tools_changed()
 TOOL_TIMEOUT_S = 30
 
 
+# Действия, которые Ксения делала сама, без просьбы (живой тест 2026-10-08: свернула терминал, развернула
+# монитор железа, поставила напоминание). Ядро пропускает их, только если о них есть слово в последних репликах.
+ASK_GATES = {"remind_set": r"напомн|таймер|будильник|разбуд|засек",
+             "window_action": r"окн|сверн|разверн|закр|убер"}
+UNASKED_RESULT = {"ok": False, "error": "Александр об этом не просил — сама такое не делай; если это нужно, предложи словами"}
+
+
+def asked_for(name: str, user_text: str) -> bool:
+    gate = ASK_GATES.get(name)
+    return not gate or re.search(gate, user_text.lower()) is not None
+
+
 async def run_tool(name, arguments, session):
     try:
         args = json.loads(arguments) if arguments.strip() else {}
@@ -588,6 +600,17 @@ class Ksenia:
             json.dump(self.history[-CONFIG.get("history_keep", 200):], f, ensure_ascii=False, indent=1)
         os.replace(tmp, HISTORY_FILE)
 
+    def recent_user_text(self, n: int = 2) -> str:
+        """Последние n реплик Александра без служебных пометок: «напомни…» — «через пять минут»."""
+        out = []
+        for m in reversed(self.history):
+            c = m.get("content")
+            if m.get("role") == "user" and isinstance(c, str) and not c.startswith("(служебно"):
+                out.append(c.split("\n\n(служебно", 1)[0])
+                if len(out) >= n:
+                    break
+        return " ".join(reversed(out))
+
     async def _resolve_confirmation(self, user_text: str) -> str:
         """Подтверждение рискованного действия решает ЯДРО, не модель: если действие ждёт и Александр
         ответил ясным согласием — ядро выполняет его само; любой другой ответ отменяет."""
@@ -738,6 +761,8 @@ class Ksenia:
                         result = INTERNAL_NO_TOOLS
                     elif getattr(self, "_guest", False):
                         result = {"ok": False, "error": "говорит не Александр — действия выполняет только он"}
+                    elif not asked_for(c["function"]["name"], self.recent_user_text()):
+                        result = UNASKED_RESULT
                     else:
                         result = await run_tool(c["function"]["name"], c["function"].get("arguments") or "{}", self.session)
                     any_error = any_error or not result.get("ok", False)
@@ -1014,6 +1039,14 @@ def _words(text: str) -> str:
 BYE_PHRASES = [_words(w) for w in BYE_WORDS]
 
 
+STOP_PHRASES = {_words(w) for w in ("стоп", "хватит", "отбой", "замолчи", "ксения стоп", "стоп разговор",
+                                      "всё хватит", "достаточно", "тихо")}
+
+
+def is_stop(text: str) -> bool:
+    return _words(text) in STOP_PHRASES
+
+
 def is_goodbye(text: str) -> bool:
     """Прощание — целыми словами: в конце реплики или в начале короткой («пока, Ксения»).
     «Покажи экран» и «пока я готовлю, включи музыку» — не прощание."""
@@ -1113,6 +1146,11 @@ class Conversation:
                 if speaker.get("owner") is False and voicectl.STATE["mode"] == "owner_only":
                     log.info("Чужой голос (%.2f) — режим «только Александр», не отвечаю: %s", speaker.get("score", 0), text)
                     continue
+                if is_stop(text) and not music._state.get("station"):
+                    # «стоп» без музыки — закончить разговор молча (раньше Ксения отвечала и спрашивала ещё);
+                    # при музыке «стоп» уходит мозгу — скорее всего, это про музыку
+                    log.info("«%s» — разговор окончен", text)
+                    return
                 if voicectl.STATE["enrolling"] > 0 and speaker.get("owner") is not False:
                     await self.enroll_step()
                 timings = {"_t0": time.time(), "listen": info}

@@ -22,10 +22,10 @@ FILE = os.path.normpath(os.path.join(ROOT, "..", "..", "data", "reminders.json")
 SCHEMAS = [
     {"type": "function", "function": {
         "name": "weather",
-        "description": ("Погода: сейчас и прогноз на сегодня/завтра/послезавтра. city — город; если Александр не назвал, "
+        "description": ("Погода: сейчас и прогноз на сегодня/завтра/послезавтра или на неделю (week). city — город; если Александр не назвал, "
                         "не указывай — возьмётся из памяти (если города в памяти нет, спроси его и запомни)."),
         "parameters": {"type": "object", "properties": {
-            "city": {"type": "string"}, "day": {"type": "string", "enum": ["now", "today", "tomorrow", "after_tomorrow"]}}}}},
+            "city": {"type": "string"}, "day": {"type": "string", "enum": ["now", "today", "tomorrow", "after_tomorrow", "week"]}}}}},
     {"type": "function", "function": {
         "name": "remind_set",
         "description": ("Поставить напоминание или таймер. text — что напомнить. Время: in_minutes (через сколько минут) "
@@ -135,7 +135,9 @@ async def _weather(city, day, session):
         g = await r.json(content_type=None)
     res = (g.get("results") or [None])[0]
     if not res:
-        return {"ok": False, "error": f"не нашла город «{city}»"}
+        return {"ok": False, "error": f"не нашла город «{city}»",
+                "note": "название могло быть искажено распознаванием речи: подумай, какой настоящий город похож "
+                        "по звучанию, и сразу вызови weather с ним; переспроси, только если вариантов нет"}
     lat, lon = round(res["latitude"], 3), round(res["longitude"], 3)
     url = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={lat}&lon={lon}"
     async with session.get(url, headers=UA, timeout=aiohttp.ClientTimeout(total=15)) as r:
@@ -149,31 +151,45 @@ async def _weather(city, day, session):
     out = {"ok": True, "city": res.get("name"), "region": res.get("admin1"),
            "now": {"temp": round(det.get("air_temperature", 0)), "wind_ms": det.get("wind_speed"),
                    "humidity": det.get("relative_humidity"), "sky": _symbol((nxt.get("summary") or {}).get("symbol_code"))}}
+    steps = [(dt.datetime.fromisoformat(t["time"].replace("Z", "+00:00")).astimezone(), t) for t in ts]
+    today = dt.datetime.now(dt.timezone.utc).astimezone().date()
     if day in ("today", "tomorrow", "after_tomorrow"):
-        target = (dt.datetime.now(dt.timezone.utc).astimezone().date() +
-                  dt.timedelta(days={"today": 0, "tomorrow": 1, "after_tomorrow": 2}[day]))
-        temps, rain, skies = [], 0.0, []
-        steps = [(dt.datetime.fromisoformat(t["time"].replace("Z", "+00:00")).astimezone(), t) for t in ts]
-        for k, (when, t) in enumerate(steps):
-            if when.date() != target:
-                continue
-            temps.append(t["data"]["instant"]["details"].get("air_temperature"))
-            # осадки: в ближайшие ~2,5 суток шаги часовые (берём next_1_hours), дальше — по 6 часов в 0/6/12/18 UTC
-            # (next_6_hours). Раньше брались только шаги с местным часом, кратным 6: в UTC+3 шестичасовых шагов
-            # с таким часом нет, и на послезавтра осадки всегда выходили 0
-            gap = (steps[k + 1][0] - when).total_seconds() / 3600 if k + 1 < len(steps) else None
-            one, six = t["data"].get("next_1_hours"), t["data"].get("next_6_hours")
-            block = one if one and (gap == 1 or (gap is None and not six)) else (six or one or {})
-            rain += float((block.get("details") or {}).get("precipitation_amount") or 0)
-            n6 = six or one or {}
-            if 9 <= when.hour <= 18 and n6.get("summary"):
-                skies.append(_symbol(n6["summary"].get("symbol_code")))
-        temps = [x for x in temps if x is not None]
-        if temps:
-            out["forecast"] = {"date": target.isoformat(), "min": round(min(temps)), "max": round(max(temps)),
-                               "precipitation_mm": round(rain, 1),
-                               "day_sky": max(set(skies), key=skies.count) if skies else None}
+        f = _day_summary(steps, today + dt.timedelta(days={"today": 0, "tomorrow": 1, "after_tomorrow": 2}[day]))
+        if f:
+            out["forecast"] = f
+    elif day == "week":
+        # раньше было только до послезавтра, и Ксения называла три дня «неделей» (живой тест 2026-10-08)
+        days = [f for k in range(7) if (f := _day_summary(steps, today + dt.timedelta(days=k)))]
+        out["week"] = days
+        out["note"] = f"прогноз на {len(days)} дн.; назови дни недели и главное, коротко"
     return out
+
+
+WEEKDAYS = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+
+
+def _day_summary(steps, target):
+    temps, rain, skies = [], 0.0, []
+    for k, (when, t) in enumerate(steps):
+        if when.date() != target:
+            continue
+        temps.append(t["data"]["instant"]["details"].get("air_temperature"))
+        # осадки: в ближайшие ~2,5 суток шаги часовые (берём next_1_hours), дальше — по 6 часов в 0/6/12/18 UTC
+        # (next_6_hours). Раньше брались только шаги с местным часом, кратным 6: в UTC+3 шестичасовых шагов
+        # с таким часом нет, и на послезавтра осадки всегда выходили 0
+        gap = (steps[k + 1][0] - when).total_seconds() / 3600 if k + 1 < len(steps) else None
+        one, six = t["data"].get("next_1_hours"), t["data"].get("next_6_hours")
+        block = one if one and (gap == 1 or (gap is None and not six)) else (six or one or {})
+        rain += float((block.get("details") or {}).get("precipitation_amount") or 0)
+        n6 = six or one or {}
+        if 9 <= when.hour <= 18 and n6.get("summary"):
+            skies.append(_symbol(n6["summary"].get("symbol_code")))
+    temps = [x for x in temps if x is not None]
+    if not temps:
+        return None
+    return {"date": target.isoformat(), "weekday": WEEKDAYS[target.weekday()], "min": round(min(temps)),
+            "max": round(max(temps)), "precipitation_mm": round(rain, 1),
+            "day_sky": max(set(skies), key=skies.count) if skies else None}
 
 
 def _city_from_memory():
