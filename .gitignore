@@ -6,3 +6,4 @@ voice-tests/
 __pycache__/
 *.bak-*
 secrets/
+.pytest_cache/

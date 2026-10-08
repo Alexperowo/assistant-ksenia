@@ -1,0 +1,5 @@
+# Тесты: python -m pytest tests (без сети, без GPU и Bluetooth)
+pytest>=8
+aiohttp>=3.9
+numpy
+pillow

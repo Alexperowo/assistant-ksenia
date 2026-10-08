@@ -44,10 +44,22 @@ async def run_tool(name, arguments, session):
         return {"ok": False, "error": f"сбой инструмента: {e}"}
 CONFIG = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
 PERSONA = open(os.path.join(ROOT, "prompts", "persona.md"), encoding="utf-8").read()
-BRAIN_KEY = open(CONFIG["brain_key_file"]).read().strip()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("core")
+
+
+def read_key(path):
+    """Ключ мозга. Без него ядро всё равно стартует: лучше сказать голосом «мозг не отвечает», чем молча падать."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError as e:
+        log.error("Нет ключа мозга %s: %s", path, e)
+        return ""
+
+
+BRAIN_KEY = read_key(CONFIG["brain_key_file"])
 
 ALLOWED_TAGS = {"laughing", "sigh", "teasing", "excited", "surprised", "whisper", "annoyed", "warm"}
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа",
