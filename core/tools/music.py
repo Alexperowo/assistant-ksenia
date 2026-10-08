@@ -26,7 +26,8 @@ _book = {"id": None, "title": None, "search": [], "first": 0}
 _state = {"playlist": [],
           "station": None, "volume": NORMAL_VOLUME, "ducked": False, "last_query": None, "last_results": []}
 _proc = None
-_play = {"gen": 0, "task": None}  # номер текущего включения и фоновая дозагрузка его очереди
+_play = {"gen": 0, "task": None}
+_ipc_ids = [0]  # номер текущего включения и фоновая дозагрузка его очереди
 
 
 def _new_playback():
@@ -117,17 +118,35 @@ async def _ensure_mpv():
 
 
 async def _ipc(*command):
+    """Команда mpv через IPC-сокет -> ответ (dict) или None.
+
+    mpv шлёт в тот же сокет события ({"event": ...}: смена трека, метаданные радио) — они могут прийти
+    раньше ответа, поэтому ответ ищем по request_id."""
     if not os.path.exists(SOCK):
         return None
+    _ipc_ids[0] += 1
+    rid = _ipc_ids[0]
+    w = None
     try:
         r, w = await asyncio.open_unix_connection(SOCK)
-        w.write((json.dumps({"command": list(command)}) + "\n").encode())
+        w.write((json.dumps({"command": list(command), "request_id": rid}) + "\n").encode())
         await w.drain()
-        line = await asyncio.wait_for(r.readline(), timeout=2)
-        w.close()
-        return json.loads(line)
+
+        async def reply():
+            while True:
+                line = await r.readline()
+                if not line:
+                    return None
+                msg = json.loads(line)
+                if isinstance(msg, dict) and "event" not in msg and msg.get("request_id", rid) == rid:
+                    return msg
+
+        return await asyncio.wait_for(reply(), timeout=2)
     except Exception:
         return None
+    finally:
+        if w:
+            w.close()
 
 
 async def _search(session, query: str, russian: bool):
