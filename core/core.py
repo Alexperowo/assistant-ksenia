@@ -35,6 +35,29 @@ TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
 TOOL_INDEX = {sch["function"]["name"]: m for m in TOOL_MODULES for sch in m.SCHEMAS}
 
 
+def _tools_changed():
+    """Набор инструментов изменился с прошлого запуска? Тогда старые «не умею» в истории могли устареть."""
+    import hashlib
+    names = sorted(TOOL_INDEX)
+    h = hashlib.sha1(json.dumps(names).encode()).hexdigest()
+    f = os.path.join(ROOT, "..", "data", "tools_hash.json")
+    try:
+        old = json.load(open(f, encoding="utf-8"))
+    except Exception:
+        old = {}
+    try:
+        os.makedirs(os.path.dirname(f), exist_ok=True)
+        json.dump({"hash": h, "names": names}, open(f, "w", encoding="utf-8"))
+    except OSError:
+        pass
+    if old.get("hash") and old["hash"] != h:
+        return sorted(set(names) - set(old.get("names", [])))
+    return None
+
+
+NEW_TOOLS = _tools_changed()
+
+
 TOOL_TIMEOUT_S = 30
 
 
@@ -640,6 +663,11 @@ class Ksenia:
             else:
                 # служебная реплика между «Отправить?» и ответом Александра раньше отменяла действие как «не да»
                 note = await self._resolve_confirmation(user_text)
+        global NEW_TOOLS
+        if NEW_TOOLS is not None and not internal and not guest:
+            note += ("; у тебя обновились умения" + (f" (новые: {', '.join(NEW_TOOLS)})" if NEW_TOOLS else "")
+                     + " — если раньше ты говорила «не могу», это могло устареть: проверь инструментом")
+            NEW_TOOLS = None
         if first_today and not internal and not user_text.startswith("(служебно"):
             note += ("; это первый разговор за сегодня — тепло поздоровайся по времени суток; можешь коротко "
                      "предложить погоду и напомнить, что стоит на сегодня (remind_list), если это к месту")
