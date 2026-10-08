@@ -2,16 +2,15 @@
 
 Безопасность отправки: у модели НЕТ инструмента «отправить сейчас». vk_send только готовит отправку
 и возвращает confirm_id; само сообщение уходит, когда ядро услышит от Александра «да» в следующей
-реплике (confirm_and_send вызывает ядро, не модель).
+реплике (действие регистрируется в tools/confirm и выполняется ядром, не моделью).
 Побочный эффект ВК: открытие переписки помечает её прочитанной — поэтому «что нового» читается
 только из списка диалогов, без открытия.
 """
 import asyncio
 import re
-import secrets
 import time
 
-from tools import browser_core
+from tools import browser_core, confirm
 
 IM_URL = "https://vk.ru/im"
 ITEM = '[data-testid="vkme_convo_list_item"]'
@@ -41,8 +40,6 @@ SCHEMAS = [
 
 TIMEOUTS = {"vk_unread": 45, "vk_read": 45, "vk_send": 45}
 
-# ожидающее подтверждения сообщение: одно, живёт 3 минуты
-pending = {}
 
 
 def _norm(s):
@@ -115,24 +112,19 @@ async def _last_messages(pg, count):
     }""", count)
 
 
-async def confirm_and_send(confirm_id):
-    """Вызывает ЯДРО после «да» Александра. Возвращает результат для истории."""
-    p = pending.get("item")
-    if not p or p["id"] != confirm_id or time.time() > p["expires"]:
-        pending.clear()
-        return {"ok": False, "error": "подтверждение устарело — попроси сказать заново"}
-    pending.clear()
+async def _send(peer, name, text):
+    """Отправка. Вызывается только через tools/confirm — то есть ядром после «да» Александра."""
     pg = await browser_core.page("vk")
-    await _open_convo(pg, p["peer"])
+    await _open_convo(pg, peer)
     box = pg.locator('[data-testid="vkme_composer_input"]')
     await box.click()
-    await pg.keyboard.type(p["text"], delay=15)
+    await pg.keyboard.type(text, delay=15)
     await pg.wait_for_timeout(300)
     await pg.locator('[data-testid="vkme_composer_send"]').click()
     await pg.wait_for_timeout(2500)
     last = await _last_messages(pg, 3)
-    sent = any(p["text"].strip()[:40] in (m["text"] or "") for m in last)
-    return {"ok": sent, "to": p["name"], "sent_text": p["text"],
+    sent = any(text.strip()[:40] in (m["text"] or "") for m in last)
+    return {"ok": sent, "to": name, "sent_text": text,
             **({} if sent else {"error": "не увидела своё сообщение в переписке — проверь"})}
 
 
@@ -170,9 +162,8 @@ async def call(name, args, session):
         names = list(dict.fromkeys(f["name"] for f in found))
         if len(names) > 1:
             return {"ok": False, "error": "нашлось несколько — уточни у Александра", "candidates": names[:5]}
-        cid = secrets.token_hex(4)
-        pending["item"] = {"id": cid, "peer": found[0]["peer"], "name": found[0]["name"], "text": text,
-                           "expires": time.time() + 180}
+        peer, who = found[0]["peer"], found[0]["name"]
+        cid = confirm.prepare(f"сообщение ВКонтакте для {who}", lambda: _send(peer, who, text))
         return {"ok": True, "prepared": True, "confirm_id": cid, "to": found[0]["name"], "text": text,
                 "note": "НЕ отправлено. Прочитай Александру: кому и текст, спроси «Отправить?». Ждём его «да»."}
     return {"ok": False, "error": f"неизвестный инструмент {name}"}

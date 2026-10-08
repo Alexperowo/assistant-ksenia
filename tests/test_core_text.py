@@ -56,3 +56,11 @@ def test_clean_verbatim_text_cannot_inject_voice_tags():
 
 def test_clean_verbatim_marks_links():
     assert core.clean_for_speech("Адрес: https://example.com/x.", verbatim=True) == "Адрес: ссылка"
+
+
+def test_leaked_thinking_is_never_spoken():
+    from core import clean_for_speech, strip_thinking
+    t = "Разделы: Главная.<think>Conclude reasoning immediately and output the final answer now.</think> Готово."
+    assert "Conclude" not in clean_for_speech(t)
+    assert "Conclude" not in strip_thinking("ответ <think>Conclude reasoning")
+    assert strip_thinking("[warm] Привет") == "[warm] Привет"

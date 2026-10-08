@@ -24,9 +24,10 @@ from aiohttp import web
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-from tools import music, screen, vk  # noqa: E402  (инструменты — отдельные модули в core/tools)
+from tools import confirm, music, screen, vk  # noqa: E402  (инструменты — отдельные модули в core/tools)
+from tools import web as webtool  # noqa: E402  (не путать с aiohttp.web)
 
-TOOL_MODULES = [music, screen, vk]
+TOOL_MODULES = [music, screen, vk, webtool]
 TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
 TOOL_INDEX = {sch["function"]["name"]: m for m in TOOL_MODULES for sch in m.SCHEMAS}
 
@@ -84,6 +85,14 @@ def now_context():
     return f"Сейчас {WEEKDAYS[n.weekday()]}, {n.day} {MONTHS[n.month - 1]} {n.year} года, {n.strftime('%H:%M')}."
 
 
+THINK_RE = re.compile(r"<think>.*?</think>|<think>.*$|</?think>", re.S)
+
+
+def strip_thinking(text: str) -> str:
+    """Иногда при бюджете размышлений сервер не отделяет их, и <think>…</think> попадает в ответ."""
+    return THINK_RE.sub("", text or "")
+
+
 def clean_for_speech(text: str, verbatim: bool = False) -> str:
     """Убрать разметку и эмодзи; оставить только разрешённые пометки эмоций.
 
@@ -92,6 +101,8 @@ def clean_for_speech(text: str, verbatim: bool = False) -> str:
     def tag(m):
         t = m.group(1).strip().lower()
         return f"[{t}]" if t in ALLOWED_TAGS else ""
+    if not verbatim:
+        text = strip_thinking(text)
     if verbatim:
         text = re.sub(r"[\[\]]", " ", text)
         text = re.sub(r"https?://\S+", " ссылка ", text)
@@ -373,33 +384,40 @@ class Ksenia:
         os.replace(tmp, HISTORY_FILE)
 
     async def _resolve_confirmation(self, user_text: str) -> str:
-        """Подтверждение рискованного действия решает ЯДРО, не модель: если ждёт отправка и Александр
-        ответил согласием — ядро отправляет само; любой другой ответ отменяет отправку."""
-        p = vk.pending.get("item")
+        """Подтверждение рискованного действия решает ЯДРО, не модель: если действие ждёт и Александр
+        ответил ясным согласием — ядро выполняет его само; любой другой ответ отменяет."""
+        p = confirm.current()
         if not p:
             return ""
-        if time.time() > p["expires"]:
-            vk.pending.clear()
-            return "; подготовленное сообщение устарело и не отправлено"
-        if is_affirmative(user_text):
-            try:
-                res = await vk.confirm_and_send(p["id"])
-            except Exception as e:
-                log.exception("отправка ВК")
-                res = {"ok": False, "error": f"сбой отправки: {e!r}"[:200]}
-            log.info("Подтверждено Александром, отправка ВК -> %s", res)
-            if res.get("ok"):
-                return f"; Александр подтвердил, ядро ОТПРАВИЛО сообщение для {res.get('to')}. Коротко скажи, что отправила"
-            return f"; Александр подтвердил, но отправка НЕ удалась: {res.get('error')}. Скажи честно"
-        vk.pending.clear()
-        return "; подготовленное сообщение НЕ отправлено (Александр не сказал «да»)"
+        if p.get("expired"):
+            return f"; действие «{p['label']}» устарело и НЕ выполнено"
+        if not is_affirmative(user_text):
+            confirm.cancel()
+            return f"; действие «{p['label']}» НЕ выполнено (Александр не сказал «да»)"
+        item = confirm.take()
+        try:
+            res = await asyncio.wait_for(item["run"](), timeout=60)
+        except Exception as e:
+            log.exception("подтверждённое действие")
+            res = {"ok": False, "error": f"сбой: {e!r}"[:200]}
+        log.info("Подтверждено Александром: %s -> %s", item["label"], res)
+        if res.get("ok"):
+            return f"; Александр подтвердил, ядро ВЫПОЛНИЛО: {item['label']}. Коротко скажи итог"
+        return f"; Александр подтвердил, но «{item['label']}» НЕ удалось: {res.get('error')}. Скажи честно"
 
     def _window(self):
         """Окно истории для мозга. Гибридный Nex пересчитывает всё при любом изменении начала,
         поэтому окно не скользит каждую реплику, а изредка прыгает вперёд большим шагом."""
         max_n = CONFIG.get("history_max", 120)
-        if len(self.history) - self.window_start > max_n:
-            self.window_start = len(self.history) - max_n // 2
+        max_chars = CONFIG.get("history_max_chars", 40000)  # ~10–12 тыс. токенов: пересчёт после промаха — секунды
+        size = sum(len(str(m.get("content") or "")) for m in self.history[self.window_start:])
+        if len(self.history) - self.window_start > max_n or size > max_chars:
+            # прыжок: оставляем свежую половину по числу сообщений и по объёму
+            start, acc = len(self.history), 0
+            while start > self.window_start and len(self.history) - start < max_n // 2 and acc < max_chars // 2:
+                start -= 1
+                acc += len(str(self.history[start].get("content") or ""))
+            self.window_start = start
         # начало окна — на реплике пользователя (нельзя начинать с ответа инструмента)
         start = self.window_start
         while start < len(self.history) and self.history[start]["role"] != "user":
@@ -536,7 +554,7 @@ class Ksenia:
                         if first_step and not first_sent and self.last_tag and \
                                 buf.lstrip().startswith(f"[{self.last_tag}]") and len(buf.strip()) > len(self.last_tag) + 2:
                             buf = buf.lstrip()[len(self.last_tag) + 2:]  # та же эмоция, что в прошлый раз, — не повторяем
-                        if not first_sent:
+                        if first_step and not first_sent:
                             sent, buf = split_first_sentence(buf)
                             if sent:
                                 await queue.put((sent, False))  # первая фраза — сразу, чтобы заговорить как можно раньше
@@ -546,8 +564,11 @@ class Ksenia:
             failed = True
         if failed:
             buf = (buf.strip() + " " + BRAIN_FAIL_PHRASE).strip()
-        if buf.strip() and not speaker.cancelled:
+        # Промежуточный шаг (после первого и с вызовом инструмента) — это «рассуждения вслух»: не озвучиваем.
+        narration = (not first_step) and bool(calls) and not failed
+        if buf.strip() and not speaker.cancelled and not narration:
             await queue.put((buf.strip(), False))  # остаток одним куском: меньше пауз между фразами
+        full = strip_thinking(full)
         if failed or speaker.cancelled:
             return full.strip(), [], failed
         return full.strip(), [calls[i] for i in sorted(calls)], failed
