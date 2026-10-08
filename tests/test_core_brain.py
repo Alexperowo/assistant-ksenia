@@ -175,3 +175,15 @@ def test_merge_tool_call_without_index_defaults_to_zero():
     core.merge_tool_call(calls, {"function": {"name": "read_more"}})
     core.merge_tool_call(calls, {"function": {"arguments": "{}"}})
     assert calls[0]["function"] == {"name": "read_more", "arguments": "{}"}
+
+
+def test_window_never_empty_after_long_tool_chain(ks):
+    def call(i):
+        return {"id": str(i), "type": "function", "function": {"name": "x", "arguments": "{}"}}
+
+    ks.history = [{"role": "user", "content": "u"}] + [
+        m for i in range(6) for m in ({"role": "assistant", "content": "", "tool_calls": [call(i)]},
+                                      {"role": "tool", "tool_call_id": str(i), "content": "{}"})]
+    w = ks._window()  # 13 > 10: прыжок на len-5 — это внутри цепочки инструментов, реплик пользователя дальше нет
+    assert w and w[0]["role"] == "user" and w[0]["content"] == "u"
+    assert ks._window() == w  # и окно стабильно

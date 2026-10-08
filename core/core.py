@@ -359,8 +359,14 @@ class Ksenia:
         if len(self.history) - self.window_start > max_n:
             self.window_start = len(self.history) - max_n // 2
         # начало окна — на реплике пользователя (нельзя начинать с ответа инструмента)
-        while self.window_start < len(self.history) and self.history[self.window_start]["role"] != "user":
-            self.window_start += 1
+        start = self.window_start
+        while start < len(self.history) and self.history[start]["role"] != "user":
+            start += 1
+        if start >= len(self.history):
+            # прыжок проскочил последнюю реплику пользователя (длинная цепочка инструментов) — окно не должно опустеть
+            users = [i for i, m in enumerate(self.history) if m["role"] == "user"]
+            start = users[-1] if users else self.window_start
+        self.window_start = start
         return self.history[self.window_start:]
 
     def budget_for(self, text: str) -> int:
