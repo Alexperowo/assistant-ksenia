@@ -11,6 +11,7 @@ import base64
 import io
 import json
 import os
+import re
 import subprocess
 import time
 
@@ -19,8 +20,10 @@ from PIL import Image
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SHOT = os.path.join(ROOT, "..", "..", "logs", "screen.png")
-BRAIN_KEY_FILE = "/home/user/Agents/Ksenia/brain/api_key"
-BRAIN_URL = "http://127.0.0.1:18100"
+with open(os.path.join(ROOT, "..", "config.json"), encoding="utf-8") as _f:
+    _CFG = json.load(_f)  # адрес и ключ мозга — из общего конфига ядра, а не второй копией в коде
+BRAIN_KEY_FILE = _CFG["brain_key_file"]
+BRAIN_URL = _CFG["brain_url"]
 READ_CHUNK = 1500
 
 _reading = {"rest": ""}  # непрочитанный остаток длинного текста
@@ -60,7 +63,8 @@ SCHEMAS = [
 
 
 def _run(*args, timeout=20):
-    return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+    # кодировка явно: под systemd локаль может быть не UTF-8, а битые байты не должны ронять инструмент
+    return subprocess.run(args, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
 def _dpms_is_off():
@@ -96,11 +100,14 @@ def _ocr(im):
     im.save(buf, "PNG")
     p = subprocess.run(["tesseract", "stdin", "stdout", "-l", "rus+eng", "--psm", "3"],
                        input=buf.getvalue(), capture_output=True, timeout=60)
-    text = p.stdout.decode("utf-8", "ignore")
-    lines = [ln.strip() for ln in text.splitlines()]
-    # склеиваем строки абзаца, выбрасываем мусор из одиночных символов
+    return _ocr_cleanup(p.stdout.decode("utf-8", "ignore"))
+
+
+def _ocr_cleanup(text):
+    """Вывод Tesseract -> текст для чтения: строки абзаца склеиваются, перенос слова («пере-/нос») убирается,
+    мусор из одиночных символов (рамки, «|», «—») выбрасывается."""
     out, para = [], []
-    for ln in lines:
+    for ln in (x.strip() for x in text.splitlines()):
         if not ln:
             if para:
                 out.append(" ".join(para))
@@ -108,19 +115,31 @@ def _ocr(im):
             continue
         if len(ln) <= 2 and not ln.isalnum():
             continue
-        para.append(ln)
+        if para and re.search(r"[^\W\d_]-$", para[-1]) and ln[0].islower():
+            para[-1] = para[-1][:-1] + ln
+        else:
+            para.append(ln)
     if para:
         out.append(" ".join(para))
     return "\n".join(out).strip()
 
 
 def _chunk(text):
-    """Первые ~1500 символов по границе предложения, остаток — на «читай дальше»."""
+    """Первые ~1500 символов по границе предложения (иначе — по пробелу), остаток — на «читай дальше»."""
     if len(text) <= READ_CHUNK:
         return text, ""
-    cut = max(text.rfind(". ", 0, READ_CHUNK), text.rfind("\n", 0, READ_CHUNK))
-    cut = cut + 1 if cut > READ_CHUNK // 2 else READ_CHUNK
+    head = text[:READ_CHUNK + 1]
+    ends = [m.end() for m in re.finditer(r"[.!?…][»\")]*\s|\n", head)]
+    cut = ends[-1] if ends and ends[-1] > READ_CHUNK // 2 else 0
+    if not cut:
+        space = head.rfind(" ")
+        cut = space if space > READ_CHUNK // 2 else READ_CHUNK
     return text[:cut].strip(), text[cut:].strip()
+
+
+def _looks_binary(text):
+    """Скопирована картинка: wl-paste отдаёт байты PNG, после декодирования — нули и «�»."""
+    return "\x00" in text or text.count("\ufffd") > max(3, len(text) // 20)
 
 
 def _verbatim(text, source):
@@ -144,12 +163,18 @@ async def _vision(im, question, session):
                                        "если что-то не разобрать — так и скажи.")},
         {"role": "user", "content": [{"type": "text", "text": q},
                                      {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}}]}]}
-    key = open(BRAIN_KEY_FILE).read().strip()
+    with open(BRAIN_KEY_FILE, encoding="utf-8") as f:
+        key = f.read().strip()
     async with session.post(BRAIN_URL + "/v1/chat/completions", json=body,
                             headers={"Authorization": "Bearer " + key},
                             timeout=aiohttp.ClientTimeout(total=120)) as r:
+        if r.status != 200:  # занят, картинка слишком большая, нет проектора — честная ошибка вместо KeyError
+            raise RuntimeError(f"мозг не смог посмотреть ({r.status}): {(await r.text())[:150]}")
         d = await r.json()
-    return (d["choices"][0]["message"].get("content") or "").strip()
+    try:
+        return (d["choices"][0]["message"].get("content") or "").strip()
+    except (KeyError, IndexError, TypeError, AttributeError):
+        raise RuntimeError("мозг вернул пустой ответ про экран")
 
 
 async def call(name, args, session):
@@ -169,6 +194,8 @@ async def call(name, args, session):
         text = (p.stdout or "").strip()
         if not text:
             return {"ok": False, "error": "выделенного текста нет" if src == "selection" else "буфер обмена пуст"}
+        if _looks_binary(text):
+            return {"ok": False, "error": "там не текст (скорее всего, картинка или файл)"}
         return _verbatim(text, "выделенное" if src == "selection" else "буфер обмена")
     if name == "read_more":
         if not _reading["rest"]:
