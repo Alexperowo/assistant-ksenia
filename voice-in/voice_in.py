@@ -108,7 +108,8 @@ HANGING_WORDS = set("""и а но или либо что чтобы как ка�
 если потому поэтому то это этот эта мне меня мной тебе тебя ты я он она мы вы они его её их ему ей им
 в во на с со к ко по о об обо про за из от до для у при без над под через между перед после около
 ну вот так типа короче значит э ээ эээ э-э эм м мм ммм а-а слушай скажи расскажи давай включи открой найди
-покажи напиши посмотри поставь сделай прочитай прочти отправь узнай запусти не очень самый ещё еще уже""".split())
+покажи напиши посмотри поставь сделай прочитай прочти отправь узнай запусти не очень самый ещё еще уже
+заметка замечание запомни взять например примеру""".split())
 
 
 def hanging(text: str) -> bool:
@@ -215,6 +216,7 @@ class Ear:
         frames, speech_started, silent_ms, noise, voiced_win = [], False, 0, None, []
         smart = CONFIG.get("smart_turn", True)
         turn_checked, turn_probs, turn_texts = False, [], []
+        wait_ms = CONFIG.get("turn_wait_ms", 2000)
         t_start = time.time()
         t_speech = None
         try:
@@ -263,7 +265,7 @@ class Ear:
                     thr = max(noise * 2.0, CONFIG.get("min_speech_rms", 0.012) * 0.7)
                     silent_ms = silent_ms + 20 if rms < thr else 0
                     if silent_ms == 0:
-                        turn_checked = False
+                        turn_checked, wait_ms = False, CONFIG.get("turn_wait_ms", 2000)
                     if elapsed > max_s:
                         break
                     if smart and not turn_checked and silent_ms >= CONFIG.get("turn_check_ms", 800):
@@ -274,9 +276,11 @@ class Ear:
                         turn_probs.append(round(p, 2))
                         if partial:
                             turn_texts.append(partial[-40:])
-                        if p >= CONFIG.get("turn_threshold", 0.5) and not hanging(partial):
+                        hang = hanging(partial)
+                        if p >= CONFIG.get("turn_threshold", 0.5) and not hang:
                             break
-                    if silent_ms >= (CONFIG.get("turn_wait_ms", 2000) if smart else silence_ms):
+                        wait_ms = CONFIG.get("turn_hang_wait_ms", 3000) if hang else CONFIG.get("turn_wait_ms", 2000)
+                    if silent_ms >= (wait_ms if smart else silence_ms):
                         break
         finally:
             rec.kill()

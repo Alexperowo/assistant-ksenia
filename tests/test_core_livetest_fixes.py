@@ -47,7 +47,9 @@ def test_agent_notes(tmp_path, monkeypatch):
     assert core.agent_note("Заметка: опять оборвала фразу") == "опять оборвала фразу"
     assert core.agent_note("Ксения, заметка для агента, музыка тихая.") == "музыка тихая."
     assert core.agent_note("Замечание — долго думает") == "долго думает"
+    assert core.agent_note("Хорошо, заметка агенту. Всё работает нормально.") == "Всё работает нормально."
     assert core.agent_note("Запомни, что я люблю рок") is None
+    assert core.agent_note("Мне нужна заметка в блокноте") is None
     assert core.agent_note("Какая погода?") is None
     f = tmp_path / "notes.md"
     monkeypatch.setattr(core, "NOTES_FILE", str(f))
