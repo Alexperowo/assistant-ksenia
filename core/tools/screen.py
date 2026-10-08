@@ -28,7 +28,8 @@ _reading = {"rest": ""}  # непрочитанный остаток длинн�
 SCHEMAS = [
     {"type": "function", "function": {
         "name": "screen_describe",
-        "description": ("Посмотреть на экран и описать его. target=screen — весь экран, window — активное окно. "
+        "description": ("Посмотреть на экран и описать его. target=screen — то, что сейчас видно на мониторе "
+                        "(если включена лупа — только увеличенный участок), window — активное окно целиком. "
                         "question — что именно нужно узнать (например «есть ли новые сообщения?», «где кнопка Отправить?»)."),
         "parameters": {"type": "object", "properties": {
             "target": {"type": "string", "enum": ["screen", "window"]},
