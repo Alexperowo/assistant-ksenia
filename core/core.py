@@ -404,11 +404,15 @@ class Ksenia:
             confirm.cancel()
             return f"; действие «{p['label']}» НЕ выполнено (Александр не сказал «да»)"
         item = confirm.take()
+        if not item:  # истекло между проверкой и выполнением
+            return f"; действие «{p['label']}» устарело и НЕ выполнено"
         try:
             res = await asyncio.wait_for(item["run"](), timeout=60)
         except Exception as e:
             log.exception("подтверждённое действие")
             res = {"ok": False, "error": f"сбой: {e!r}"[:200]}
+        if not isinstance(res, dict):
+            res = {"ok": False, "error": "действие не вернуло результат"}
         log.info("Подтверждено Александром: %s -> %s", item["label"], res)
         if res.get("ok"):
             return f"; Александр подтвердил, ядро ВЫПОЛНИЛО: {item['label']}. Коротко скажи итог"
@@ -458,6 +462,9 @@ class Ksenia:
             memory.changed["flag"] = False
         first_today = datetime.date.fromtimestamp(getattr(self, "last_turn_t", 0.0) or 0) != datetime.date.today()
         note = ""
+        # что сказал Александр — для инструментов, которым нужно его явное слово (память), а не решение модели
+        confirm.CONTEXT.update({"user_text": "" if internal else user_text, "internal": internal,
+                                "affirmative": (not internal) and is_affirmative(user_text)})
         if not internal:
             self.last_turn_t = time.time()
             # служебная реплика между «Отправить?» и ответом Александра раньше отменяла действие как «не да»
