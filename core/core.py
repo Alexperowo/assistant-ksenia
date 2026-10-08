@@ -72,12 +72,20 @@ def now_context():
     return f"Сейчас {WEEKDAYS[n.weekday()]}, {n.day} {MONTHS[n.month - 1]} {n.year} года, {n.strftime('%H:%M')}."
 
 
-def clean_for_speech(text: str) -> str:
-    """Убрать разметку и эмодзи; оставить только разрешённые пометки эмоций."""
+def clean_for_speech(text: str, verbatim: bool = False) -> str:
+    """Убрать разметку и эмодзи; оставить только разрешённые пометки эмоций.
+
+    verbatim — чужой текст (экран, буфер обмена): слова в [скобках] сохраняются, но пометками эмоций
+    не становятся — иначе «[laughing]» в документе рассмешит голос, а «[Глава 1]» пропадёт."""
     def tag(m):
         t = m.group(1).strip().lower()
         return f"[{t}]" if t in ALLOWED_TAGS else ""
-    text = re.sub(r"\[([^\]]{1,30})\]", tag, text)
+    if verbatim:
+        text = re.sub(r"[\[\]]", " ", text)
+        text = re.sub(r"https?://\S+", " ссылка ", text)
+    else:
+        text = re.sub(r"\[([^\]]+)\]\(https?://[^)\s]*\)", r"\1", text)  # [текст](ссылка) -> текст
+        text = re.sub(r"\[([^\]]{1,30})\]", tag, text)
     text = re.sub(r"[*_#`>~|]+", "", text)
     text = re.sub(r"[\U0001F000-\U0001FAFF☀-➿️]", "", text)
     text = re.sub(r"https?://\S+", "", text)
@@ -166,8 +174,8 @@ class Speaker:
                 *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL)
 
-    async def speak(self, text: str, timings: dict):
-        text = clean_for_speech(text)
+    async def speak(self, text: str, timings: dict, verbatim: bool = False):
+        text = clean_for_speech(text, verbatim=verbatim)
         if not text or self.cancelled:
             return
         params = {"stream": True, "chunked": True, "stream_start_buffer_ms": 0,
@@ -301,10 +309,11 @@ class Ksenia:
 
         async def tts_worker():
             while True:
-                part = await queue.get()
-                if part is None:
+                item = await queue.get()
+                if item is None:
                     break
-                await speaker.speak(part, timings)
+                part, verbatim = item
+                await speaker.speak(part, timings, verbatim=verbatim)
             await speaker.finish()
 
         worker = asyncio.create_task(tts_worker())
@@ -328,7 +337,7 @@ class Ksenia:
                 if result.get("speak_verbatim"):
                     # дословное чтение: текст идёт прямо в голос кусками по предложениям, без пересказа мозгом
                     for part in split_for_reading(result["speak_verbatim"]):
-                        await queue.put(part)
+                        await queue.put((part, True))
                 self.history.append({"role": "tool", "tool_call_id": c.get("id", ""),
                                      "content": json.dumps(result, ensure_ascii=False)})
             # после инструмента — подумать чуть больше; после ошибки — ещё больше
@@ -378,7 +387,7 @@ class Ksenia:
                     if not first_sent:
                         sent, buf = split_first_sentence(buf)
                         if sent:
-                            await queue.put(sent)  # первая фраза — сразу, чтобы заговорить как можно раньше
+                            await queue.put((sent, False))  # первая фраза — сразу, чтобы заговорить как можно раньше
                             first_sent = True
                     if speaker.cancelled:
                         break
@@ -386,7 +395,7 @@ class Ksenia:
             log.error("brain недоступен: %s", e)
             buf = "[sigh] Ой, у меня что-то с головой. Мозг не отвечает, проверь, пожалуйста, сервис."
         if buf.strip():
-            await queue.put(buf.strip())  # остаток одним куском: меньше пауз между фразами
+            await queue.put((buf.strip(), False))  # остаток одним куском: меньше пауз между фразами
         return full.strip(), [calls[i] for i in sorted(calls)], False
 
     async def stop(self):

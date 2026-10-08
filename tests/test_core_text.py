@@ -39,3 +39,20 @@ def test_clean_keeps_allowed_tags_only():
 def test_clean_strips_markdown_emoji_urls_bullets():
     text = "**Важно**: смотри https://example.com 😀\n- первый\n• второй\n# Заголовок"
     assert core.clean_for_speech(text) == "Важно: смотри первый второй Заголовок"
+
+
+def test_clean_markdown_link_keeps_text():
+    assert core.clean_for_speech("Смотри [вот здесь](https://example.com/a?b=1) подробнее") == "Смотри вот здесь подробнее"
+
+
+def test_clean_verbatim_keeps_bracketed_words():
+    assert core.clean_for_speech("[Глава 1] Начало [сноска]", verbatim=True) == "Глава 1 Начало сноска"
+
+
+def test_clean_verbatim_text_cannot_inject_voice_tags():
+    out = core.clean_for_speech("Он сказал [laughing] и [whisper] ушёл", verbatim=True)
+    assert "[" not in out and out == "Он сказал laughing и whisper ушёл"
+
+
+def test_clean_verbatim_marks_links():
+    assert core.clean_for_speech("Адрес: https://example.com/x.", verbatim=True) == "Адрес: ссылка"
