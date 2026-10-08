@@ -30,6 +30,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 
 from tools import confirm, daily, desktop, memory, music, research, screen, selfcheck, settings, system, vk, voicectl  # noqa: E402  (инструменты — отдельные модули в core/tools)
 from tools import web as webtool  # noqa: E402  (не путать с aiohttp.web)
+import live_intent  # noqa: E402  (что значит реплика во время речи Ксении)
 
 TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research, daily, voicectl, system, settings, selfcheck]
 TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
@@ -394,6 +395,44 @@ class Speaker:
         self.cancelled = False
         self.recorded = bytearray()  # копия всего, что ушло в наушники (для разбора помех)
         self.gain, self._carry = 1.0, b""
+        # что уже прозвучало: фразы с отметками в секундах звука и «часы» плеера — чтобы после перебивания
+        # знать, на каком месте Ксения остановилась (продолжить оттуда, а не с начала)
+        self.phrases = []
+        self.audio_s = 0.0
+        self._play_end = 0.0
+
+    BYTES_PER_S = 44100 * 2
+
+    def _account(self, nbytes: int, now: float = None):
+        """Отдано плееру nbytes звука: он доиграет их после уже отданного (или сразу, если буфер пуст)."""
+        now = time.time() if now is None else now
+        dur = nbytes / self.BYTES_PER_S
+        self._play_end = max(self._play_end, now) + dur
+        self.audio_s += dur
+
+    def played_s(self, now: float = None) -> float:
+        now = time.time() if now is None else now
+        return max(0.0, self.audio_s - max(0.0, self._play_end - now))
+
+    def progress(self, now: float = None):
+        """(сказано, недосказано) по тексту фраз. Место внутри фразы — по доле прозвучавшего звука, затем назад к началу
+        предложения: продолжать естественно с начала прерванной фразы (ошибка оценки — пара слов, не больше)."""
+        played = self.played_s(now)
+        said, rest = [], []
+        for ph in self.phrases:
+            end = ph["end"] if ph["end"] is not None else self.audio_s
+            if played >= end - 0.05:
+                said.append(ph["text"])
+            elif played <= ph["start"]:
+                rest.append(ph["text"])
+            else:
+                text = ph["text"]
+                cut = int(len(text) * (played - ph["start"]) / max(end - ph["start"], 1e-3))
+                starts = [0] + [m.end() for m in re.finditer(r"[.!?…]+\s+", text)]
+                s0 = max(x for x in starts if x <= cut)
+                said.append(text[:cut].strip())
+                rest.append(text[s0:].strip())
+        return " ".join(x for x in said if x), " ".join(x for x in rest if x)
 
     async def _ensure_player(self):
         if self.player is None or self.player.returncode is not None:
@@ -419,7 +458,9 @@ class Speaker:
         try:
             await self._ensure_player()
             ms = CONFIG.get("bt_warm_ms", 400)
-            self.player.stdin.write(b"\x00\x00" * (44100 * ms // 1000))
+            silence = b"\x00\x00" * (44100 * ms // 1000)
+            self.player.stdin.write(silence)
+            self._account(len(silence))
             await self.player.stdin.drain()
         except Exception as e:
             log.warning("выход не открыт заранее: %r", e)
@@ -440,7 +481,9 @@ class Speaker:
         text = clean_for_speech(text, verbatim=verbatim)
         if not text or self.cancelled:
             return
-        hub.emit({"type": "say", "text": re.sub(r"\[\w+\]\s*", "", text)})  # текст реплики — на экран планшета
+        shown = re.sub(r"\[\w+\]\s*", "", text)
+        hub.emit({"type": "say", "text": shown})  # текст реплики — на экран планшета
+        phrase = None
         params = {"stream": True, "chunked": True, "stream_start_buffer_ms": 0,
                   "output_format": "pcm_s16le", "stream_holdback_frames": 0,
                   "stream_decode_stride_frames": CONFIG.get("tts_stride", 8)}
@@ -474,8 +517,12 @@ class Speaker:
                             timings["first_audio_s"] = round(time.time() - timings["_t0"], 2)
                         if self.gain != 1.0 or self._carry:
                             chunk = self._apply_gain(chunk)
+                        if phrase is None:
+                            phrase = {"text": shown, "start": self.audio_s, "end": None}
+                            self.phrases.append(phrase)
                         self.player.stdin.write(chunk)
                         written += len(chunk)
+                        self._account(len(chunk))
                         self.recorded.extend(chunk)
                         await self.player.stdin.drain()
                     return
@@ -489,6 +536,8 @@ class Speaker:
             log.exception("сбой озвучки")
             await self._drop_player()
         finally:
+            if phrase is not None:
+                phrase["end"] = self.audio_s
             if written % 2 and self.player and self.player.returncode is None and not self.cancelled:
                 # поток оборвался посреди сэмпла: без выравнивания все следующие фразы зазвучат треском
                 self.player.stdin.write(b"\x00")
@@ -611,6 +660,8 @@ class Ksenia:
         self.session = None
         self.last_tag = None
         self.last_client_t = 0.0  # когда Александр последний раз говорил с планшета
+        # недосказанный ответ: {"said", "rest", "complete", "t", "noted"} — после перебивания, чтобы продолжить
+        self.interrupted = None
 
     @staticmethod
     def _load_history():
@@ -743,6 +794,13 @@ class Ksenia:
             note += ("; у тебя обновились умения" + (f" (новые: {', '.join(NEW_TOOLS)})" if NEW_TOOLS else "")
                      + " — если раньше ты говорила «не могу», это могло устареть: проверь инструментом")
             NEW_TOOLS = None
+        it = self.fresh_interruption()
+        if it and not internal and not guest and not it.get("noted"):
+            # история только дописывается: в ней весь сгенерированный ответ, а прозвучала лишь часть — говорим мозгу правду
+            it["noted"] = True
+            note += (f"; тебя перебили, ты не договорила прошлый ответ: остановилась на «…{it['said'][-120:]}», "
+                     f"недосказано «{it['rest'][:160]}…». Если Александр просит продолжить — продолжай с этого места, "
+                     f"не повторяя сказанного; если он о другом — ответь ему, а к рассказу вернись, только если попросит")
         if first_today and not internal and not user_text.startswith("(служебно"):
             note += ("; это первый разговор за сегодня — тепло поздоровайся по времени суток; можешь коротко "
                      "предложить погоду и напомнить, что стоит на сегодня (remind_list), если это к месту")
@@ -767,6 +825,7 @@ class Ksenia:
                 await speaker.finish()
 
         worker = asyncio.create_task(tts_worker())
+        self._stream_cut = False
         spoken_all = []
         pending = []  # вызовы инструментов, на которые ещё нет ответа в истории
         budget = self.budget_for(user_text)  # динамический бюджет: болтовня 0, задача — больше
@@ -826,6 +885,8 @@ class Ksenia:
             if not worker.done():  # озвучка не должна жить дольше хода (и держать pacat)
                 await speaker.cancel()
                 worker.cancel()
+            if speaker.cancelled and not internal:
+                self.remember_interruption(speaker, queue)
             try:
                 self.save_history()
             except OSError as e:
@@ -875,6 +936,7 @@ class Ksenia:
                 else:
                     async for raw in r.content:
                         if speaker.cancelled:
+                            self._stream_cut = True  # ответ не догенерирован: продолжать придётся мозгом
                             break
                         d, err = parse_stream_line(raw)
                         if err:
@@ -936,13 +998,80 @@ class Ksenia:
         if self.speaker:
             await self.speaker.cancel()
 
+    def fresh_interruption(self):
+        it = getattr(self, "interrupted", None)
+        if it and time.time() - it["t"] < CONFIG.get("resume_window_s", 600):
+            return it
+        return None
+
+    def remember_interruption(self, speaker, queue=None):
+        """Перебили: запомнить, что прозвучало и что нет (включая фразы, до которых очередь не дошла)."""
+        if not hasattr(speaker, "progress"):
+            return
+        said, rest = speaker.progress()
+        left = []
+        while queue is not None and not queue.empty():
+            item = queue.get_nowait()
+            if item:
+                left.append(re.sub(r"\[\w+\]\s*", "", clean_for_speech(item[0], verbatim=item[1])))
+        rest = " ".join(x for x in [rest] + left if x).strip()
+        if not said and not rest:
+            return
+        self.interrupted = {"said": said, "rest": rest, "complete": not getattr(self, "_stream_cut", False),
+                            "t": time.time(), "noted": False}
+        log.info("Перебили: сказано «…%s», недосказано «%s…»", said[-60:], rest[:60])
+
+    def can_resume(self, text: str) -> bool:
+        """«Ладно, продолжай» после перебивания — продолжить недосказанное без нового запроса к мозгу."""
+        it = self.fresh_interruption()
+        if not it or not it["rest"] or not it["complete"]:
+            return False
+        ctx = live_intent.Context(state="idle", interrupted=True)
+        return live_intent.quick(text, ctx).kind == "continue"
+
+    async def resume(self, user_text: str, timings: dict, output: str = "local"):
+        """Досказать прерванный ответ с начала прерванной фразы — мгновенно, без мозга: текст уже сгенерирован.
+        История дописывается: реплика Александра и то, что Ксения сейчас скажет."""
+        it, self.interrupted = self.interrupted, None
+        rest = it["rest"]
+        self.last_turn_t = time.time()
+        self.history.append({"role": "user", "content": f"{user_text}\n\n(служебно: {now_context()}; ядро продолжило "
+                                                        f"твой недосказанный ответ с места, где тебя перебили)"})
+        self.history.append({"role": "assistant", "content": rest})
+        hub.emit({"type": "user", "text": user_text})
+        speaker = Speaker(self.session, output=output)
+        self.speaker = speaker
+        try:
+            await speaker.warm()
+            for part in split_for_reading(rest, max_len=CONFIG.get("resume_chunk_chars", 500)):
+                await speaker.speak(part, timings)
+                if speaker.cancelled:
+                    break
+        finally:
+            if speaker.cancelled:
+                self.remember_interruption(speaker)
+            await speaker.finish()
+            try:
+                self.save_history()
+            except OSError as e:
+                log.error("история не сохранена: %s", e)
+            hub.emit({"type": "state", "state": "idle"})
+        log.info("Продолжила недосказанное: %s…", rest[:80])
+        return rest
+
 
 ks = Ksenia()
 
 
-async def turn(text: str, timings: dict, internal: bool = False, output: str = "local", speaker: dict = None):
+async def turn(text: str, timings: dict, internal: bool = False, output: str = "local", speaker: dict = None,
+               resume: bool = False):
     async with ks.lock:
-        reply = await ks.respond(text, timings, internal=internal, output=output, speaker=speaker)
+        guest = (speaker or {}).get("owner") is False
+        if not internal and not guest and ks.fresh_interruption() and (resume or ks.can_resume(text)) \
+                and ks.interrupted.get("complete"):
+            reply = await ks.resume(text, timings, output=output)
+        else:
+            reply = await ks.respond(text, timings, internal=internal, output=output, speaker=speaker)
     timings.pop("_t0", None)
     log.info("Александр: %s | Ксения: %s | %s", text, reply, timings)
     return reply
