@@ -17,5 +17,6 @@
   "start_timeout_s": 12,
   "min_speech_rms": 0.008,
   "ignore_start_s": 0.35,
-  "min_voiced_ms": 120
+  "min_voiced_ms": 120,
+  "barge_ms": 1500
 }

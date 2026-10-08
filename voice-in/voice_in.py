@@ -329,8 +329,8 @@ class Ear:
 class LiveSegmenter:
     """Живой режим (LE Audio): микрофон открыт всё время, реплики режутся из непрерывного потока.
 
-    push(кадр 20 мс) -> None | "start" (пошла речь) | "long" (речь дольше barge_ms — повод перебить
-    Ксению) | "check" (пауза: спросить turn_check и вызвать decide) | "end" (реплика готова: utterance()).
+    push(кадр 20 мс) -> None | "start" (пошла речь) | "long" (речь дольше barge_ms, 1,5 с — похоже на настоящее
+    перебивание, а не «круто»: тогда Ксения говорит тише; на коротких поддакиваниях громкость не меняется) | "check" (пауза: спросить turn_check и вызвать decide) | "end" (реплика готова: utterance()).
     Логика порогов — как в record_utterance; плюс 300 мс до начала речи, чтобы не терять первый слог."""
 
     def __init__(self, config=None):
@@ -549,6 +549,13 @@ async def handle_stream(request):
             "parec", "-d", source, "--raw", f"--rate={RATE}", "--channels=1", "--format=s16le",
             "--latency-msec=20", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         seg = LiveSegmenter()
+
+        async def reader():
+            # служебные кадры (ping/pong, закрытие) aiohttp обрабатывает только внутри receive():
+            # без чтения сердцебиение не проходило, и поток рвался через полторы минуты (живой тест)
+            async for _ in ws:
+                pass
+        reader_task = asyncio.create_task(reader())
         await ws.send_json({"type": "ready", "source": source})
         log.info("Живой режим: микрофон открыт (%s)", source)
         while not ws.closed:
@@ -579,6 +586,8 @@ async def handle_stream(request):
         pass
     finally:
         ear.streaming = False
+        if "reader_task" in locals():
+            reader_task.cancel()
         if rec and rec.returncode is None:
             rec.kill()
             await rec.wait()
