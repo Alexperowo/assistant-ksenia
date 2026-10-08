@@ -31,18 +31,28 @@ TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
 TOOL_INDEX = {sch["function"]["name"]: m for m in TOOL_MODULES for sch in m.SCHEMAS}
 
 
+TOOL_TIMEOUT_S = 30
+
+
 async def run_tool(name, arguments, session):
     try:
         args = json.loads(arguments) if arguments.strip() else {}
     except json.JSONDecodeError:
         return {"ok": False, "error": "аргументы инструмента — не JSON"}
+    if not isinstance(args, dict):
+        return {"ok": False, "error": "аргументы инструмента должны быть объектом JSON"}
     mod = TOOL_INDEX.get(name)
     if not mod:
         return {"ok": False, "error": f"нет такого инструмента: {name}"}
     try:
-        return await asyncio.wait_for(mod.call(name, args, session), timeout=30)
+        return await asyncio.wait_for(mod.call(name, args, session), timeout=TOOL_TIMEOUT_S)
+    except asyncio.TimeoutError:  # str(TimeoutError()) пустая — модель получала «сбой инструмента: »
+        return {"ok": False, "error": f"инструмент не ответил за {TOOL_TIMEOUT_S} секунд"}
     except Exception as e:
-        return {"ok": False, "error": f"сбой инструмента: {e}"}
+        log.exception("инструмент %s", name)
+        return {"ok": False, "error": f"сбой инструмента: {e!r}"[:300]}
+
+
 CONFIG = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
 PERSONA = open(os.path.join(ROOT, "prompts", "persona.md"), encoding="utf-8").read()
 
@@ -526,15 +536,31 @@ async def turn(text: str, timings: dict):
 
 
 async def handle_say(request):
-    data = await request.json()
+    try:
+        data = await request.json()
+        text = (data.get("text") or "").strip()
+    except (ValueError, AttributeError):
+        text = ""
+    if not text:
+        return web.json_response({"error": "нужен JSON {\"text\": \"...\"}"}, status=400)
     timings = {"_t0": time.time()}
     await ks.stop()
     await music.duck(True)
     try:
-        reply = await turn(data["text"], timings)
+        reply = await turn(text, timings)
     finally:
         await music.duck(False)
     return web.json_response({"reply": reply, "timings": timings})
+
+
+async def say_notice(text: str):
+    """Служебная фраза голосом, мимо истории и мозга. Александр не видит экран: молчание ему ничего не объяснит."""
+    sp = Speaker(ks.session)
+    ks.speaker = sp  # «стоп» прерывает и её
+    try:
+        await sp.speak(text, {"_t0": time.time()})
+    finally:
+        await sp.finish()
 
 
 BYE_WORDS = ("пока", "хватит", "стоп", "ксения стоп", "ксения, стоп", "до свидания", "отбой", "спокойной ночи", "всё, спасибо", "стоп разговор")
@@ -561,6 +587,15 @@ def is_goodbye(text: str) -> bool:
     return False
 
 
+LISTEN_FAIL = {
+    "no_microphone": "[sigh] Не слышу микрофон. Наушники подключены?",
+    "mic_lost": "[sigh] Микрофон пропал посреди фразы. Повтори, пожалуйста.",
+    "busy": "[sigh] Я ещё дослушиваю прошлую фразу. Нажми ещё раз через пару секунд.",
+}
+LISTEN_DOWN = "[sigh] Я тебя не слышу: слух не отвечает. Проверь, пожалуйста, сервис."
+CONV_CRASH = "[sigh] Ой, у меня что-то сломалось. Нажми ещё раз, пожалуйста."
+
+
 class Conversation:
     """Живой диалог: слушать -> ответить -> снова слушать, пока Александр не замолчит или не попрощается."""
 
@@ -571,19 +606,49 @@ class Conversation:
     def active(self):
         return self.task is not None and not self.task.done()
 
+    async def listen(self):
+        """Один запрос к voice-in -> {"text", "timings"} или {"error"}. Занят прошлой записью
+        (после перебивания) — ждём и пробуем снова, а не заканчиваем разговор молча."""
+        deadline = time.time() + CONFIG.get("listen_busy_wait_s", 20)
+        while True:
+            async with ks.session.post(CONFIG["voice_in_url"] + "/listen",
+                                       timeout=aiohttp.ClientTimeout(total=90)) as r:
+                if r.status == 409 and time.time() < deadline:
+                    await asyncio.sleep(0.3)
+                    continue
+                try:
+                    heard = await r.json(content_type=None)
+                except ValueError:
+                    heard = None
+                if not isinstance(heard, dict):
+                    heard = {}
+                if r.status != 200:
+                    heard.setdefault("error", f"http {r.status}")
+                return heard
+
     async def run(self):
         self.turns = 0
         await music.duck(True)
         try:
             while True:
-                async with ks.session.post(CONFIG["voice_in_url"] + "/listen",
-                                           timeout=aiohttp.ClientTimeout(total=90)) as r:
-                    heard = await r.json()
-                text = (heard.get("text") or "").strip()
-                if not text or len(text) < 2:
-                    log.info("Тишина — разговор окончен (%s)", heard.get("timings"))
+                try:
+                    heard = await self.listen()
+                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                    log.error("voice-in недоступен: %r", e)
+                    await say_notice(LISTEN_DOWN)
                     return
-                timings = {"_t0": time.time(), "listen": heard.get("timings")}
+                info = heard.get("timings") or {}
+                if heard.get("error"):
+                    log.error("voice-in: %s", heard["error"])
+                    await say_notice(LISTEN_FAIL.get(heard["error"], LISTEN_DOWN))
+                    return
+                text = str(heard.get("text") or "").strip()
+                if not text or len(text) < 2:
+                    if info.get("reason") == "mic_lost":
+                        await say_notice(LISTEN_FAIL["mic_lost"])
+                    log.info("Тишина — разговор окончен (%s)", info)
+                    return
+                timings = {"_t0": time.time(), "listen": info}
                 await turn(text, timings)
                 self.turns += 1
                 if is_goodbye(text) or self.turns >= CONFIG.get("max_turns", 50):
@@ -592,35 +657,45 @@ class Conversation:
             pass
         except Exception as e:
             log.exception("Сбой разговора: %s", e)
+            await say_notice(CONV_CRASH)
         finally:
             await music.duck(False)
 
 
 conv = Conversation()
+talk_lock = asyncio.Lock()
+
+
+async def stop_conversation():
+    """Прервать разговор и дождаться его уборки (ответы на вызовы инструментов, громкость музыки)."""
+    old = conv.task if conv.active() else None
+    if old:
+        old.cancel()
+    await ks.stop()
+    if old:
+        await asyncio.wait({old}, timeout=3)
+    return old is not None
 
 
 async def handle_talk(request):
-    # Нажатие во время разговора: прервать речь Ксении и сразу слушать заново
-    if conv.active():
-        conv.task.cancel()
-        await ks.stop()
-        await asyncio.sleep(0.2)
-    else:
-        await ks.stop()
-    conv.task = asyncio.create_task(conv.run())
+    # Нажатие во время разговора: прервать речь Ксении и сразу слушать заново.
+    # Замок — чтобы два быстрых нажатия не запустили два разговора сразу.
+    async with talk_lock:
+        if await stop_conversation():
+            await asyncio.sleep(0.2)
+        conv.task = asyncio.create_task(conv.run())
     return web.json_response({"ok": True, "mode": "conversation"})
 
 
 async def handle_stop(request):
-    if conv.active():
-        conv.task.cancel()
-    await ks.stop()
+    async with talk_lock:
+        await stop_conversation()
     return web.json_response({"ok": True})
 
 
 async def handle_status(request):
     return web.json_response({"busy": ks.lock.locked(), "conversation": conv.active(), "turns": conv.turns,
-                              "history": len(ks.history), "sink": pick_output_sink()})
+                              "history": len(ks.history), "sink": await asyncio.to_thread(pick_output_sink)})
 
 
 async def warmup():
@@ -640,13 +715,19 @@ async def warmup():
         log.warning("Прогрев не удался: %s", e)
 
 
+BACKGROUND = []
+
+
 async def on_start(app):
     ks.session = aiohttp.ClientSession()
-    asyncio.create_task(music.book_autosave_loop())
-    asyncio.create_task(warmup())
+    # ссылки на фоновые задачи храним: цикл событий держит задачи только слабыми ссылками
+    BACKGROUND.extend([asyncio.create_task(music.book_autosave_loop()), asyncio.create_task(warmup())])
 
 
 async def on_cleanup(app):
+    await stop_conversation()
+    for t in BACKGROUND:
+        t.cancel()
     await ks.session.close()
 
 

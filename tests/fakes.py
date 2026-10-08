@@ -38,7 +38,7 @@ class FakeResponse:
     async def text(self):
         return self._body
 
-    async def json(self):
+    async def json(self, **kw):
         return json.loads(self._body)
 
     async def read(self):
