@@ -20,7 +20,8 @@ TOKEN_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "secrets", "yan
 _ym = None  # клиент Яндекс Музыки (ленивая инициализация)
 
 BOOKS_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "data", "books.json")
-_book = {"id": None, "title": None, "search": []}  # текущая книга и последние варианты поиска
+# текущая книга, последние варианты поиска и с какой главы начат плейлист mpv (его позиция 0 = эта глава)
+_book = {"id": None, "title": None, "search": [], "first": 0}
 
 _state = {"playlist": [],
           "station": None, "volume": NORMAL_VOLUME, "ducked": False, "last_query": None, "last_results": []}
@@ -215,7 +216,8 @@ def _books_load():
 def _books_save(db):
     os.makedirs(os.path.dirname(BOOKS_FILE), exist_ok=True)
     tmp = BOOKS_FILE + ".tmp"
-    json.dump(db, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(db, f, ensure_ascii=False, indent=1)
     os.replace(tmp, BOOKS_FILE)
 
 
@@ -229,7 +231,8 @@ async def save_book_position():
         return
     db = _books_load()
     db["last"] = _book["id"]
-    db["positions"][str(_book["id"])] = {"title": _book["title"], "chapter": pos,
+    # playlist-pos считается от главы, с которой включили, а не от начала книги
+    db["positions"][str(_book["id"])] = {"title": _book["title"], "chapter": _book["first"] + pos,
                                           "time": float(tpos or 0), "saved": int(__import__("time").time())}
     _books_save(db)
 
@@ -255,7 +258,7 @@ async def _play_book(album_id, chapter=0, seconds=0.0):
         return {"ok": False, "error": "в книге нет глав"}
     await save_book_position()
     chapter = max(0, min(chapter, len(tracks) - 1))
-    _book["id"], _book["title"] = album_id, title
+    _book["id"], _book["title"], _book["first"] = album_id, title, chapter
     await _ensure_mpv()
     link = await asyncio.to_thread(_direct_link, tracks[chapter])
     await _ipc("loadfile", link, "replace", -1, f"start={seconds:.1f}" if seconds > 1 else "start=0")
@@ -331,6 +334,7 @@ async def call(name: str, args: dict, session) -> dict:
         a = args.get("action", "search")
         try:
             if a == "continue":
+                await save_book_position()  # книга играет прямо сейчас — продолжаем с текущего места, а не с автосохранения
                 db = _books_load()
                 if not db.get("last"):
                     return {"ok": False, "error": "ещё нет начатых книг"}
