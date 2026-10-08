@@ -402,9 +402,25 @@ async def handle_say(request):
 BYE_WORDS = ("пока", "хватит", "стоп", "ксения стоп", "ксения, стоп", "до свидания", "отбой", "спокойной ночи", "всё, спасибо", "стоп разговор")
 
 
+def _words(text: str) -> str:
+    """Нижний регистр, ё -> е (Whisper пишет по-разному), только слова через пробел."""
+    return " ".join(re.findall(r"\w+", text.lower().replace("ё", "е")))
+
+
+BYE_PHRASES = [_words(w) for w in BYE_WORDS]
+
+
 def is_goodbye(text: str) -> bool:
-    t = text.lower().strip(" .!?,")
-    return any(t == w or t.startswith(w) or t.endswith(w) for w in BYE_WORDS)
+    """Прощание — целыми словами: в конце реплики или в начале короткой («пока, Ксения»).
+    «Покажи экран» и «пока я готовлю, включи музыку» — не прощание."""
+    t = _words(text)
+    n_words = len(t.split())
+    for w in BYE_PHRASES:
+        if t == w or t.endswith(" " + w):
+            return True
+        if t.startswith(w + " ") and n_words <= len(w.split()) + 2:
+            return True
+    return False
 
 
 class Conversation:
