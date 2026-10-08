@@ -380,6 +380,18 @@ def playing() -> bool:
     return bool(_state["station"]) and not _state.get("paused")
 
 
+def status():
+    """"playing" | "paused" | None — для кнопок наушников."""
+    if not _state["station"]:
+        return None
+    return "paused" if _state.get("paused") else "playing"
+
+
+def title() -> str:
+    """Что включено: станция, альбом или книга — подпись плеера «Ксения» в KDE."""
+    return _state["station"] or ""
+
+
 async def duck(on: bool):
     """Приглушить музыку, пока Ксения слушает или говорит (со счётчиком вложенности)."""
     global _duck_depth

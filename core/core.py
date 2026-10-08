@@ -1856,7 +1856,7 @@ async def stop_conversation():
     return old is not None
 
 
-async def handle_talk(request):
+async def start_talk():
     # Нажатие во время разговора: прервать речь Ксении и сразу слушать заново.
     # Замок — чтобы два быстрых нажатия не запустили два разговора сразу.
     async with talk_lock:
@@ -1865,6 +1865,11 @@ async def handle_talk(request):
         # наушники в LE Audio — живой режим (слушает всегда, можно перебивать); иначе — обычный разговор
         runner = live if CONFIG.get("live_mode", True) and await live_possible() else conv
         conv.task = asyncio.create_task(runner.run())
+    return runner
+
+
+async def handle_talk(request):
+    runner = await start_talk()
     return web.json_response({"ok": True, "mode": "live" if runner is live else "conversation"})
 
 
@@ -1880,6 +1885,167 @@ async def handle_stop(request):
     async with talk_lock:
         await stop_conversation()
     return web.json_response({"ok": True})
+
+
+# Касания наушников. Наушники сами чередуют Play и Pause по своему представлению о состоянии (оно не совпадает
+# с нашим), поэтому все три — одно и то же «одно касание». Двойное и тройное касание наушники обычно шлют
+# как «следующий» и «предыдущий трек» — это зависит от модели, журнал ядра покажет, что пришло.
+TAP = {"PlayPause", "Play", "Pause"}
+
+
+def button_action(event: str, st: dict) -> str:
+    """Что сделать по касанию. st: speaking — Ксения говорит или думает; conversation — разговор идёт;
+    music — "playing" | "paused" | None. Правило, которое легко запомнить: пока Ксения говорит, любое
+    касание — замолчать (как «стоп»; «продолжай» вернёт рассказ)."""
+    if event == "Stop":
+        return "stop_all"
+    if st.get("speaking"):
+        return "hush" if event in TAP or event in ("Next", "Previous") else "none"
+    tune = st.get("music")
+    if event in TAP:
+        if tune == "playing":
+            return "music_pause"
+        if tune == "paused" and not st.get("conversation"):
+            return "music_resume"
+        return "end" if st.get("conversation") else "talk"
+    if event == "Next":
+        return "music_next" if tune == "playing" else "talk"
+    if event == "Previous":
+        return "music_previous" if tune == "playing" else "repeat"
+    return "none"
+
+
+def button_state() -> dict:
+    sp = ks.speaker
+    sounding = sp is not None and not sp.cancelled and getattr(sp, "_play_end", 0.0) > time.time()
+    return {"speaking": ks.lock.locked() or sounding, "conversation": conv.active(), "music": music.status()}
+
+
+def last_reply() -> str:
+    return next((m["content"] for m in reversed(ks.history) if m.get("role") == "assistant"
+                 and isinstance(m.get("content"), str) and m["content"].strip()), "")
+
+
+class HeadsetButtons:
+    """Кнопки наушников через MPRIS: помощник (системный python3 с gi) держит плеер «Ксения» на шине сеанса,
+    касания приходят строками JSON. Своего GATT-сервера для LE Audio не делаем — см. docs/REVIEW-3.md."""
+
+    HELPER = os.path.join(ROOT, "tools", "mpris_helper.py")
+
+    def __init__(self):
+        self.proc = None
+        self.last_t = 0.0
+        self.shown = None
+
+    async def run(self):
+        python = CONFIG.get("headset_buttons_python", "/usr/bin/python3")
+        for attempt in range(5):
+            ready = False
+            try:
+                self.proc = await asyncio.create_subprocess_exec(
+                    python, self.HELPER, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL)
+            except OSError as e:
+                log.warning("Кнопки наушников: помощник не запустился: %s", e)
+                return
+            self.shown = None
+            pusher = asyncio.create_task(self.push_state())
+            try:
+                async for line in self.proc.stdout:
+                    try:
+                        msg = json.loads(line)
+                    except ValueError:
+                        continue
+                    if msg.get("ready"):
+                        ready = True
+                        log.info("Кнопки наушников: плеер «Ксения» на шине сеанса")
+                    elif msg.get("error"):
+                        log.warning("Кнопки наушников: %s", msg["error"])
+                    elif msg.get("event"):
+                        await self.on_event(msg["event"])
+            finally:
+                pusher.cancel()
+                if self.proc.returncode is None:
+                    self.proc.kill()
+                await self.proc.wait()
+            if not ready:  # нет gi или шины сеанса — повторять бесполезно
+                log.warning("Кнопки наушников выключены: помощник MPRIS не поднялся (код %s)", self.proc.returncode)
+                return
+            await asyncio.sleep(CONFIG.get("headset_buttons_retry_s", 10) * (attempt + 1))
+        log.warning("Кнопки наушников: помощник падает раз за разом — выключаю")
+
+    def status(self):
+        """Что показывать плееру: «Играет», пока Ксения говорит или играет музыка, иначе «Пауза» —
+        приостановленный плеер KDE по-прежнему считает своим и отдаёт ему медиакнопки."""
+        st = button_state()
+        if st["speaking"]:
+            return "Playing", "Ксения говорит"
+        if st["music"]:
+            return ("Playing" if st["music"] == "playing" else "Paused"), music.title() or "Музыка"
+        return "Paused", "Ксения"
+
+    async def push_state(self):
+        while True:
+            cur = self.status()
+            if cur != self.shown:
+                self.shown = cur
+                line = json.dumps({"status": cur[0], "title": cur[1]}, ensure_ascii=False) + "\n"
+                self.proc.stdin.write(line.encode())
+                await self.proc.stdin.drain()
+            await asyncio.sleep(0.3)
+
+    async def on_event(self, event: str):
+        now = time.time()
+        if now - self.last_t < CONFIG.get("headset_buttons_debounce_s", 0.35):
+            return  # одно касание иногда приходит дважды (медиаклавиша и mpris-proxy)
+        self.last_t = now
+        action = button_action(event, button_state())
+        log.info("Кнопка наушников: %s -> %s", event, action)
+        try:
+            await self.act(action)
+        except Exception as e:
+            log.warning("Кнопка наушников: %s не выполнено: %r", action, e)
+
+    async def act(self, action: str):
+        if action == "hush":
+            if live.busy():
+                await live.cancel_turn()
+            else:
+                await ks.stop()
+        elif action == "talk":
+            await start_talk()
+        elif action in ("end", "stop_all"):
+            async with talk_lock:
+                ended = await stop_conversation()
+            if action == "stop_all" and music.playing():
+                await music.call("music_control", {"action": "pause"}, ks.session)
+            elif ended and CONFIG.get("headset_buttons_end_phrase", "Отдыхаю."):
+                await say_notice(CONFIG.get("headset_buttons_end_phrase", "Отдыхаю."))  # без звука непонятно, сработало ли
+        elif action.startswith("music_"):
+            await music.call("music_control", {"action": action[len("music_"):]}, ks.session)
+        elif action == "repeat":
+            await self.repeat()
+
+    async def repeat(self):
+        """Повторить последний ответ — мимо истории и мозга (история только дописывается, повтор в неё не идёт)."""
+        text = last_reply()
+        if not text:
+            await say_notice("Я пока ничего не говорила.")
+            return
+        async with ks.lock:
+            sp = Speaker(ks.session)
+            ks.speaker = sp  # касание во время повтора — замолчать
+            try:
+                await sp.warm()
+                for part in split_for_reading(text, max_len=CONFIG.get("resume_chunk_chars", 500)):
+                    await sp.speak(part, {"_t0": time.time()})
+                    if sp.cancelled:
+                        break
+            finally:
+                await sp.finish()
+
+
+buttons = HeadsetButtons()
 
 
 async def handle_status(request):
@@ -1943,6 +2109,8 @@ async def on_start(app):
     # ссылки на фоновые задачи храним: цикл событий держит задачи только слабыми ссылками
     BACKGROUND.extend([asyncio.create_task(findings_loop()), asyncio.create_task(reminders_loop()),
                        asyncio.create_task(music.book_autosave_loop()), asyncio.create_task(warmup())])
+    if CONFIG.get("headset_buttons", True):
+        BACKGROUND.append(asyncio.create_task(buttons.run()))
 
 
 async def on_cleanup(app):
