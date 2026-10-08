@@ -162,10 +162,34 @@ async def _search(session, query: str, russian: bool):
         url = f"{API}/stations/search?{urllib.parse.urlencode(p)}"
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=8),
                                headers={"User-Agent": "Ksenia/0.1"}) as r:
-            res = [s for s in await r.json() if s.get("url_resolved")]
+            res = _safe_stations(await r.json(content_type=None))
         if res:
             return res
     return []
+
+
+def _safe_stations(raw):
+    """Станции radio-browser — недоверенные данные (их добавляет кто угодно). Оставляем только http(s)-потоки:
+    mpv открыл бы и file://, av://, lavfi:// и прочие протоколы. Имя — короткое, одной строкой."""
+    out = []
+    for st in raw if isinstance(raw, list) else []:
+        if not isinstance(st, dict):
+            continue
+        url = str(st.get("url_resolved") or "").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            continue
+        name = " ".join(str(st.get("name") or "").split())[:80] or "станция без названия"
+        out.append({**st, "url_resolved": url, "name": name, "tags": str(st.get("tags") or "")[:200],
+                    "country": str(st.get("country") or "")[:60]})
+    return out
+
+
+def _music_only(stations, query):
+    """Для музыки избегаем разговорных станций (новости/ток-шоу), если только их не просили."""
+    if any(w in query.lower() for w in ("news", "talk", "новост")):
+        return stations
+    songs = [x for x in stations if not any(t in x.get("tags", "").lower() for t in ("news", "talk"))]
+    return songs or stations
 
 
 def _ym_client():
@@ -325,7 +349,7 @@ async def _play_station(st):
     await _ensure_mpv()
     await _ipc("loadfile", st["url_resolved"], "replace")
     await _ipc("set_property", "pause", False)
-    _state["station"] = st["name"].strip()
+    _state["station"] = st["name"]
     await _apply_volume()
 
 
@@ -349,16 +373,11 @@ async def call(name: str, args: dict, session) -> dict:
         res = await _search(session, query, args.get("russian", True) is not False)
         if not res:
             return {"ok": False, "error": f"не нашла радиостанций по запросу «{query}»"}
+        res = _music_only(res, query)
         _state["last_query"], _state["last_results"] = query, res
-        # для музыки избегаем разговорных станций (новости/ток-шоу), если только их не просили
-        if not any(w in query.lower() for w in ("news", "talk", "новост")):
-            music_only = [x for x in res if not any(t in (x.get("tags") or "").lower() for t in ("news", "talk"))]
-            res = music_only or res
-            _state["last_results"] = res
         st = random.choice(res[:5])
         await _play_station(st)
-        return {"ok": True, "station": _state["station"], "genre_tags": st.get("tags", "")[:80],
-                "country": st.get("country", "")}
+        return {"ok": True, "station": _state["station"], "genre_tags": st["tags"][:80], "country": st["country"]}
     if name == "audiobook":
         if not os.path.exists(TOKEN_FILE):
             return {"ok": False, "error": "Яндекс Музыка не подключена (нет ключа)"}
@@ -443,7 +462,7 @@ async def call(name: str, args: dict, session) -> dict:
         elif a == "previous":
             return {"ok": False, "error": "у радио нет предыдущего трека"}
         elif a == "next":
-            others = [s for s in _state["last_results"] if s["name"].strip() != _state["station"]]
+            others = [s for s in _state["last_results"] if s["name"] != _state["station"]]
             if not others:
                 return {"ok": False, "error": "других станций этого жанра нет"}
             await _play_station(random.choice(others[:8]))
