@@ -14,7 +14,6 @@ import json
 import logging
 import math
 import os
-import struct
 import subprocess
 import time
 import urllib.parse
@@ -119,7 +118,7 @@ class Ear:
             return ""
         return text
 
-    async def record_utterance(self, source, sink_for_beep):
+    async def record_utterance(self, source, sink_for_beep, client_gone=lambda: False):
         """Запись до конца реплики: энергетический детектор с адаптивным порогом шума."""
         silence_ms = CONFIG.get("silence_ms", 800)
         max_s = CONFIG.get("max_s", 30)
@@ -151,6 +150,10 @@ class Ear:
                         break
                     self._save_debug(frames)
                     return None, {"reason": "mic_lost"}
+                if client_gone():
+                    # ядро разорвало соединение (Александр перебил или нажал «стоп») — микрофон сразу освобождаем
+                    log.info("Запрос отменён ядром — запись прекращена")
+                    return None, {"reason": "cancelled"}
                 x = np.frombuffer(buf, dtype=np.int16)
                 frames.append(x)
                 rms = float(np.sqrt(np.mean((x.astype(np.float32) / 32768.0) ** 2)))
@@ -203,7 +206,9 @@ async def restore_a2dp(card, profile):
     await set_profile(card, profile)
     sink = "bluez_output." + card[len("bluez_card."):].replace("_", ":")
     for _ in range(40):
-        if card_profile(card) == profile and sink in sh("pactl", "list", "sinks", "short"):
+        # pactl — в отдельном потоке: синхронный вызов останавливал весь цикл событий слуха
+        if await asyncio.to_thread(card_profile, card) == profile and \
+                sink in await asyncio.to_thread(sh, "pactl", "list", "sinks", "short"):
             break
         await asyncio.sleep(0.05)
     await asyncio.sleep(CONFIG.get("a2dp_settle_s", 0.3))
@@ -216,14 +221,14 @@ async def handle_listen(request):
     async with ear.lock:
         t0 = time.time()
         timings = {}
-        card = find_bt_card() if CONFIG.get("bluetooth", True) else None
+        card = await asyncio.to_thread(find_bt_card) if CONFIG.get("bluetooth", True) else None
         source = find_source(card)
         if not source:
             return web.json_response({"error": "no_microphone"}, status=503)
         restore = None
         beep_sink = CONFIG.get("beep_sink") or None
         if card:
-            prof = card_profile(card)
+            prof = await asyncio.to_thread(card_profile, card)
             if prof != CONFIG.get("hfp_profile", "headset-head-unit"):
                 restore = prof
                 await set_profile(card, CONFIG.get("hfp_profile", "headset-head-unit"))
@@ -233,7 +238,8 @@ async def handle_listen(request):
         timings["mic_ready_s"] = round(time.time() - t0, 2)
         restore_task = None
         try:
-            pcm, info = await ear.record_utterance(source, beep_sink)
+            pcm, info = await ear.record_utterance(
+                source, beep_sink, client_gone=lambda: request.transport is None or request.transport.is_closing())
         finally:
             if restore:
                 restore_task = asyncio.create_task(restore_a2dp(card, restore))

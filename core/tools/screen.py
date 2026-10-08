@@ -25,6 +25,7 @@ with open(os.path.join(ROOT, "..", "config.json"), encoding="utf-8") as _f:
 BRAIN_KEY_FILE = _CFG["brain_key_file"]
 BRAIN_URL = _CFG["brain_url"]
 READ_CHUNK = 1500
+TIMEOUTS = {"screen_describe": 60, "screen_read": 60}  # монитор будится, снимок 4K, OCR/зрение
 
 _reading = {"rest": ""}  # непрочитанный остаток длинного текста
 

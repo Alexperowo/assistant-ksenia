@@ -18,7 +18,6 @@ import re
 import subprocess
 import time
 import urllib.parse
-import uuid
 
 import aiohttp
 from aiohttp import web
@@ -46,9 +45,10 @@ async def run_tool(name, arguments, session):
     if not mod:
         return {"ok": False, "error": f"нет такого инструмента: {name}"}
     try:
-        return await asyncio.wait_for(mod.call(name, args, session), timeout=TOOL_TIMEOUT_S)
+        limit = getattr(mod, "TIMEOUTS", {}).get(name, TOOL_TIMEOUT_S)  # зрению нужно больше: монитор, снимок, 4K
+        return await asyncio.wait_for(mod.call(name, args, session), timeout=limit)
     except asyncio.TimeoutError:  # str(TimeoutError()) пустая — модель получала «сбой инструмента: »
-        return {"ok": False, "error": f"инструмент не ответил за {TOOL_TIMEOUT_S} секунд"}
+        return {"ok": False, "error": "инструмент не ответил вовремя"}
     except Exception as e:
         log.exception("инструмент %s", name)
         return {"ok": False, "error": f"сбой инструмента: {e!r}"[:300]}
@@ -353,7 +353,16 @@ class Ksenia:
         try:
             with open(HISTORY_FILE, encoding="utf-8") as f:
                 return json.load(f)[-CONFIG.get("history_keep", 200):]
-        except Exception:
+        except FileNotFoundError:
+            return []
+        except Exception as e:
+            # битый файл не выбрасываем молча: сохраняем копию, иначе следующее сохранение затрёт историю
+            bad = HISTORY_FILE + time.strftime(".bad-%Y%m%d-%H%M%S")
+            try:
+                os.replace(HISTORY_FILE, bad)
+            except OSError:
+                pass
+            log.error("История повреждена (%s), копия: %s", e, bad)
             return []
 
     def save_history(self):

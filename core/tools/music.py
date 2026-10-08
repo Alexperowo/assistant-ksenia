@@ -369,11 +369,17 @@ async def _apply_volume():
     await _ipc("set_property", "volume", min(vol, _state["volume"]))
 
 
+_duck_depth = 0  # вложенность: разговор + реплика внутри него не должны вернуть громкость раньше времени
+
+
 async def duck(on: bool):
-    """Приглушить музыку, пока Ксения слушает или говорит."""
-    if _state["ducked"] == on:
+    """Приглушить музыку, пока Ксения слушает или говорит (со счётчиком вложенности)."""
+    global _duck_depth
+    _duck_depth = _duck_depth + 1 if on else max(0, _duck_depth - 1)
+    want = _duck_depth > 0
+    if _state["ducked"] == want:
         return
-    _state["ducked"] = on
+    _state["ducked"] = want
     if _state["station"]:
         await _apply_volume()
 
