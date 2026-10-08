@@ -69,7 +69,7 @@ def test_finding_text_is_marked_as_data_and_limited():
 def loop_env(monkeypatch):
     said = []
 
-    async def fake_turn(text, timings, internal=False, output="local"):
+    async def fake_turn(text, timings, internal=False, output="local", **kw):
         said.append((text, internal))
         return ""
 
@@ -123,3 +123,43 @@ def test_reminders_loop_survives_errors(loop_env, monkeypatch):
 
     asyncio.run(go())
     assert any("таблетки" in text for text, _ in loop_env)
+
+
+def test_guest_voice_cannot_run_tools_or_confirm(monkeypatch):
+    """Чужой голос (owner False): ни инструментов, ни подтверждений — даже если модель их вызывает."""
+    import asyncio
+    import core
+    from tools import confirm
+    ran = []
+    confirm.prepare("тестовое действие", lambda: ran.append(1) or asyncio.sleep(0, {"ok": True}))
+    ks = core.Ksenia.__new__(core.Ksenia)
+    ks.history, ks.window_start, ks.last_tag, ks.speaker, ks.session = [], 0, None, None, None
+    ks.lock = asyncio.Lock()
+
+    async def fake_step(budget, queue, speaker, timings, first_step):
+        if first_step:
+            return "", [{"id": "1", "type": "function", "function": {"name": "music_play", "arguments": "{}"}}], False
+        return "Это может только Александр.", [], False
+
+    called = []
+
+    async def fake_run_tool(*a, **k):
+        called.append(a)
+        return {"ok": True}
+
+    monkeypatch.setattr(ks, "_step", fake_step)
+    monkeypatch.setattr(core, "run_tool", fake_run_tool)
+    monkeypatch.setattr(ks, "save_history", lambda: None)
+
+    class FakeSpeaker:
+        cancelled = False
+        def __init__(self, *a, **k): pass
+        async def speak(self, *a, **k): pass
+        async def finish(self): pass
+        async def cancel(self): pass
+    monkeypatch.setattr(core, "Speaker", FakeSpeaker)
+    asyncio.run(ks.respond("Да", {"_t0": 0}, speaker={"owner": False, "enrolled": True, "score": 0.1}))
+    assert not called, "инструмент гостя не должен исполняться"
+    assert not ran, "гость не может подтвердить действие"
+    assert confirm.current() is not None, "ожидающее действие остаётся для Александра"
+    confirm.cancel()

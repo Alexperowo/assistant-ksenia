@@ -120,7 +120,7 @@ def test_preferred_output(client_q, monkeypatch):
 def test_say_from_tablet_stops_pc_conversation(monkeypatch):
     seen = {}
 
-    async def fake_turn(text, timings, internal=False, output="local"):
+    async def fake_turn(text, timings, internal=False, output="local", **kw):
         seen.update(text=text, output=output)
         return "ок"
 

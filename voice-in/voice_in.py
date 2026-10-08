@@ -107,6 +107,13 @@ class Ear:
         else:
             self.model = WhisperModel(CONFIG["model_dir"], device="cuda", compute_type=CONFIG.get("compute_type", "int8_float16"))
         log.info("Распознавание (%s) загружено за %.1f с", self.engine, time.time() - t0)
+        try:
+            from voiceprint import Voiceprint
+            self.vp = Voiceprint(CONFIG.get("owner_threshold", 0.50), CONFIG.get("confirm_threshold", 0.55))
+            log.info("Отпечаток голоса: %s", "загружен" if self.vp.centroid is not None else "образца ещё нет")
+        except Exception as e:
+            self.vp = None
+            log.warning("Отпечаток голоса недоступен: %r", e)
         self.lock = asyncio.Lock()
         self.busy = False
 
@@ -269,14 +276,16 @@ async def handle_listen(request):
                 await restore_task
             return web.json_response({"text": "", "timings": timings})
         t1 = time.time()
+        spk_task = asyncio.create_task(asyncio.to_thread(ear.vp.check, pcm)) if ear.vp else None
         text = await asyncio.to_thread(ear.transcribe, pcm)
         timings["stt_s"] = round(time.time() - t1, 2)
+        speaker = await spk_task if spk_task else {"owner": None, "enrolled": False}
         if restore_task:
             # ответ Ксении должен играть уже в A2DP: ждём конца переключения (идёт параллельно с распознаванием)
             timings["a2dp_ready_s"] = await restore_task
         timings["total_s"] = round(time.time() - t0, 2)
-        log.info("Услышала (%s): %s", timings, text)
-        return web.json_response({"text": text, "timings": timings})
+        log.info("Услышала (%s, голос %s): %s", timings, speaker, text)
+        return web.json_response({"text": text, "timings": timings, "speaker": speaker})
 
 
 async def handle_transcribe(request):
@@ -290,7 +299,22 @@ async def handle_transcribe(request):
     t1 = time.time()
     async with ear.lock:
         text = await asyncio.to_thread(ear.transcribe, audio)
-    return web.json_response({"text": text, "stt_s": round(time.time() - t1, 2)})
+        speaker = await asyncio.to_thread(ear.vp.check, audio) if ear.vp else {"owner": None, "enrolled": False}
+    return web.json_response({"text": text, "stt_s": round(time.time() - t1, 2), "speaker": speaker})
+
+
+async def handle_vp(request):
+    """Отпечаток голоса: add_last — добавить последнюю реплику в образец, save, clear, status."""
+    if not ear.vp:
+        return web.json_response({"ok": False, "error": "модуль отпечатка не загружен"}, status=503)
+    action = request.match_info["action"]
+    if action == "add_last":
+        return web.json_response(ear.vp.add_last())
+    if action == "save":
+        return web.json_response(ear.vp.save(CONFIG.get("enroll_min_phrases", 4)))
+    if action == "clear":
+        return web.json_response(ear.vp.clear())
+    return web.json_response({"ok": True, "enrolled": ear.vp.centroid is not None, "collected": len(ear.vp.pending)})
 
 
 async def handle_status(request):
@@ -327,6 +351,7 @@ def main():
     ear = Ear()
     app = web.Application(client_max_size=50 * 1024 * 1024, middlewares=[local_only])
     app.add_routes([web.post("/listen", handle_listen), web.post("/transcribe", handle_transcribe),
+                    web.post("/voiceprint/{action}", handle_vp),
                     web.get("/status", handle_status)])
     web.run_app(app, host="127.0.0.1", port=CONFIG.get("port", 18120), print=None)
 

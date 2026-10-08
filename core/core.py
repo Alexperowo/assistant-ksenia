@@ -27,10 +27,10 @@ from aiohttp import web
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-from tools import confirm, daily, desktop, memory, music, research, screen, vk  # noqa: E402  (инструменты — отдельные модули в core/tools)
+from tools import confirm, daily, desktop, memory, music, research, screen, vk, voicectl  # noqa: E402  (инструменты — отдельные модули в core/tools)
 from tools import web as webtool  # noqa: E402  (не путать с aiohttp.web)
 
-TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research, daily]
+TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research, daily, voicectl]
 TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
 TOOL_INDEX = {sch["function"]["name"]: m for m in TOOL_MODULES for sch in m.SCHEMAS}
 
@@ -465,7 +465,7 @@ ACTION_PATTERNS = [r"\bвключ", r"\bвыключ", r"\bпостав", r"\bп
                    r"\bэкран\w{0,2}\b", r"\bокн[оаеу]\b", r"\bопиши", r"\bпосмотри", r"\bпокажи",
                    r"\bувелич", r"\bуменьш", r"\bлуп[аеуы]\b", r"\bскопир", r"\bвыделен",
                    # память: обещание «запомню» без вызова инструмента — недопустимо
-                   r"\bзапомн", r"\bзабудь", r"\bзабыть", r"\bпомнишь", r"(обо|про) мне",
+                   r"\bрежим", r"\bотпечат", r"\bгост", r"\bзапомн", r"\bзабудь", r"\bзабыть", r"\bпомнишь", r"(обо|про) мне",
                    # интернет и ВК
                    r"\bновост", r"\bнайди", r"\bпоищи", r"\bузнай", r"\bвконтакт", r"\bвк\b", r"\bнаписал"]
 
@@ -607,7 +607,8 @@ class Ksenia:
             return CONFIG.get("budget_action", 256)
         return CONFIG.get("budget_chat", 0)
 
-    async def respond(self, user_text: str, timings: dict, internal: bool = False, output: str = "local"):
+    async def respond(self, user_text: str, timings: dict, internal: bool = False, output: str = "local",
+                      speaker: dict = None):
         """internal — служебная реплика ядра (напоминание, находка помощника), а не слова Александра:
         она не решает ожидающее подтверждение и не запускает инструменты (в ней чужой текст из интернета)."""
         # Nex — гибридная модель: её рекуррентное состояние нельзя откатить, поэтому запрос обязан
@@ -620,12 +621,25 @@ class Ksenia:
         first_today = datetime.date.fromtimestamp(getattr(self, "last_turn_t", 0.0) or 0) != datetime.date.today()
         note = ""
         # что сказал Александр — для инструментов, которым нужно его явное слово (память), а не решение модели
-        confirm.CONTEXT.update({"user_text": "" if internal else user_text, "internal": internal,
-                                "affirmative": (not internal) and is_affirmative(user_text)})
-        if not internal:
+        # Чей голос: speaker из voice-in (отпечаток). owner False — говорит не Александр (гость):
+        # разговор вежливый, но без действий; ожидающее подтверждение он решить не может.
+        speaker = speaker or {}
+        guest = speaker.get("owner") is False
+        weak_voice = speaker.get("enrolled") and speaker.get("owner") and not speaker.get("confirm_ok")
+        self._guest = guest
+        confirm.CONTEXT.update({"user_text": "" if (internal or guest) else user_text, "internal": internal or guest,
+                                "affirmative": (not internal) and (not guest) and is_affirmative(user_text)})
+        if guest:
+            note = ("; говорит НЕ Александр (чужой голос, гость) — поговори вежливо, но никаких действий и "
+                    "инструментов, подтверждения не принимай; если просят что-то сделать — «это может только Александр»")
+        elif not internal:
             self.last_turn_t = time.time()
-            # служебная реплика между «Отправить?» и ответом Александра раньше отменяла действие как «не да»
-            note = await self._resolve_confirmation(user_text)
+            if weak_voice and is_affirmative(user_text) and confirm.current() and not confirm.current().get("expired"):
+                # «да» на рискованное действие — только уверенно узнанным голосом Александра
+                note = "; голос не совпал уверенно — действие НЕ выполнено, попроси Александра повторить «да»"
+            else:
+                # служебная реплика между «Отправить?» и ответом Александра раньше отменяла действие как «не да»
+                note = await self._resolve_confirmation(user_text)
         if first_today and not internal and not user_text.startswith("(служебно"):
             note += ("; это первый разговор за сегодня — тепло поздоровайся по времени суток; можешь коротко "
                      "предложить погоду и напомнить, что стоит на сегодня (remind_list), если это к месту")
@@ -677,6 +691,8 @@ class Ksenia:
                         break
                     if internal:
                         result = INTERNAL_NO_TOOLS
+                    elif getattr(self, "_guest", False):
+                        result = {"ok": False, "error": "говорит не Александр — действия выполняет только он"}
                     else:
                         result = await run_tool(c["function"]["name"], c["function"].get("arguments") or "{}", self.session)
                     any_error = any_error or not result.get("ok", False)
@@ -818,9 +834,9 @@ class Ksenia:
 ks = Ksenia()
 
 
-async def turn(text: str, timings: dict, internal: bool = False, output: str = "local"):
+async def turn(text: str, timings: dict, internal: bool = False, output: str = "local", speaker: dict = None):
     async with ks.lock:
-        reply = await ks.respond(text, timings, internal=internal, output=output)
+        reply = await ks.respond(text, timings, internal=internal, output=output, speaker=speaker)
     timings.pop("_t0", None)
     log.info("Александр: %s | Ксения: %s | %s", text, reply, timings)
     return reply
@@ -847,7 +863,7 @@ async def handle_say(request):
         await ks.stop()
     await music.duck(True)
     try:
-        reply = await turn(text, timings, output=output)
+        reply = await turn(text, timings, output=output, speaker=(data.get('speaker') if isinstance(data.get('speaker'), dict) else None))
     finally:
         await music.duck(False)
     return web.json_response({"reply": reply, "timings": timings})
@@ -985,6 +1001,26 @@ class Conversation:
     def active(self):
         return self.task is not None and not self.task.done()
 
+    async def enroll_step(self):
+        """Запись образца голоса: последняя реплика Александра добавляется в отпечаток."""
+        try:
+            async with ks.session.post(CONFIG["voice_in_url"] + "/voiceprint/add_last",
+                                       timeout=aiohttp.ClientTimeout(total=10)) as r:
+                res = await r.json(content_type=None)
+            if res.get("ok"):
+                voicectl.STATE["enrolling"] -= 1
+            if voicectl.STATE["enrolling"] <= 0:
+                async with ks.session.post(CONFIG["voice_in_url"] + "/voiceprint/save",
+                                           timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    saved = await r.json(content_type=None)
+                voicectl.STATE["enrolling"] = 0
+                log.info("Отпечаток голоса сохранён: %s", saved)
+                waiting.append("(служебно: образец голоса Александра записан"
+                               + (" успешно" if saved.get("ok") else f", но не сохранился: {saved.get('error')}")
+                               + ". Скажи ему об этом одной фразой.)")
+        except Exception as e:
+            log.warning("отпечаток: %r", e)
+
     async def listen(self):
         """Один запрос к voice-in -> {"text", "timings"} или {"error"}. Занят прошлой записью
         (после перебивания) — ждём и пробуем снова, а не заканчиваем разговор молча."""
@@ -1028,8 +1064,14 @@ class Conversation:
                         await say_notice(LISTEN_FAIL["mic_lost"])
                     log.info("Тишина — разговор окончен (%s)", info)
                     return
+                speaker = heard.get("speaker") or {}
+                if speaker.get("owner") is False and voicectl.STATE["mode"] == "owner_only":
+                    log.info("Чужой голос (%.2f) — режим «только Александр», не отвечаю: %s", speaker.get("score", 0), text)
+                    continue
+                if voicectl.STATE["enrolling"] > 0 and speaker.get("owner") is not False:
+                    await self.enroll_step()
                 timings = {"_t0": time.time(), "listen": info}
-                await turn(text, timings)
+                await turn(text, timings, speaker=speaker)
                 self.turns += 1
                 await deliver_waiting()  # находка помощника или напоминание — рассказать до следующего «слушаю»
                 if is_goodbye(text) or self.turns >= CONFIG.get("max_turns", 50):
