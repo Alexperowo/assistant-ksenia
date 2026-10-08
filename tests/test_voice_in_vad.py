@@ -1,0 +1,162 @@
+"""Детектор речи voice-in на синтетическом сигнале: parec и часы подменены, железа не нужно.
+
+Сигнал идёт кадрами по 20 мс; часы сдвигаются на 20 мс на каждый прочитанный кадр,
+поэтому проверки не зависят от скорости машины."""
+import asyncio
+
+import numpy as np
+import pytest
+
+import voice_in
+
+RATE = voice_in.RATE
+FRAME = voice_in.FRAME
+
+
+def noise(seconds, rms=0.002, seed=0):
+    rnd = np.random.default_rng(seed)
+    return rnd.normal(0, rms, int(RATE * seconds))
+
+
+def speech(seconds, amp=0.1, freq=220):
+    t = np.arange(int(RATE * seconds)) / RATE
+    return amp * np.sin(2 * np.pi * freq * t)
+
+
+def jbl_speech(seconds):
+    """Речь с провалами: микрофон JBL глушит паузы до нуля (40 мс тишины каждые 100 мс)."""
+    x = speech(seconds)
+    for start in range(0, len(x), int(RATE * 0.1)):
+        x[start + int(RATE * 0.06):start + int(RATE * 0.1)] = 0
+    return x
+
+
+def pcm(*parts):
+    x = np.concatenate(parts)
+    return (np.clip(x, -1, 1) * 32767).astype(np.int16).tobytes()
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def time(self):
+        return self.t
+
+
+class FakeParec:
+    def __init__(self, data, clock, stall=False):
+        self.data, self.pos, self.clock, self.stall = data, 0, clock, stall
+        self.stdout = self
+        self.returncode = None
+        self.killed = False
+
+    async def readexactly(self, n):
+        if self.pos + n > len(self.data):
+            if self.stall:
+                await asyncio.sleep(3600)  # SCO не отдаёт звук: сработает таймаут wait_for
+            raise asyncio.IncompleteReadError(self.data[self.pos:], n)
+        chunk = self.data[self.pos:self.pos + n]
+        self.pos += n
+        self.clock.t += n / 2 / RATE
+        return chunk
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    async def wait(self):
+        return self.returncode
+
+
+@pytest.fixture
+def rec(monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(voice_in, "time", clock)
+    monkeypatch.setattr(voice_in.Ear, "_save_debug", staticmethod(lambda frames: None))
+    monkeypatch.setattr(voice_in, "CONFIG", {**voice_in.CONFIG, "start_timeout_s": 3, "max_s": 6})
+    procs = []
+
+    def run(data, stall=False, config=None):
+        if config:
+            voice_in.CONFIG.update(config)
+        p = FakeParec(data, clock, stall)
+        procs.append(p)
+
+        async def fake_exec(*args, **kw):
+            assert args[0] == "parec" and args[2] == "bluez_input.TEST"
+            return p
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        if stall:
+            real_wait_for = asyncio.wait_for
+
+            async def fast_wait_for(aw, timeout):
+                return await real_wait_for(aw, timeout=0.05)
+
+            monkeypatch.setattr(asyncio, "wait_for", fast_wait_for)
+        ear = voice_in.Ear.__new__(voice_in.Ear)
+        out = asyncio.run(ear.record_utterance("bluez_input.TEST", None))
+        assert p.killed  # parec не остаётся жить
+        return out
+
+    return run
+
+
+def test_phrase_between_pauses(rec):
+    audio, info = rec(pcm(noise(1.0), speech(1.5), noise(1.5)))
+    # начало: 6 громких кадров (min_voiced_ms 120) после 1,0 с
+    assert info["speech_start_s"] == pytest.approx(1.12, abs=0.03)
+    # конец: 700 мс тишины, хвост обрезан до 200 мс -> 1,0 + 1,5 + 0,2
+    assert info["audio_s"] == pytest.approx(2.7, abs=0.03)
+    assert len(audio) == int(info["audio_s"] * RATE)
+    assert np.abs(audio[int(RATE * 1.1):int(RATE * 2.4)]).max() > 3000  # речь внутри
+
+
+def test_jbl_gaps_still_count_as_speech(rec):
+    audio, info = rec(pcm(noise(0.8), jbl_speech(1.2), noise(1.2)))
+    assert info["speech_start_s"] == pytest.approx(0.8, abs=0.25)
+    # провалы по 40 мс короче 700 мс — фраза не обрывается посередине
+    assert info["audio_s"] > 1.9
+
+
+def test_beep_echo_in_first_350ms_is_ignored(rec):
+    audio, info = rec(pcm(speech(0.3, amp=0.3), noise(4.0)))
+    assert audio is None and info["reason"] == "no_speech"
+
+
+def test_short_click_is_not_speech(rec):
+    audio, info = rec(pcm(noise(1.0), speech(0.06, amp=0.5), noise(3.0)))
+    assert audio is None and info["reason"] == "no_speech"
+
+
+def test_silence_times_out(rec):
+    audio, info = rec(pcm(noise(4.0)))
+    assert audio is None and info["reason"] == "no_speech"
+    assert info["noise_rms"] == pytest.approx(0.002, abs=0.001)
+
+
+def test_adaptive_threshold_in_noisy_room(rec):
+    # шум 0,02 выше min_speech_rms: порог = шум*3, шум сам по себе речью не считается
+    audio, info = rec(pcm(noise(3.5, rms=0.02)))
+    assert audio is None
+
+
+def test_long_speech_is_cut_at_max_s(rec):
+    audio, info = rec(pcm(noise(0.5), speech(10.0)))
+    assert info["audio_s"] == pytest.approx(6.0, abs=0.05)
+
+
+def test_mic_lost_before_speech(rec):
+    audio, info = rec(pcm(noise(0.5)))
+    assert audio is None and info == {"reason": "mic_lost"}
+
+
+def test_mic_lost_mid_phrase_keeps_what_was_said(rec):
+    audio, info = rec(pcm(noise(0.6), speech(1.0)))
+    assert audio is not None and info["audio_s"] == pytest.approx(1.6, abs=0.03)
+
+
+def test_mic_stalls(rec):
+    audio, info = rec(pcm(noise(0.5)), stall=True)
+    assert audio is None and info["reason"] == "mic_lost"

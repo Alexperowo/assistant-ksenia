@@ -141,7 +141,16 @@ class Ear:
         t_speech = None
         try:
             while True:
-                buf = await asyncio.wait_for(rec.stdout.readexactly(FRAME * 2), timeout=3)
+                try:
+                    buf = await asyncio.wait_for(rec.stdout.readexactly(FRAME * 2), timeout=3)
+                except (asyncio.IncompleteReadError, asyncio.TimeoutError) as e:
+                    # микрофон пропал (наушники отключились, parec упал, SCO не отдаёт звук): раньше — 500 и тишина;
+                    # теперь распознаём то, что успели записать, или честно сообщаем ядру
+                    log.warning("Микрофон оборвался: %r", e)
+                    if speech_started:
+                        break
+                    self._save_debug(frames)
+                    return None, {"reason": "mic_lost"}
                 x = np.frombuffer(buf, dtype=np.int16)
                 frames.append(x)
                 rms = float(np.sqrt(np.mean((x.astype(np.float32) / 32768.0) ** 2)))
