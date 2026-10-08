@@ -127,20 +127,82 @@ def _locator_by_text(pg, text):
             pg.get_by_text(t, exact=False)]
 
 
-async def _click(pg, text):
-    for loc in _locator_by_text(pg, text):
+LABEL_JS = "e => e.innerText || e.getAttribute('aria-label') || e.value || e.title || ''"
+SEARCH_JS = ("e => e.type === 'search' || e.getAttribute('role') === 'searchbox' || "
+             "/search|поиск|найти|query|^q$/i.test([e.name, e.id, e.placeholder, e.getAttribute('aria-label')].join(' '))")
+
+
+async def _first(cands):
+    for loc in cands:
         try:
             if await loc.count():
-                await loc.first.click(timeout=5000)
-                try:
-                    await pg.wait_for_load_state("domcontentloaded", timeout=8000)
-                except Exception:
-                    pass
-                _state["url"] = pg.url
-                return {"ok": True, "clicked": text, "url": pg.url, "title": await pg.title()}
+                return loc.first
         except Exception:
             continue
-    return {"ok": False, "error": f"не нашла на странице «{text}»"}
+    return None
+
+
+async def _label(el, fallback):
+    try:
+        return " ".join(str(await el.evaluate(LABEL_JS)).split())[:80] or fallback
+    except Exception:
+        return fallback
+
+
+def _host(url):
+    return urllib.parse.urlsplit(url or "").hostname or "странице"
+
+
+async def _click(pg, text, allow_risky=False, expect_url=None):
+    """Нажать по тексту. Рискованность проверяется по НАЙДЕННОМУ элементу, а не только по словам модели:
+    «ок» могло совпасть с кнопкой «Окончательно удалить». После «да» нажатие — только на той же странице."""
+    if expect_url and pg.url != expect_url:
+        return {"ok": False, "error": "страница уже другая — нажимать не стала, спроси Александра заново"}
+    el = await _first(_locator_by_text(pg, text))
+    if el is None:
+        return {"ok": False, "error": f"не нашла на странице «{text}»"}
+    label = await _label(el, text)
+    if FINANCE_URL.search(pg.url or "") and re.search(r"оплат|pay|списать|перевест", f"{text} {label}", re.I):
+        return {"ok": False, "error": "оплату и переводы денег я не делаю — это может только Александр сам"}
+    if not allow_risky and (RISKY.search(text) or RISKY.search(label)):
+        return {"ok": False, "needs_confirm": True, "label": label}
+    try:
+        await el.click(timeout=5000)
+    except Exception:
+        return {"ok": False, "error": f"не получилось нажать «{label}»"}
+    try:
+        await pg.wait_for_load_state("domcontentloaded", timeout=8000)
+    except Exception:
+        pass
+    _state["url"] = pg.url
+    return {"ok": True, "clicked": label, "url": pg.url, "title": await pg.title()}
+
+
+def _field_candidates(pg, field):
+    if field:
+        return [pg.get_by_placeholder(field), pg.get_by_label(field), pg.get_by_role("textbox", name=field),
+                pg.get_by_role("searchbox")]
+    return [pg.get_by_role("searchbox"), pg.get_by_role("textbox")]
+
+
+async def _type(pg, field, text, enter, expect_url=None):
+    if expect_url and pg.url != expect_url:
+        return {"ok": False, "error": "страница уже другая — ничего не вписала, спроси Александра заново"}
+    el = await _first(_field_candidates(pg, field))
+    if el is None:
+        return {"ok": False, "error": f"не нашла поле «{field}»" if field else "не нашла поле для ввода"}
+    try:
+        await el.fill(text, timeout=5000)
+        if enter:
+            await el.press("Enter")
+            try:
+                await pg.wait_for_load_state("domcontentloaded", timeout=8000)
+            except Exception:
+                pass
+    except Exception:
+        return {"ok": False, "error": "поле не принимает текст"}
+    _state["url"] = pg.url
+    return {"ok": True, "typed": True, "url": pg.url}
 
 
 async def call(name, args, session):
@@ -185,34 +247,29 @@ async def call(name, args, session):
         if not _state["url"]:
             return {"ok": False, "error": "страница не открыта"}
         text = args.get("text", "")
-        if FINANCE_URL.search(_state["url"] or "") and re.search(r"оплат|pay|списать|перевест", text, re.I):
-            return {"ok": False, "error": "оплату и переводы денег я не делаю — это может только Александр сам"}
-        if RISKY.search(text):
-            cid = confirm.prepare(f"нажать «{text}» на {urllib.parse.urlsplit(_state['url']).hostname}",
-                                  lambda: _click(pg, text))
-            return {"ok": True, "prepared": True, "confirm_id": cid,
-                    "note": f"НЕ нажато. Спроси Александра: «Нажать “{text}”?» Ядро нажмёт после его «да»."}
-        return await _click(pg, text)
+        res = await _click(pg, text)
+        if res.get("needs_confirm"):
+            url, label = pg.url, res["label"]
+            return confirm.ask(f"нажать «{label}» на {_host(url)}",
+                               lambda: _click(pg, text, allow_risky=True, expect_url=url),
+                               question=f"Нажать «{label}» на сайте {_host(url)}?")
+        return res
     if name == "web_type":
         pg = await browser_core.page("web")
         if not _state["url"]:
             return {"ok": False, "error": "страница не открыта"}
-        field = (args.get("field") or "").strip()
-        cands = [pg.get_by_placeholder(field), pg.get_by_label(field), pg.get_by_role("textbox", name=field),
-                 pg.get_by_role("searchbox")] if field else [pg.get_by_role("searchbox"), pg.get_by_role("textbox")]
-        for loc in cands:
+        field, text = (args.get("field") or "").strip(), args.get("text", "")
+        if args.get("enter"):
+            # Enter в поле — это отправка формы: сообщение на сайте, комментарий, письмо. Без вопроса — только поиск.
+            el = await _first(_field_candidates(pg, field))
             try:
-                if await loc.count():
-                    await loc.first.fill(args.get("text", ""), timeout=5000)
-                    if args.get("enter"):
-                        await loc.first.press("Enter")
-                        try:
-                            await pg.wait_for_load_state("domcontentloaded", timeout=8000)
-                        except Exception:
-                            pass
-                    _state["url"] = pg.url
-                    return {"ok": True, "typed": True, "url": pg.url}
+                is_search = bool(el is not None and await el.evaluate(SEARCH_JS))
             except Exception:
-                continue
-        return {"ok": False, "error": f"не нашла поле «{field}»" if field else "не нашла поле для ввода"}
+                is_search = False
+            if el is not None and not is_search:
+                url = pg.url
+                return confirm.ask(f"вписать и отправить на {_host(url)}",
+                                   lambda: _type(pg, field, text, True, expect_url=url),
+                                   question=f"Вписать на сайте {_host(url)}: {text}. И отправить?")
+        return await _type(pg, field, text, bool(args.get("enter")))
     return {"ok": False, "error": f"неизвестный инструмент {name}"}

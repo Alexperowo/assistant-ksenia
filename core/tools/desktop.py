@@ -50,14 +50,20 @@ SCHEMAS = [
 TIMEOUTS = {"app_open": 20, "ui_elements": 25, "ui_click": 25, "ui_type": 25, "window_read": 60}
 
 
+HELPER_TIMEOUT_S = 20
+PYTHON = "/usr/bin/python3"
+
+
 async def _helper(cmd, args=None):
     p = await asyncio.create_subprocess_exec(
-        "/usr/bin/python3", HELPER, cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        PYTHON, HELPER, cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE)
     try:
-        out, err = await asyncio.wait_for(p.communicate(json.dumps(args or {}, ensure_ascii=False).encode()), timeout=20)
+        out, err = await asyncio.wait_for(p.communicate(json.dumps(args or {}, ensure_ascii=False).encode()),
+                                          timeout=HELPER_TIMEOUT_S)
     except asyncio.TimeoutError:
         p.kill()
+        await p.wait()
         return {"ok": False, "error": "дерево доступности не ответило (программа зависла?)"}
     try:
         return json.loads(out.decode("utf-8", "replace") or "{}")
@@ -148,11 +154,15 @@ async def call(name, args, session):
         return await _helper("list")
     if name == "ui_click":
         target = args.get("name", "")
-        if RISKY.search(target):
-            cid = confirm.prepare(f"нажать «{target}»", lambda: _helper("click", {"name": target}))
-            return {"ok": True, "prepared": True, "confirm_id": cid,
-                    "note": f"НЕ нажато. Спроси Александра: «Нажать “{target}”?» Ядро нажмёт после его «да»."}
-        return await _helper("click", {"name": target})
+        # помощник сам смотрит на НАЙДЕННУЮ кнопку: «ок» может совпасть с «Окончательно удалить»
+        res = await _helper("click", {"name": target, "risky": RISKY.pattern})
+        if res.get("needs_confirm"):
+            matched, window = res.get("matched") or target, res.get("window") or ""
+            # после «да» — та же кнопка в том же окне; если Александр переключил окно, нажатия не будет
+            return confirm.ask(f"нажать «{matched}» в окне «{window}»",
+                               lambda: _helper("click", {"name": matched, "exact": True, "expect_window": window}),
+                               question=f"Нажать «{matched}» в окне «{window}»?")
+        return res
     if name == "ui_type":
         return await _helper("type", {"field": args.get("field", ""), "text": args.get("text", "")})
     if name == "window_read":
