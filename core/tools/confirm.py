@@ -41,7 +41,13 @@ def prepare(label: str, run, ttl: float = 180, question: str = None) -> str:
 
 def ask(label: str, run, question: str, **extra) -> dict:
     """Зарегистрировать действие и вернуть результат инструмента с вопросом, который ядро скажет дословно."""
+    cur = _pending.get("item")
+    if cur and cur["label"] == label and time.time() < cur["expires"] and time.time() - cur.get("asked_t", 0) < 60:
+        # модель повторила тот же вызов — вопрос уже прозвучал, второй раз не говорим
+        return {"ok": True, "prepared": True, "already_asked": True, "confirm_id": cur["id"], **extra,
+                "note": "этот вопрос уже прозвучал — НЕ вызывай инструмент снова и не повторяй вопрос, просто жди ответа"}
     cid = prepare(label, run, question=question)
+    _pending["item"]["asked_t"] = time.time()
     return {"ok": True, "prepared": True, "confirm_id": cid, "speak_verbatim": question, **extra,
             "note": ("НЕ выполнено. Вопрос уже прозвучал дословно — не повторяй его и не пересказывай, просто жди "
                      "ответа Александра. Выполнит ядро после его «да».")}
