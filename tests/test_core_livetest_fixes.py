@@ -41,3 +41,15 @@ def test_english_numbers_become_digits():
     assert core.clean_for_speech("сейчас плюс thirteen, от plus four до plus eleven") == "сейчас плюс 13, от плюс 4 до плюс 11"
     assert core.clean_for_speech("twenty-five градусов") == "25 градусов"
     assert core.clean_for_speech("Someone is here") == "Someone is here"
+
+
+def test_agent_notes(tmp_path, monkeypatch):
+    assert core.agent_note("Заметка: опять оборвала фразу") == "опять оборвала фразу"
+    assert core.agent_note("Ксения, заметка для агента, музыка тихая.") == "музыка тихая."
+    assert core.agent_note("Замечание — долго думает") == "долго думает"
+    assert core.agent_note("Запомни, что я люблю рок") is None
+    assert core.agent_note("Какая погода?") is None
+    f = tmp_path / "notes.md"
+    monkeypatch.setattr(core, "NOTES_FILE", str(f))
+    core.save_agent_note("тест", "Привет!")
+    assert "тест" in f.read_text(encoding="utf-8") and "Привет!" in f.read_text(encoding="utf-8")

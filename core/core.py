@@ -1026,9 +1026,32 @@ async def say_notice(text: str):
     sp = Speaker(ks.session)
     ks.speaker = sp  # «стоп» прерывает и её
     try:
+        await sp.warm()
         await sp.speak(text, {"_t0": time.time()})
     finally:
         await sp.finish()
+
+
+# Заметки Александра для агента-разработчика прямо во время живых тестов: «Заметка: опять оборвала фразу».
+# Мимо мозга (раньше Ксения принимала их на свой счёт), с временем — рядом с журналом ядра.
+NOTE_RE = re.compile(r"^\s*(?:ксения[,.!]?\s*)?(?:заметк[аиу]|замечание)(?:\s+для\s+(?:агента|клода|разработчика))?\s*[:,.!—-]?\s*",
+                     re.I)
+NOTES_FILE = os.path.join(ROOT, "..", "data", "agent_notes.md")
+
+
+def agent_note(text: str):
+    """Текст заметки, если реплика — заметка для агента, иначе None."""
+    m = NOTE_RE.match(text)
+    if not m:
+        return None
+    return text[m.end():].strip() or "(пустая заметка)"
+
+
+def save_agent_note(note: str, last_reply: str = ""):
+    os.makedirs(os.path.dirname(NOTES_FILE), exist_ok=True)
+    with open(NOTES_FILE, "a", encoding="utf-8") as f:
+        f.write(f"- {time.strftime('%Y-%m-%d %H:%M:%S')} — {note}"
+                + (f"  \n  (последний ответ Ксении: «{last_reply[:200]}»)" if last_reply else "") + "\n")
 
 
 BYE_WORDS = ("пока", "хватит", "стоп", "ксения стоп", "ксения, стоп", "до свидания", "отбой", "спокойной ночи", "всё, спасибо", "стоп разговор")
@@ -1164,6 +1187,14 @@ class Conversation:
                 speaker = heard.get("speaker") or {}
                 if speaker.get("owner") is False and voicectl.STATE["mode"] == "owner_only":
                     log.info("Чужой голос (%.2f) — режим «только Александр», не отвечаю: %s", speaker.get("score", 0), text)
+                    continue
+                note = agent_note(text)
+                if note is not None:
+                    last = next((m.get("content") or "" for m in reversed(ks.history)
+                                 if m.get("role") == "assistant" and m.get("content")), "")
+                    save_agent_note(note, last)
+                    log.info("Заметка для агента: %s", note)
+                    await say_notice("Записала.")
                     continue
                 if is_stop(text) and not music.playing():
                     # «стоп» без музыки — закончить разговор молча (раньше Ксения отвечала и спрашивала ещё);
