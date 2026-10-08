@@ -48,12 +48,17 @@ TIMEOUTS = {"weather": 30}
 def _load():
     try:
         with open(FILE, encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
     except FileNotFoundError:
         return []
     except Exception:
         os.replace(FILE, FILE + dt.datetime.now().strftime(".bad-%Y%m%d-%H%M%S"))
         return []
+    # одна кривая запись (правка руками) раньше роняла due() каждые 5 секунд — и не срабатывало ни одно напоминание
+    if not isinstance(data, list):
+        return []
+    return [r for r in data if isinstance(r, dict) and isinstance(r.get("ts"), (int, float))
+            and isinstance(r.get("text"), str)]
 
 
 def _save(items):
@@ -76,6 +81,8 @@ def _parse_at(s):
             t = now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
             if t <= now:
                 t += dt.timedelta(days=1)  # «в 7:00», а уже позже — значит завтра
+        elif t <= now:
+            return "past"  # полная дата в прошлом: раньше такое напоминание срабатывало сразу же
         return t
     return None
 
@@ -146,13 +153,19 @@ async def _weather(city, day, session):
         target = (dt.datetime.now(dt.timezone.utc).astimezone().date() +
                   dt.timedelta(days={"today": 0, "tomorrow": 1, "after_tomorrow": 2}[day]))
         temps, rain, skies = [], 0.0, []
-        for t in ts:
-            when = dt.datetime.fromisoformat(t["time"].replace("Z", "+00:00")).astimezone()
+        steps = [(dt.datetime.fromisoformat(t["time"].replace("Z", "+00:00")).astimezone(), t) for t in ts]
+        for k, (when, t) in enumerate(steps):
             if when.date() != target:
                 continue
             temps.append(t["data"]["instant"]["details"].get("air_temperature"))
-            n6 = t["data"].get("next_6_hours") or t["data"].get("next_1_hours") or {}
-            rain += float((n6.get("details") or {}).get("precipitation_amount") or 0) if "next_6_hours" in t["data"] and when.hour % 6 == 0 else 0
+            # осадки: в ближайшие ~2,5 суток шаги часовые (берём next_1_hours), дальше — по 6 часов в 0/6/12/18 UTC
+            # (next_6_hours). Раньше брались только шаги с местным часом, кратным 6: в UTC+3 шестичасовых шагов
+            # с таким часом нет, и на послезавтра осадки всегда выходили 0
+            gap = (steps[k + 1][0] - when).total_seconds() / 3600 if k + 1 < len(steps) else None
+            one, six = t["data"].get("next_1_hours"), t["data"].get("next_6_hours")
+            block = one if one and (gap == 1 or (gap is None and not six)) else (six or one or {})
+            rain += float((block.get("details") or {}).get("precipitation_amount") or 0)
+            n6 = six or one or {}
             if 9 <= when.hour <= 18 and n6.get("summary"):
                 skies.append(_symbol(n6["summary"].get("symbol_code")))
         temps = [x for x in temps if x is not None]
@@ -183,9 +196,17 @@ async def call(name, args, session):
         if not text:
             return {"ok": False, "error": "не сказано, о чём напомнить"}
         if args.get("in_minutes"):
-            t = dt.datetime.now() + dt.timedelta(minutes=float(args["in_minutes"]))
+            try:
+                minutes = float(args["in_minutes"])
+            except (TypeError, ValueError):
+                minutes = -1
+            if not 0 < minutes <= 366 * 24 * 60:  # отрицательное — сработало бы сразу, огромное — OverflowError
+                return {"ok": False, "error": f"не поняла, через сколько минут: «{args['in_minutes']}»"}
+            t = dt.datetime.now() + dt.timedelta(minutes=minutes)
         elif args.get("at"):
-            t = _parse_at(args["at"])
+            t = _parse_at(str(args["at"]))
+            if t == "past":
+                return {"ok": False, "error": f"время «{args['at']}» уже прошло"}
             if not t:
                 return {"ok": False, "error": f"не поняла время «{args['at']}»"}
         else:
@@ -201,6 +222,9 @@ async def call(name, args, session):
                                           for r in items]}
     if name == "remind_cancel":
         q = (args.get("query") or "").lower()
+        if not q.split():
+            # пустой запрос: all() по пустому списку — истина, и стирались ВСЕ напоминания
+            return {"ok": False, "error": "не сказано, какое напоминание отменить"}
         items = _load()
         keep = [] if q.strip() in ("все", "всё", "all") else [r for r in items if not all(w in r["text"].lower() for w in q.split())]
         removed = len(items) - len(keep)
