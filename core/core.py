@@ -207,6 +207,40 @@ def fix_english_numbers(text: str) -> str:
     return EN_NUM_RE.sub(rep, text)
 
 
+# Ксения — девушка, а модель иногда говорит о себе в мужском роде («я понял», «я рад»). Чиним только в голосе
+# и только сразу после «я» (между ними — пара коротких служебных слов): история остаётся как сгенерирована.
+FEM_ADJ = {"рад": "рада", "готов": "готова", "уверен": "уверена", "согласен": "согласна", "должен": "должна",
+           "сам": "сама", "один": "одна", "виноват": "виновата", "занят": "занята", "свободен": "свободна",
+           "доволен": "довольна", "знаком": "знакома", "прав": "права", "неправ": "неправа", "жив": "жива",
+           "счастлив": "счастлива", "благодарен": "благодарна", "обязан": "обязана", "удивлён": "удивлена",
+           "удивлен": "удивлена", "расстроен": "расстроена", "смущён": "смущена", "смущен": "смущена"}
+FEM_GAP = r"(?:(?:не|уже|ещё|еще|тоже|так|просто|только|бы|же|ведь|сейчас|сегодня|вчера|давно|точно|честно|" \
+          r"тебе|тебя|ему|ей|им|вам|его|её|ее|это|тут|там|всё|все|очень|сразу|снова|опять|наконец),?\s+){0,2}"
+FEM_RE = re.compile(r"(\b[Яя]\s+" + FEM_GAP + r")([а-яё]+)\b")
+
+
+def _feminine(word: str) -> str:
+    low = word.lower()
+    if low in FEM_ADJ:
+        out = FEM_ADJ[low]
+    elif low in ("был", "жил", "пил", "ел", "мыл", "шил", "бил", "сел", "пел", "дал", "спал", "звал", "ждал", "брал",
+                 "врал", "гнал", "лил", "шил"):
+        out = low + "а"
+    elif low in ("мог", "смог", "помог", "сумел"):
+        out = {"мог": "могла", "смог": "смогла", "помог": "помогла", "сумел": "сумела"}[low]
+    elif re.search(r"[шч][её]л$", low):        # пошёл/нашёл/вышел/прочёл -> пошла/нашла/вышла/прочла
+        out = re.sub(r"[её]л$", "ла", low)
+    elif re.search(r"[аяеиыуо]л$", low) and len(low) > 3:   # сказал, понял, смотрел, был -> +а
+        out = low + "а"
+    else:
+        return word
+    return out[0].upper() + out[1:] if word[0].isupper() else out
+
+
+def feminine(text: str) -> str:
+    return FEM_RE.sub(lambda m: m.group(1) + _feminine(m.group(2)), text)
+
+
 def clean_for_speech(text: str, verbatim: bool = False) -> str:
     """Убрать разметку и эмодзи; оставить только разрешённые пометки эмоций.
 
@@ -216,7 +250,7 @@ def clean_for_speech(text: str, verbatim: bool = False) -> str:
         t = m.group(1).strip().lower()
         return f"[{t}]" if t in ALLOWED_TAGS else ""
     if not verbatim:
-        text = fix_english_numbers(strip_thinking(text))
+        text = feminine(fix_english_numbers(strip_thinking(text)))
     if verbatim:
         text = re.sub(r"[\[\]]", " ", text)
         text = re.sub(r"https?://\S+", " ссылка ", text)
@@ -608,6 +642,22 @@ ACTION_PATTERNS = [r"\bвключ", r"\bвыключ", r"\bпостав", r"\bп
 
 HISTORY_FILE = os.path.join(ROOT, "..", "data", "history.json")
 
+# Хвост-предложение «Хочешь ещё?», «Рассказать ещё?», «Продолжить?» — живой тест: почти каждый ответ кончался им.
+OFFER_RE = re.compile(r"(?:^|[\s,])(?:хочешь|хотите|рассказать|продолжить|продолжать|интересно|ещё что-нибудь|еще что-нибудь|"
+                      r"что-нибудь ещё|что-нибудь еще|может,? ещё|может,? еще|давай ещё|давай еще|что скажешь|"
+                      r"как тебе|включить ещё|включить еще)\b[^.!?]*\?\s*$", re.I)
+
+
+def split_tail_offer(text: str, whole_ok: bool = False):
+    """(ответ без последней фразы, последняя фраза), если ответ кончается вопросом-предложением; иначе (text, "").
+    whole_ok — остаток целиком может быть предложением (первая фраза ответа уже прозвучала)."""
+    t = text.rstrip()
+    m = list(re.finditer(r"[.!?…]+[\"»)]?\s+", t))
+    head, last = (t[:m[-1].end()], t[m[-1].end():]) if m else ("", t)
+    if (head.strip() or whole_ok) and OFFER_RE.search(last):
+        return head.rstrip(), last.strip()
+    return text, ""
+
 
 INTERNAL_NO_TOOLS = {"ok": False, "error": "в служебной реплике инструменты не выполняются: просто расскажи словами; "
                                         "если нужно действие — предложи его Александру и дождись его ответа"}
@@ -896,6 +946,9 @@ class Ksenia:
         timings["llm_done_s"] = round(time.time() - timings["_t0"], 2)
         full = " ".join(x for x in spoken_all if x).strip()
         self.last_tag = (re.match(r"\s*\[(\w+)\]", full) or [None, None])[1]
+        self.recent_tags = (getattr(self, "recent_tags", []) + [self.last_tag])[-3:]
+        self.recent_offers = (getattr(self, "recent_offers", []) + [getattr(self, "_ended_with_offer", False)])[-3:]
+        self._ended_with_offer = False
         return full
 
     async def _step(self, budget, queue, speaker, timings, first_step):
@@ -959,9 +1012,10 @@ class Ksenia:
                             timings["first_token_s"] = round(time.time() - timings["_t0"], 2)
                         full += delta
                         buf += delta
-                        if first_step and not first_sent and self.last_tag and \
-                                buf.lstrip().startswith(f"[{self.last_tag}]") and len(buf.strip()) > len(self.last_tag) + 2:
-                            buf = buf.lstrip()[len(self.last_tag) + 2:]  # та же эмоция, что в прошлый раз, — не повторяем
+                        if first_step and not first_sent:
+                            mt = re.match(r"\s*\[(\w+)\]\s*", buf)
+                            if mt and len(buf.strip()) > mt.end() and self.tag_too_often(mt.group(1)):
+                                buf = buf[mt.end():]  # пометка эмоции почти в каждом ответе — в голосе не повторяем
                         if first_step and not first_sent:
                             sent, buf = split_first_sentence(buf)
                             if sent:
@@ -988,6 +1042,12 @@ class Ksenia:
             buf = (buf.strip() + " " + BRAIN_FAIL_PHRASE).strip()
         # Промежуточный шаг (после первого и с вызовом инструмента) — это «рассуждения вслух»: не озвучиваем.
         narration = (not first_step) and bool(calls) and not failed
+        if not calls and not failed and buf.strip():
+            kept, offer = split_tail_offer(buf, whole_ok=first_sent)
+            self._ended_with_offer = bool(offer)
+            if offer and self.offer_too_often():
+                log.info("Хвост-предложение не озвучиваю: %s", offer)
+                buf = kept
         if buf.strip() and not speaker.cancelled and not narration:
             await queue.put((buf.strip(), False))  # остаток одним куском: меньше пауз между фразами
         full = strip_thinking(full)
@@ -998,6 +1058,20 @@ class Ksenia:
     async def stop(self):
         if self.speaker:
             await self.speaker.cancel()
+
+    def tag_too_often(self, tag: str) -> bool:
+        """Пометка эмоции в начале — не чаще раза в три ответа и не та же, что недавно (живой тест: [teasing] почти всегда)."""
+        recent = getattr(self, "recent_tags", [])[-2:]
+        return tag == getattr(self, "last_tag", None) or any(recent)
+
+    def offer_too_often(self) -> bool:
+        """«Хочешь ещё?» в конце: если прошлый ответ уже кончался таким вопросом или Александр только что
+        поддакнул — не спрашивать снова (человек так не делает)."""
+        recent = getattr(self, "recent_offers", [])[-2:]
+        if any(recent):
+            return True
+        said = live_intent.norm(self.recent_user_text(1))
+        return bool(said) and all(w in live_intent.REACT_W for w in said.split())
 
     def fresh_interruption(self):
         it = getattr(self, "interrupted", None)
