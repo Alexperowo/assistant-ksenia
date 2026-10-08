@@ -24,10 +24,10 @@ from aiohttp import web
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-from tools import confirm, desktop, music, screen, vk  # noqa: E402  (инструменты — отдельные модули в core/tools)
+from tools import confirm, desktop, memory, music, screen, vk  # noqa: E402  (инструменты — отдельные модули в core/tools)
 from tools import web as webtool  # noqa: E402  (не путать с aiohttp.web)
 
-TOOL_MODULES = [music, screen, vk, webtool, desktop]
+TOOL_MODULES = [music, screen, vk, webtool, desktop, memory]
 TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
 TOOL_INDEX = {sch["function"]["name"]: m for m in TOOL_MODULES for sch in m.SCHEMAS}
 
@@ -307,7 +307,11 @@ ACTION_PATTERNS = [r"\bвключ", r"\bвыключ", r"\bпостав", r"\bп
                    r"читай", r"громче", r"тише", r"\bгромкост", r"\bубав", r"\bприбав", r"\bсмени",
                    # зрение и лупа
                    r"\bэкран\w{0,2}\b", r"\bокн[оаеу]\b", r"\bопиши", r"\bпосмотри", r"\bпокажи",
-                   r"\bувелич", r"\bуменьш", r"\bлуп[аеуы]\b", r"\bскопир", r"\bвыделен"]
+                   r"\bувелич", r"\bуменьш", r"\bлуп[аеуы]\b", r"\bскопир", r"\bвыделен",
+                   # память: обещание «запомню» без вызова инструмента — недопустимо
+                   r"\bзапомн", r"\bзабудь", r"\bзабыть", r"\bпомнишь", r"(обо|про) мне",
+                   # интернет и ВК
+                   r"\bновост", r"\bнайди", r"\bпоищи", r"\bузнай", r"\bвконтакт", r"\bвк\b", r"\bнаписал"]
 
 HISTORY_FILE = os.path.join(ROOT, "..", "data", "history.json")
 
@@ -354,6 +358,8 @@ class Ksenia:
     def __init__(self):
         self.history = self._load_history()
         self.window_start = 0
+        self.system = PERSONA + memory.prompt_block()
+        self.last_turn_t = 0.0
         self.lock = asyncio.Lock()
         self.speaker = None
         self.session = None
@@ -440,6 +446,12 @@ class Ksenia:
     async def respond(self, user_text: str, timings: dict):
         # Nex — гибридная модель: её рекуррентное состояние нельзя откатить, поэтому запрос обязан
         # в точности продолжать прошлый. Время пишем в реплику и сохраняем её в истории как есть.
+        # новые факты памяти попадают в системную подсказку не сразу (это полный пересчёт кэша гибридного мозга),
+        # а когда разговор затих (> 5 мин) — в текущем разговоре факт и так виден в истории
+        if memory.changed["flag"] and time.time() - getattr(self, "last_turn_t", 0.0) > CONFIG.get("memory_refresh_idle_s", 300):
+            self.system = PERSONA + memory.prompt_block()
+            memory.changed["flag"] = False
+        self.last_turn_t = time.time()
         note = await self._resolve_confirmation(user_text)
         self.history.append({"role": "user", "content": f"{user_text}\n\n(служебно: {now_context()}{note})"})
         speaker = Speaker(self.session)
@@ -464,6 +476,11 @@ class Ksenia:
         try:
             for step in range(CONFIG.get("max_steps", 6)):
                 content, calls, failed = await self._step(budget, queue, speaker, timings, first_step=(step == 0))
+                if step > 0 and not content and not calls and not failed and not speaker.cancelled:
+                    # Nex иногда «отвечает» внутри размышлений и выдаёт пустой итог — повторяем шаг без них
+                    # (начало запроса то же, кэш мозга совпадает — это быстро)
+                    log.warning("пустой итог после инструмента — повтор без размышлений")
+                    content, calls, failed = await self._step(0, queue, speaker, timings, first_step=False)
                 spoken_all.append(content)
                 msg = {"role": "assistant", "content": content}
                 if calls:
@@ -516,7 +533,7 @@ class Ksenia:
 
         Возвращает (текст, вызовы, сбой). При сбое или перебивании вызовы отбрасываются: их аргументы
         могли оборваться на полуслове, а исполнять половину команды нельзя."""
-        msgs = [{"role": "system", "content": PERSONA}] + self._window()
+        msgs = [{"role": "system", "content": getattr(self, "system", PERSONA)}] + self._window()
         # max_tokens у llama-server считает и токены рассуждений: без запаса на бюджет мысль на 512/4096 токенов
         # обрывается на 400-м, и ответа нет вовсе (тишина после ошибки инструмента)
         body = {"messages": msgs, "stream": True, "max_tokens": CONFIG.get("max_tokens", 400) + budget,
@@ -769,7 +786,7 @@ async def handle_status(request):
 async def warmup():
     """Прогреть кэш мозга текущей историей, чтобы первая реплика после перезапуска не ждала пересчёта."""
     try:
-        msgs = [{"role": "system", "content": PERSONA}] + ks._window()
+        msgs = [{"role": "system", "content": ks.system}] + ks._window()
         if msgs[-1]["role"] == "assistant":
             body = {"messages": msgs + [{"role": "user", "content": "."}], "max_tokens": 1,
                     "thinking_budget_tokens": 0, "tools": TOOL_SCHEMAS}
