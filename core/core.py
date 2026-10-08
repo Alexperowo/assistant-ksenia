@@ -1360,8 +1360,10 @@ class LiveConversation(Conversation):
                     kind = ev.get("type")
                     if kind in ("speech_start", "speech_long"):
                         last = time.time()
-                        if kind == "speech_long" and self.busy() and self.speaking() and not self.ducked:
-                            # как человек: не обрывать на полуслове, а говорить тише и понять, что он сказал
+                        if kind == "speech_long" and CONFIG.get("live_duck", False) and self.busy() and self.speaking() \
+                                and not self.ducked:
+                            # приглушение выключено по умолчанию: Александру важно, чтобы голос звучал ровно,
+                            # без провалов громкости на каждом «круто» (живой тест 2026-10-08)
                             self.ducked = ks.speaker
                             ks.speaker.set_volume(CONFIG.get("live_duck_percent", 30))
                         continue
