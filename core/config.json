@@ -10,10 +10,11 @@
   "budget_chat": 0,
   "budget_action": 0,
   "brain_reasoning_levels": true,
+  "warmup": false,
   "max_tokens": 400,
   "history_max": 60,
   "max_turns": 50,
   "max_steps": 12,
-  "budget_task": 512,
-  "budget_hard": 4096
+  "budget_task": 0,
+  "budget_hard": 1024
 }

@@ -90,7 +90,7 @@ def find(win, name, want_editable=False, exact=False):
             score = 3
         elif exact:
             score = 0
-        elif nm.startswith(q) or q in nm:
+        elif len(q) >= 3 and (nm.startswith(q) or q in nm):  # «X» не должен совпадать с «Hex»
             score = 2
         elif all(w in nm for w in q.split()):
             score = 1

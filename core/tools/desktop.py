@@ -42,12 +42,17 @@ SCHEMAS = [
         "parameters": {"type": "object", "properties": {
             "field": {"type": "string"}, "text": {"type": "string"}}, "required": ["text"]}}},
     {"type": "function", "function": {
+        "name": "window_action",
+        "description": "Активное окно: close — закрыть (как Alt+F4), minimize — свернуть, maximize — развернуть/вернуть.",
+        "parameters": {"type": "object", "properties": {
+            "action": {"type": "string", "enum": ["close", "minimize", "maximize"]}}, "required": ["action"]}}},
+    {"type": "function", "function": {
         "name": "window_read",
         "description": "Прочитать вслух дословно текст активного окна (через доступность; если её нет — распознаванием).",
         "parameters": {"type": "object", "properties": {}}}},
 ]
 
-TIMEOUTS = {"app_open": 20, "ui_elements": 25, "ui_click": 25, "ui_type": 25, "window_read": 60}
+TIMEOUTS = {"window_action": 15, "app_open": 20, "ui_elements": 25, "ui_click": 25, "ui_type": 25, "window_read": 60}
 
 
 HELPER_TIMEOUT_S = 20
@@ -165,6 +170,17 @@ async def call(name, args, session):
         return res
     if name == "ui_type":
         return await _helper("type", {"field": args.get("field", ""), "text": args.get("text", "")})
+    if name == "window_action":
+        shortcut = {"close": "Window Close", "minimize": "Window Minimize", "maximize": "Window Maximize"}.get(args.get("action"))
+        if not shortcut:
+            return {"ok": False, "error": "неизвестное действие с окном"}
+        before = (await _helper("focused")).get("window", "")
+        p = await asyncio.create_subprocess_exec("qdbus6", "org.kde.kglobalaccel", "/component/kwin",
+                                                 "org.kde.kglobalaccel.Component.invokeShortcut", shortcut,
+                                                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await p.wait()
+        await asyncio.sleep(0.6)
+        return {"ok": p.returncode == 0, "action": args.get("action"), "window": before}
     if name == "window_read":
         res = await _helper("read")
         text = (res.get("text") or "").strip() if res.get("ok") else ""

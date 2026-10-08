@@ -723,7 +723,10 @@ class Ksenia:
         # max_tokens у llama-server считает и токены рассуждений: без запаса на бюджет мысль на 512/4096 токенов
         # обрывается на 400-м, и ответа нет вовсе (тишина после ошибки инструмента)
         body = {"messages": msgs, "stream": True, "max_tokens": CONFIG.get("max_tokens", 400) + budget,
-                "thinking_budget_tokens": budget, "tools": TOOL_SCHEMAS}
+                "thinking_budget_tokens": budget, "tools": TOOL_SCHEMAS,
+                # разговор — всегда в ячейке 0: иначе сервер отдаёт реплику в ячейку зрения/помощника (1),
+                # и гибридный мозг пересчитывает весь разговор (~10 с на 8 тыс. токенов)
+                "id_slot": CONFIG.get("brain_slot", 0)}
         # Бюджет 0 — размышления выключаются шаблоном (Qwen3.8/Bonsai: ни одного служебного токена).
         # Nex этот выключатель игнорирует, но слушается бюджета — поэтому шлём оба.
         # Бюджет > 0 — уровень рассуждения как подсказка шаблону (low/medium/xhigh; «high» шаблон Bonsai не принимает),
@@ -1150,11 +1153,15 @@ async def handle_status(request):
 
 
 async def warmup():
-    """Прогреть кэш мозга текущей историей, чтобы первая реплика после перезапуска не ждала пересчёта."""
+    """Прогреть кэш мозга текущей историей, чтобы первая реплика после перезапуска не ждала пересчёта.
+    Для мозга без промежуточных контрольных точек (форк PrismML) прогрев вреден: настоящий запрос расходится
+    с прогревочным на последней реплике, и всё пересчитывается дважды — там он выключен (config warmup=false)."""
+    if not CONFIG.get("warmup", True):
+        return
     try:
         msgs = [{"role": "system", "content": ks.system}] + ks._window()
         if msgs[-1]["role"] == "assistant":
-            body = {"messages": msgs + [{"role": "user", "content": "."}], "max_tokens": 1,
+            body = {"messages": msgs + [{"role": "user", "content": "."}], "max_tokens": 1, "id_slot": CONFIG.get("brain_slot", 0),
                     "thinking_budget_tokens": 0, "tools": TOOL_SCHEMAS}
             t0 = time.time()
             async with ks.session.post(CONFIG["brain_url"] + "/v1/chat/completions", json=body,
