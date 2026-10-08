@@ -50,3 +50,30 @@
 - WirePlumber Bluetooth: https://pipewire.pages.freedesktop.org/wireplumber/daemon/configuration/bluetooth.html
 - JBL Tour One M3: https://support.harmanaudio.com/dk/da/headphones/headphones-over-ear/TOUR-ONE-M3.html
 - Rula (русское демо): https://gitblind.noratr.app/ykshv/rula
+
+## Замеры на нашем железе (2026-10-08)
+
+### Распознавание речи — корпус Dialogs, тест: 162 живые эмоциональные фразы, 16 кГц, RTX 2080 Ti
+| Модель | WER | RTF (меньше — быстрее) |
+|---|---|---|
+| Whisper large-v3-turbo (было) | 4,0% | 0,033 |
+| **GigaAM v3 e2e-CTC** (Сбер, MIT) | **4,0%** | **0,003** |
+| GigaAM v3 e2e-RNNT | 4,0% | 0,007 |
+| Parakeet TDT 0.6B v3 (NVIDIA) | 5,3% | 0,006 |
+| T-one (Т-Банк, потоковая) | 6,9% | 0,040 |
+Вывод: GigaAM v3 CTC — та же точность, в 11 раз быстрее Whisper, CTC не «выдумывает» текст на шуме.
+Потоковая T-one не нужна: GigaAM можно прогонять по всей текущей фразе каждые 0,2–0,3 с (псевдопоток).
+Скрипт: `tools-scripts/asr_bench.py`. Запуск onnx-asr из кэша HF ломается (внешние данные через ссылки) —
+модели NVIDIA качать в обычную папку.
+
+### Узнавание говорящего — те же записи, 3 актёра; 3 фразы-образца, остальные — проверка
+| Модель | EER чисто | EER «как Bluetooth» (opus 24k) | Узнан верно | мс/фраза (CPU) |
+|---|---|---|---|---|
+| **WeSpeaker ResNet34-LM** (ONNX, 26 МБ) | **3,3%** | **3,9%** | 98–99% | **53** |
+| TitaNet-Large (NVIDIA, ONNX) | 4,6% | 4,9% | 98% | 91 |
+| ECAPA-TDNN (ONNX) | 22% | 22% | 74–80% | 90 (вероятно, другой ввод) |
+ReDimNet2+ (2026) не проверен: нужен закрытый код авторов. Скрипт: `tools-scripts/spk_bench.py`.
+
+### Разделение говорящих
+NVIDIA Nemotron 3 Diarization (23.09.2026, 100M, до 8 говорящих, метки каждые 0,32 с, есть GGUF q8_0,
+лицензия OpenMDW-1.1) — кандидат для живого режима (несколько людей, телевизор). Проверить на этапе живого режима.
