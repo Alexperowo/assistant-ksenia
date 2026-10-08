@@ -27,10 +27,10 @@ from aiohttp import web
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-from tools import confirm, daily, desktop, memory, music, research, screen, system, vk, voicectl  # noqa: E402  (инструменты — отдельные модули в core/tools)
+from tools import confirm, daily, desktop, memory, music, research, screen, settings, system, vk, voicectl  # noqa: E402  (инструменты — отдельные модули в core/tools)
 from tools import web as webtool  # noqa: E402  (не путать с aiohttp.web)
 
-TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research, daily, voicectl, system]
+TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research, daily, voicectl, system, settings]
 TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
 TOOL_INDEX = {sch["function"]["name"]: m for m in TOOL_MODULES for sch in m.SCHEMAS}
 
@@ -465,7 +465,7 @@ ACTION_PATTERNS = [r"\bвключ", r"\bвыключ", r"\bпостав", r"\bп
                    r"\bэкран\w{0,2}\b", r"\bокн[оаеу]\b", r"\bопиши", r"\bпосмотри", r"\bпокажи",
                    r"\bувелич", r"\bуменьш", r"\bлуп[аеуы]\b", r"\bскопир", r"\bвыделен",
                    # память: обещание «запомню» без вызова инструмента — недопустимо
-                   r"\bрежим", r"\bотпечат", r"тормоз", r"\bместо на", r"\bобнов", r"\bустанови", r"\bудали", r"\bтемператур", r"\bинтернет", r"\bwi-?fi", r"\bвайфай", r"\bгост", r"\bзапомн", r"\bзабудь", r"\bзабыть", r"\bпомнишь", r"(обо|про) мне",
+                   r"\bрежим", r"\bотпечат", r"тормоз", r"\bместо на", r"\bтем[ауно]", r"\bкурсор", r"\bшрифт", r"\bночн", r"\bзвук", r"\bобнов", r"\bустанови", r"\bудали", r"\bтемператур", r"\bинтернет", r"\bwi-?fi", r"\bвайфай", r"\bгост", r"\bзапомн", r"\bзабудь", r"\bзабыть", r"\bпомнишь", r"(обо|про) мне",
                    # интернет и ВК
                    r"\bновост", r"\bнайди", r"\bпоищи", r"\bузнай", r"\bвконтакт", r"\bвк\b", r"\bнаписал"]
 
