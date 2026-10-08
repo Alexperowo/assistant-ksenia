@@ -75,6 +75,14 @@ def _dpms_is_off():
         return False
 
 
+def zoom_active():
+    """Включена ли экранная лупа KWin (тогда снимок экрана — только увеличенный участок)."""
+    try:
+        return "zoom" in _run("qdbus6", "org.kde.KWin", "/Effects", "org.kde.kwin.Effects.activeEffects", timeout=3).stdout.split()
+    except Exception:
+        return False
+
+
 def _capture(target):
     """Сделать снимок; при спящем мониторе — разбудить и вернуть в сон. Возвращает PIL.Image."""
     was_off = _dpms_is_off()
@@ -180,9 +188,14 @@ async def _vision(im, question, session):
 
 async def call(name, args, session):
     if name == "screen_describe":
-        im = await asyncio.to_thread(_capture, args.get("target", "screen"))
+        target = args.get("target", "screen")
+        im = await asyncio.to_thread(_capture, target)
         text = await _vision(im, args.get("question"), session)
-        return {"ok": True, "seen": text}
+        res = {"ok": True, "seen": text}
+        if target == "screen" and await asyncio.to_thread(zoom_active):
+            res["zoom_active"] = True
+            res["note"] = "включена лупа: видно только увеличенный участок экрана; для окна целиком — target=window"
+        return res
     if name == "screen_read":
         im = await asyncio.to_thread(_capture, args.get("target", "window"))
         text = await asyncio.to_thread(_ocr, im)
