@@ -17,6 +17,7 @@ import datetime
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import time
@@ -1411,15 +1412,26 @@ def is_backchannel(text: str) -> bool:
 
 
 class LiveConversation(Conversation):
-    """Живой режим (наушники в LE Audio: звук и микрофон одновременно). Микрофон открыт всё время:
-    Александр перебивает Ксению голосом (она замолкает и слушает), договаривает, пока она думает
-    (новая реплика заменяет недодуманный ответ), «ага» её не перебивает. Без сигналов между репликами.
-    Кончается на «пока», на «стоп», когда Ксения молчит, или после live_idle_s тишины."""
+    """Живой режим (наушники в LE Audio: звук и микрофон одновременно). Микрофон открыт всё время, без сигналов.
+
+    Что значит реплика Александра, решает live_intent — по смыслу и по тому, что Ксения сейчас делает:
+    реакция («ничего себе», «правда?») — рассказ идёт дальше в полный голос; «подожди», «стоп», вопрос, просьба —
+    замолкает и слушает. Решение начинается с первых слов (частичное распознавание): на «подожди…» она замолкает,
+    не дожидаясь конца фразы; если по полной фразе это оказалась реакция — продолжает с того же места.
+    Договорил, пока она думала, — обе части склеиваются в одну реплику. Кончается на «пока», на «стоп», когда
+    Ксения молчит, или после live_idle_s тишины."""
 
     def __init__(self):
         super().__init__()
         self.cur = None
-        self.ducked = None  # озвучка, приглушённая на время его речи
+        self.ducked = None  # озвучка, приглушённая на время его речи (по умолчанию выключено)
+        self.judge = None
+        self.ws = None
+        self.early = None      # замолчала по началу фразы: {"kind", "text"} — если это реакция, продолжить
+        self.last_utt = None   # реплика, на которую Ксения сейчас отвечает: {"text", "t"}
+        self.prejudge = None
+        self.ctx_sent = None
+        self.last_bc = 0.0
 
     def busy(self):
         return self.cur is not None and not self.cur.done()
@@ -1434,6 +1446,31 @@ class LiveConversation(Conversation):
         sp = ks.speaker
         return sp is not None and bool(sp.recorded) and not sp.cancelled
 
+    def context(self, partial=False):
+        """Что Ксения делает и что сказала — контекст для решения и для конца реплики в слухе."""
+        speaking = self.busy() and self.speaking()
+        state = "speaking" if speaking else ("thinking" if self.busy() else "idle")
+        sp, said, story = ks.speaker, "", False
+        if sp is not None and getattr(sp, "phrases", None) and self.busy():
+            said, rest = sp.progress()
+            story = len(said) + len(rest) > 300
+        if not said:
+            said = next((m.get("content") or "" for m in reversed(ks.history)
+                         if m.get("role") == "assistant" and m.get("content")), "")
+        said = re.sub(r"\[\w+\]\s*", "", said)
+        return live_intent.Context(state=state, said=said[-300:], asked=said.rstrip().endswith("?"), story=story,
+                                   interrupted=bool(ks.fresh_interruption()), partial=partial)
+
+    async def send_context(self):
+        ctx = self.context()
+        key = (ctx.state, ctx.asked)
+        if self.ws is not None and key != self.ctx_sent:
+            self.ctx_sent = key
+            try:
+                await self.ws.send_json({"type": "context", "ksenia": ctx.state, "asked": ctx.asked})
+            except Exception:
+                pass
+
     async def cancel_turn(self):
         self.ducked = None
         if self.busy():
@@ -1441,10 +1478,10 @@ class LiveConversation(Conversation):
             self.cur.cancel()
             await asyncio.wait({self.cur}, timeout=3)
 
-    async def live_turn(self, text, listen_info, speaker):
+    async def live_turn(self, text, listen_info, speaker, resume=False):
         await music.duck(True)
         try:
-            await turn(text, {"_t0": time.time(), "listen": listen_info}, speaker=speaker)
+            await turn(text, {"_t0": time.time(), "listen": listen_info}, speaker=speaker, resume=resume)
             self.turns += 1
             await deliver_waiting()
         finally:
@@ -1457,8 +1494,132 @@ class LiveConversation(Conversation):
         finally:
             await music.duck(False)
 
+    async def on_partial(self, text):
+        """Начало его фразы, пока он ещё говорит: ясное «подожди…», «стоп», вопрос — замолчать сразу."""
+        if not self.busy() or self.early or not text:
+            return
+        ctx = self.context(partial=True)
+        d = live_intent.quick(text, ctx)
+        words = live_intent.norm(text).split()
+        early = d.sure and (d.kind in ("hold", "stop", "aside") or
+                            (d.kind in ("question", "request", "correction", "goodbye") and len(words) >= 3))
+        if early:
+            log.info("По началу фразы «%s» — %s: Ксения замолкает", text, d.kind)
+            live_intent.log_decision(text, ctx, d, acted="замолчала по началу фразы")
+            self.early = {"kind": d.kind, "text": text}
+            await self.cancel_turn()
+        elif not d.sure and len(words) >= 2 and self.judge and self.judge.enabled and \
+                (self.prejudge is None or self.prejudge.done()):
+            # спорное начало — спросить судью заранее: если фраза так и закончится, ответ уже готов
+            self.prejudge = asyncio.create_task(self._prejudge(text, ctx))
+
+    async def _prejudge(self, text, ctx):
+        try:
+            await asyncio.wait_for(self.judge.ask(ks.session, text, ctx), self.judge.cfg.get("live_judge_timeout_s", 0.8))
+        except Exception:
+            pass
+
+    async def backchannel(self):
+        """Своё «угу», когда Александр долго рассказывает и задумался (по умолчанию выключено: live_backchannels)."""
+        self.last_bc = time.time()
+        sp = Speaker(ks.session)
+        sp.set_volume(CONFIG.get("live_backchannel_volume", 60))
+        try:
+            await sp.speak(random.choice(CONFIG.get("live_backchannel_words", ["Угу.", "Ага.", "Мм."])), {"_t0": time.time()})
+        finally:
+            await sp.finish()
+
+    async def on_utterance(self, ev):
+        """Реплика целиком. Возвращает True — живой режим окончен."""
+        text = str(ev.get("text") or "").strip()
+        speaker = ev.get("speaker") or {}
+        early, self.early = self.early, None
+        if len(text) < 2:
+            await self.unduck()  # шум, а не слова — рассказ дальше в полный голос
+            if early and not self.busy():
+                self.cur = asyncio.create_task(self.live_turn("продолжай", ev.get("timings") or {}, speaker, resume=True))
+            return False
+        if speaker.get("owner") is False and voicectl.STATE["mode"] == "owner_only":
+            log.info("Чужой голос — режим «только Александр»: %s", text)
+            await self.unduck()
+            return False
+        note = agent_note(text)
+        if note is not None:
+            last_reply = next((m.get("content") or "" for m in reversed(ks.history)
+                               if m.get("role") == "assistant" and m.get("content")), "")
+            save_agent_note(note, last_reply)
+            log.info("Заметка для агента: %s", note)
+            await self.unduck()
+            if not self.busy():
+                await say_notice("Записала.")
+            return False
+        ctx = self.context()
+        if early and ctx.state == "idle":
+            ctx.state, ctx.interrupted = "speaking", True  # решаем, как если бы она ещё говорила
+        recent = self.last_utt and time.time() - self.last_utt["t"] < CONFIG.get("live_merge_s", 8)
+        q = live_intent.quick(text, ctx)
+        if ctx.state == "thinking" and recent and not early and \
+                q.kind not in ("hold", "stop", "aside", "goodbye", "noise"):
+            # она ещё ничего не сказала, а он продолжает: это продолжение его же фразы («…и про Карфаген»)
+            d = live_intent.Decision("request", True, why="договаривает, пока Ксения думает")
+        else:
+            d = await live_intent.decide(text, ctx, self.judge, ks.session)
+        kind = d.kind
+        acted = ""
+        try:
+            if kind == "noise":
+                acted = "ничего"
+                if early and not self.busy():
+                    acted = "продолжила после ложной остановки"
+                    self.cur = asyncio.create_task(self.live_turn(text, ev.get("timings") or {}, speaker, resume=True))
+                return False
+            if kind == "continue":
+                await self.unduck()
+                if self.busy():
+                    acted = "говорит дальше"
+                    log.info("Реакция — Ксения продолжает: %s", text)
+                    return False
+                acted = "продолжила недосказанное" if (early or ks.fresh_interruption()) else "ответ"
+                self.cur = asyncio.create_task(self.live_turn(text, ev.get("timings") or {}, speaker,
+                                                              resume=bool(early or ks.fresh_interruption())))
+                return False
+            if kind in ("hold", "aside"):
+                acted = "замолчала и ждёт"
+                await self.cancel_turn()
+                return False
+            if kind == "stop":
+                if self.busy() or early:
+                    acted = "замолчала"
+                    await self.cancel_turn()
+                    return False
+                if not music.playing():
+                    acted = "живой режим окончен"
+                    log.info("«%s» — живой режим окончен", text)
+                    return True
+                acted = "ответ (играет музыка)"
+            merged = text
+            if self.busy() and not self.speaking() and not early and recent:
+                # договорил, пока Ксения думала: это одна реплика, а не новая (раньше вторая часть вытесняла первую)
+                merged = f"{self.last_utt['text']} {text}"
+                acted = "склеила с прошлой частью"
+            if self.busy() and self.speaking():
+                log.info("Александр перебил — Ксения замолкает")
+            await self.cancel_turn()
+            if voicectl.STATE["enrolling"] > 0 and speaker.get("owner") is not False:
+                await self.enroll_step()
+            self.last_utt = {"text": merged, "t": time.time()}
+            acted = acted or "ответ"
+            self.cur = asyncio.create_task(self.live_turn(merged, ev.get("timings") or {}, speaker))
+            if kind == "goodbye" or is_goodbye(text):
+                await asyncio.wait({self.cur})
+                return True
+            return False
+        finally:
+            live_intent.log_decision(text, ctx, d, acted=acted)
+
     async def run(self):
-        self.turns, self.cur = 0, None
+        self.turns, self.cur, self.early, self.last_utt, self.ctx_sent = 0, None, None, None, None
+        self.judge = live_intent.Judge(CONFIG, BRAIN_KEY)
         url = CONFIG["voice_in_url"].replace("http", "ws", 1) + "/stream"
         try:
             async with ks.session.ws_connect(url, heartbeat=20) as ws:
@@ -1467,12 +1628,14 @@ class LiveConversation(Conversation):
                     log.info("Живой режим недоступен (%s) — обычный разговор", first)
                     await ws.close()
                     return await Conversation.run(self)
+                self.ws = ws
                 log.info("Живой режим: слушаю постоянно")
                 hub.emit({"type": "state", "state": "listening", "where": "pc"})
                 last = time.time()
                 while True:
+                    await self.send_context()
                     try:
-                        msg = await ws.receive(timeout=1.0)
+                        msg = await ws.receive(timeout=0.25)
                     except asyncio.TimeoutError:
                         if self.busy():
                             last = time.time()
@@ -1496,6 +1659,17 @@ class LiveConversation(Conversation):
                             self.ducked = ks.speaker
                             ks.speaker.set_volume(CONFIG.get("live_duck_percent", 30))
                         continue
+                    if kind == "partial":
+                        last = time.time()
+                        await self.on_partial(str(ev.get("text") or ""))
+                        continue
+                    if kind == "pause":
+                        # он рассказывает и задумался (слух ждёт продолжения) — можно своё «угу»
+                        if CONFIG.get("live_backchannels", False) and not self.busy() and \
+                                ev.get("speech_s", 0) >= CONFIG.get("live_backchannel_after_s", 8) and \
+                                time.time() - self.last_bc > CONFIG.get("live_backchannel_every_s", 12):
+                            asyncio.create_task(self.backchannel())
+                        continue
                     if kind == "error":
                         log.warning("Живой режим: %s", ev)
                         if ev.get("reason") == "mic_lost":
@@ -1504,48 +1678,7 @@ class LiveConversation(Conversation):
                     if kind != "utterance":
                         continue
                     last = time.time()
-                    text = str(ev.get("text") or "").strip()
-                    speaker = ev.get("speaker") or {}
-                    if len(text) < 2:
-                        await self.unduck()  # шум, а не слова — рассказ дальше в полный голос
-                        continue
-                    if speaker.get("owner") is False and voicectl.STATE["mode"] == "owner_only":
-                        log.info("Чужой голос — режим «только Александр»: %s", text)
-                        await self.unduck()
-                        continue
-                    if self.busy() and is_backchannel(text):
-                        # «ага», «интересно», «рассказывай» — слушает: громкость обратно, рассказ дальше
-                        log.info("Поддакивание — Ксения продолжает: %s", text)
-                        await self.unduck()
-                        continue
-                    if self.busy() and self.speaking():
-                        log.info("Александр перебил — Ксения замолкает")
-                    note = agent_note(text)
-                    if note is not None:
-                        last_reply = next((m.get("content") or "" for m in reversed(ks.history)
-                                           if m.get("role") == "assistant" and m.get("content")), "")
-                        save_agent_note(note, last_reply)
-                        log.info("Заметка для агента: %s", note)
-                        await self.unduck()
-                        if not self.busy():
-                            await say_notice("Записала.")
-                        continue
-                    if is_hold(text):
-                        # «подожди», «погоди», «слушай»… — замолчать и молча ждать, что он скажет дальше
-                        if self.busy():
-                            await self.cancel_turn()
-                            continue
-                        if is_stop(text) and not music.playing():
-                            log.info("«%s» — живой режим окончен", text)
-                            return
-                        continue
-                    # новая реплика важнее недоговорённого ответа: перебил или договорил, пока Ксения думала
-                    await self.cancel_turn()
-                    if voicectl.STATE["enrolling"] > 0 and speaker.get("owner") is not False:
-                        await self.enroll_step()
-                    self.cur = asyncio.create_task(self.live_turn(text, ev.get("timings") or {}, speaker))
-                    if is_goodbye(text):
-                        await asyncio.wait({self.cur})
+                    if await self.on_utterance(ev):
                         return
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             log.error("Живой режим: слух недоступен: %r", e)
@@ -1556,6 +1689,7 @@ class LiveConversation(Conversation):
             log.exception("Сбой живого режима: %s", e)
             await say_notice(CONV_CRASH)
         finally:
+            self.ws = None
             if self.busy():
                 await self.cancel_turn()
             waiting_event.set()

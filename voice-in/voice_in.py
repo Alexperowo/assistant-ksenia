@@ -644,6 +644,8 @@ async def handle_stream(request):
                 ev = seg.decide(1.0, text, fast=True)
             elif ev == "check":
                 ev = seg.decide(*await asyncio.to_thread(ear.turn_check, seg.pcm()))
+                if ev is None:  # пауза, но он не договорил — ядро может ответить своим «угу»
+                    await ws.send_json({"type": "pause", "speech_s": round(seg.voiced_ms / 1000, 1)})
             if ev == "start":
                 await ws.send_json({"type": "speech_start"})
             elif ev == "long":
