@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import time
+import urllib.parse
 import uuid
 
 import aiohttp
@@ -715,6 +716,29 @@ async def warmup():
         log.warning("Прогрев не удался: %s", e)
 
 
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _hostname(value: str):
+    try:
+        return urllib.parse.urlsplit("//" + value.split("://", 1)[-1]).hostname
+    except ValueError:
+        return None
+
+
+@web.middleware
+async def local_only(request, handler):
+    """Только программы этого компьютера. Любая веб-страница в браузере может послать POST на 127.0.0.1 (CSRF)
+    или подменить свой DNS на 127.0.0.1 и читать ответы (DNS rebinding) — узнаём их по заголовкам Host и Origin."""
+    origin = request.headers.get("Origin")
+    if _hostname(request.headers.get("Host", "")) not in LOCAL_HOSTS or \
+            (origin is not None and _hostname(origin) not in LOCAL_HOSTS):
+        log.warning("Отклонён запрос %s %s: Host=%s Origin=%s", request.method, request.path,
+                    request.headers.get("Host"), origin)
+        return web.json_response({"error": "forbidden"}, status=403)
+    return await handler(request)
+
+
 BACKGROUND = []
 
 
@@ -732,7 +756,7 @@ async def on_cleanup(app):
 
 
 def main():
-    app = web.Application()
+    app = web.Application(middlewares=[local_only])
     app.on_startup.append(on_start)
     app.on_cleanup.append(on_cleanup)
     app.add_routes([web.post("/say", handle_say), web.post("/talk", handle_talk),

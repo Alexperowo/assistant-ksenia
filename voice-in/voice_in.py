@@ -17,6 +17,7 @@ import os
 import struct
 import subprocess
 import time
+import urllib.parse
 
 import numpy as np
 import soundfile as sf
@@ -263,10 +264,33 @@ async def handle_status(request):
                               "profile": card_profile(card) if card else None, "source": find_source(card)})
 
 
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _hostname(value: str):
+    try:
+        return urllib.parse.urlsplit("//" + value.split("://", 1)[-1]).hostname
+    except ValueError:
+        return None
+
+
+@web.middleware
+async def local_only(request, handler):
+    """Только программы этого компьютера. Любая веб-страница в браузере может послать POST на 127.0.0.1 (CSRF)
+    или подменить свой DNS на 127.0.0.1 и читать ответы (DNS rebinding) — узнаём их по заголовкам Host и Origin."""
+    origin = request.headers.get("Origin")
+    if _hostname(request.headers.get("Host", "")) not in LOCAL_HOSTS or \
+            (origin is not None and _hostname(origin) not in LOCAL_HOSTS):
+        log.warning("Отклонён запрос %s %s: Host=%s Origin=%s", request.method, request.path,
+                    request.headers.get("Host"), origin)
+        return web.json_response({"error": "forbidden"}, status=403)
+    return await handler(request)
+
+
 def main():
     global ear
     ear = Ear()
-    app = web.Application(client_max_size=50 * 1024 * 1024)
+    app = web.Application(client_max_size=50 * 1024 * 1024, middlewares=[local_only])
     app.add_routes([web.post("/listen", handle_listen), web.post("/transcribe", handle_transcribe),
                     web.get("/status", handle_status)])
     web.run_app(app, host="127.0.0.1", port=CONFIG.get("port", 18120), print=None)
