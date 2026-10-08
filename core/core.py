@@ -1,10 +1,13 @@
 """Ядро Ксении (core): разговор, характер, бюджет рассуждений, озвучка по фразам.
 
-HTTP на 127.0.0.1:18130:
+HTTP на 127.0.0.1:18130 (только для программ этого компьютера):
   POST /talk   — послушать Александра (через voice-in) и ответить голосом
-  POST /say    — {"text": "..."}: ответить на набранный текст (для проверок)
+  POST /say    — {"text": "...", "output": "local"|"client"}: ответить на реплику; client — голос на планшет
   POST /stop   — замолчать (прервать текущий ответ)
   GET  /status — состояние
+  GET  /client — WebSocket для шлюза планшета (pwa/): события разговора и звук ответов
+  POST /notice — {"text"}: служебная фраза голосом у компьютера (код входа для планшета)
+  POST /duck   — {"on": bool}: планшет слушает — приглушить музыку (сама снимается через 60 с)
 
 Этап 1: только разговор, без инструментов. Бюджет рассуждений для болтовни = 0
 (Nex не слушается enable_thinking=false, но слушается thinking_budget_tokens=0).
@@ -235,19 +238,114 @@ def pick_output_sink():
     return None
 
 
+class ClientHub:
+    """Связь ядра со шлюзом планшета (pwa/): события разговора и звук ответа по WebSocket /client.
+
+    Шлюз подключается по 127.0.0.1 (local_only не ослабляется) и раздаёт события браузерам планшета:
+    состояние (думаю/говорю), текст реплик, вопрос подтверждения (кнопки «Да»/«Нет»), звук ответа (PCM).
+    У каждого сокета своя очередь: события и звук уходят строго по порядку, медленный клиент не держит ядро."""
+    MAX_QUEUE = 400  # ~4 с звука в очереди: дальше Speaker ждёт (как pacat с полным буфером)
+
+    def __init__(self):
+        self.queues = {}
+        self.audio_turn = 0
+
+    def connected(self):
+        return bool(self.queues)
+
+    def emit(self, event: dict):
+        for q in list(self.queues.values()):
+            if q.qsize() < self.MAX_QUEUE * 2:  # отвалившийся клиент не раздувает память
+                q.put_nowait(("json", event))
+
+    def audio(self, data: bytes):
+        for q in list(self.queues.values()):
+            if q.qsize() < self.MAX_QUEUE * 2:
+                q.put_nowait(("bytes", bytes(data)))
+
+    async def drain(self):
+        while any(q.qsize() > self.MAX_QUEUE for q in self.queues.values()):
+            await asyncio.sleep(0.02)
+
+    async def serve(self, ws):
+        q = asyncio.Queue()
+        self.queues[ws] = q
+        try:
+            while True:
+                kind, payload = await q.get()
+                if kind == "json":
+                    await ws.send_json(payload)
+                else:
+                    await ws.send_bytes(payload)
+        except (ConnectionResetError, RuntimeError, aiohttp.ClientError):
+            pass
+        finally:
+            self.queues.pop(ws, None)
+
+
+hub = ClientHub()
+confirm.on_change(hub.emit)  # вопрос «Отправить?» — кнопки «Да»/«Нет» на планшете
+
+
+class _ClientStdin:
+    def __init__(self, player):
+        self.player = player
+
+    def write(self, data):
+        if self.player.returncode is None:
+            hub.audio(data)
+
+    async def drain(self):
+        await hub.drain()
+
+    def close(self):
+        if self.player.returncode is None:
+            hub.emit({"type": "audio_end", "turn": self.player.turn})
+            self.player.returncode = 0
+
+
+class ClientPlayer:
+    """Вывод «клиенту» с тем же интерфейсом, что у процесса pacat: Speaker не знает, куда говорит.
+    kill() — перебивание: планшет сразу глушит всё, что уже получил."""
+    RATE = 44100
+
+    def __init__(self):
+        hub.audio_turn += 1
+        self.turn = hub.audio_turn
+        self.returncode = None
+        self.stdin = _ClientStdin(self)
+        hub.emit({"type": "audio_start", "turn": self.turn, "rate": self.RATE, "channels": 1, "format": "s16le"})
+
+    def kill(self):
+        if self.returncode is None:
+            hub.emit({"type": "audio_stop", "turn": self.turn})
+        self.returncode = -9
+
+    async def wait(self):
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+
 class Speaker:
-    """Озвучка ответа: фразы по очереди -> voice-out (поток PCM) -> pacat в выбранный выход."""
+    """Озвучка ответа: фразы по очереди -> voice-out (поток PCM) -> pacat в выбранный выход
+    или клиенту (планшет через шлюз pwa/), если реплика пришла оттуда."""
 
     FINISH_TIMEOUT_S = 15
 
-    def __init__(self, session):
+    def __init__(self, session, output: str = "local"):
         self.session = session
+        self.output = output
         self.player = None
         self.cancelled = False
         self.recorded = bytearray()  # копия всего, что ушло в наушники (для разбора помех)
 
     async def _ensure_player(self):
         if self.player is None or self.player.returncode is not None:
+            if self.output == "client" and hub.connected():
+                self.player = ClientPlayer()
+                return
+            # локальный путь — как прежде (и запасной, если шлюз планшета отключился)
             sink = await asyncio.to_thread(pick_output_sink)  # pactl — не в цикле событий
             args = ["pacat", "--playback", "--raw", "--rate=44100", "--channels=1", "--format=s16le",
                     "--latency-msec=60"]
@@ -256,6 +354,7 @@ class Speaker:
             self.player = await asyncio.create_subprocess_exec(
                 *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL)
+            hub.emit({"type": "state", "state": "speaking", "where": "pc"})
 
     async def _drop_player(self):
         """Закрыть сломанный плеер: следующая фраза откроет новый (возможно, уже в другой выход)."""
@@ -272,6 +371,7 @@ class Speaker:
         text = clean_for_speech(text, verbatim=verbatim)
         if not text or self.cancelled:
             return
+        hub.emit({"type": "say", "text": re.sub(r"\[\w+\]\s*", "", text)})  # текст реплики — на экран планшета
         params = {"stream": True, "chunked": True, "stream_start_buffer_ms": 0,
                   "output_format": "pcm_s16le", "stream_holdback_frames": 0,
                   "stream_decode_stride_frames": CONFIG.get("tts_stride", 8)}
@@ -422,6 +522,7 @@ class Ksenia:
         self.speaker = None
         self.session = None
         self.last_tag = None
+        self.last_client_t = 0.0  # когда Александр последний раз говорил с планшета
 
     @staticmethod
     def _load_history():
@@ -505,7 +606,7 @@ class Ksenia:
             return CONFIG.get("budget_action", 256)
         return CONFIG.get("budget_chat", 0)
 
-    async def respond(self, user_text: str, timings: dict, internal: bool = False):
+    async def respond(self, user_text: str, timings: dict, internal: bool = False, output: str = "local"):
         """internal — служебная реплика ядра (напоминание, находка помощника), а не слова Александра:
         она не решает ожидающее подтверждение и не запускает инструменты (в ней чужой текст из интернета)."""
         # Nex — гибридная модель: её рекуррентное состояние нельзя откатить, поэтому запрос обязан
@@ -528,7 +629,10 @@ class Ksenia:
             note += ("; это первый разговор за сегодня — тепло поздоровайся по времени суток; можешь коротко "
                      "предложить погоду и напомнить, что стоит на сегодня (remind_list), если это к месту")
         self.history.append({"role": "user", "content": f"{user_text}\n\n(служебно: {now_context()}{note})"})
-        speaker = Speaker(self.session)
+        if not internal:
+            hub.emit({"type": "user", "text": user_text})
+        hub.emit({"type": "state", "state": "thinking"})
+        speaker = Speaker(self.session, output=output)
         self.speaker = speaker
         queue: asyncio.Queue = asyncio.Queue()
 
@@ -600,6 +704,7 @@ class Ksenia:
                 self.save_history()
             except OSError as e:
                 log.error("история не сохранена: %s", e)
+            hub.emit({"type": "state", "state": "idle"})
         timings["llm_done_s"] = round(time.time() - timings["_t0"], 2)
         full = " ".join(x for x in spoken_all if x).strip()
         self.last_tag = (re.match(r"\s*\[(\w+)\]", full) or [None, None])[1]
@@ -693,9 +798,9 @@ class Ksenia:
 ks = Ksenia()
 
 
-async def turn(text: str, timings: dict, internal: bool = False):
+async def turn(text: str, timings: dict, internal: bool = False, output: str = "local"):
     async with ks.lock:
-        reply = await ks.respond(text, timings, internal=internal)
+        reply = await ks.respond(text, timings, internal=internal, output=output)
     timings.pop("_t0", None)
     log.info("Александр: %s | Ксения: %s | %s", text, reply, timings)
     return reply
@@ -709,14 +814,88 @@ async def handle_say(request):
         text = ""
     if not text:
         return web.json_response({"error": "нужен JSON {\"text\": \"...\"}"}, status=400)
+    output = data.get("output", "local")
+    if output not in ("local", "client"):
+        return web.json_response({"error": "output: local или client"}, status=400)
     timings = {"_t0": time.time()}
-    await ks.stop()
+    if output == "client":
+        # реплика с планшета: разговор через гарнитуру у ПК прерываем (иначе он слушал бы параллельно)
+        ks.last_client_t = time.time()
+        async with talk_lock:
+            await stop_conversation()
+    else:
+        await ks.stop()
     await music.duck(True)
     try:
-        reply = await turn(text, timings)
+        reply = await turn(text, timings, output=output)
     finally:
         await music.duck(False)
     return web.json_response({"reply": reply, "timings": timings})
+
+
+def preferred_output():
+    """Куда говорить служебные реплики: на планшет, если Александр недавно говорил оттуда и шлюз на связи."""
+    recent = time.time() - getattr(ks, "last_client_t", 0.0) < CONFIG.get("client_recent_s", 600)
+    return "client" if recent and hub.connected() else "local"
+
+
+async def handle_notice(request):
+    """Служебная фраза голосом у компьютера, мимо истории (код для входа с планшета)."""
+    try:
+        text = str((await request.json()).get("text") or "").strip()[:300]
+    except (ValueError, AttributeError):
+        text = ""
+    if not text:
+        return web.json_response({"error": "нужен text"}, status=400)
+    asyncio.get_running_loop().create_task(say_notice(text))
+    return web.json_response({"ok": True})
+
+
+client_duck = {"on": False, "release": None}
+
+
+async def handle_duck(request):
+    """Планшет слушает Александра — приглушить музыку у ПК. Одна «аренда» на шлюз, сама снимается через 60 с:
+    если планшет пропал посреди записи, музыка не останется тихой навсегда."""
+    try:
+        on = bool((await request.json()).get("on"))
+    except (ValueError, AttributeError):
+        return web.json_response({"error": "нужен on"}, status=400)
+    if client_duck["release"]:
+        client_duck["release"].cancel()
+        client_duck["release"] = None
+    if on and not client_duck["on"]:
+        client_duck["on"] = True
+        await music.duck(True)
+    elif not on and client_duck["on"]:
+        client_duck["on"] = False
+        await music.duck(False)
+    if on:
+        async def auto_release():
+            await asyncio.sleep(CONFIG.get("client_duck_s", 60))
+            if client_duck["on"]:
+                client_duck["on"] = False
+                await music.duck(False)
+        client_duck["release"] = asyncio.get_running_loop().create_task(auto_release())
+    return web.json_response({"ok": True, "ducked": client_duck["on"]})
+
+
+async def handle_client(request):
+    """WebSocket для шлюза планшета: события и звук ответов."""
+    ws = web.WebSocketResponse(heartbeat=20)
+    await ws.prepare(request)
+    p = confirm.current()
+    await ws.send_json({"type": "hello", "busy": ks.lock.locked(),
+                        "confirm": {"type": "confirm", "label": p["label"], "question": p["question"]}
+                        if p and not p.get("expired") else None})
+    sender = asyncio.get_running_loop().create_task(hub.serve(ws))
+    try:
+        async for _ in ws:  # шлюз ничего не присылает; цикл держит соединение и замечает разрыв
+            pass
+    finally:
+        sender.cancel()
+        hub.queues.pop(ws, None)
+    return ws
 
 
 async def say_notice(text: str):
@@ -790,6 +969,7 @@ class Conversation:
         """Один запрос к voice-in -> {"text", "timings"} или {"error"}. Занят прошлой записью
         (после перебивания) — ждём и пробуем снова, а не заканчиваем разговор молча."""
         deadline = time.time() + CONFIG.get("listen_busy_wait_s", 20)
+        hub.emit({"type": "state", "state": "listening", "where": "pc"})
         while True:
             async with ks.session.post(CONFIG["voice_in_url"] + "/listen",
                                        timeout=aiohttp.ClientTimeout(total=90)) as r:
@@ -872,7 +1052,7 @@ async def deliver_waiting():
     while waiting:
         prompt = waiting.pop(0)
         try:
-            await turn(prompt, {"_t0": time.time(), "internal": True}, internal=True)
+            await turn(prompt, {"_t0": time.time(), "internal": True}, internal=True, output=preferred_output())
         except Exception:
             log.exception("служебная реплика не сказана: %s", prompt[:120])
 
@@ -948,7 +1128,8 @@ async def handle_stop(request):
 
 async def handle_status(request):
     return web.json_response({"busy": ks.lock.locked(), "conversation": conv.active(), "turns": conv.turns,
-                              "history": len(ks.history), "sink": await asyncio.to_thread(pick_output_sink)})
+                              "history": len(ks.history), "sink": await asyncio.to_thread(pick_output_sink),
+                              "client_connected": hub.connected()})
 
 
 async def warmup():
@@ -1016,7 +1197,9 @@ def main():
     app.on_startup.append(on_start)
     app.on_cleanup.append(on_cleanup)
     app.add_routes([web.post("/say", handle_say), web.post("/talk", handle_talk),
-                    web.post("/stop", handle_stop), web.get("/status", handle_status)])
+                    web.post("/stop", handle_stop), web.get("/status", handle_status),
+                    web.get("/client", handle_client), web.post("/notice", handle_notice),
+                    web.post("/duck", handle_duck)])
     web.run_app(app, host="127.0.0.1", port=CONFIG.get("port", 18130), print=None)
 
 

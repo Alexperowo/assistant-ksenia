@@ -17,7 +17,7 @@ def heard(text="", **timings):
 def env(monkeypatch):
     rec = {"turns": [], "notices": []}
 
-    async def fake_turn(text, timings):
+    async def fake_turn(text, timings, **kw):
         rec["turns"].append(text)
         return "ок"
 

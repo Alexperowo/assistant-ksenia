@@ -69,7 +69,7 @@ def test_finding_text_is_marked_as_data_and_limited():
 def loop_env(monkeypatch):
     said = []
 
-    async def fake_turn(text, timings, internal=False):
+    async def fake_turn(text, timings, internal=False, output="local"):
         said.append((text, internal))
         return ""
 
