@@ -1,16 +1,16 @@
 [Unit]
-Description=Ксения: мозг-ИСПЫТАНИЕ (Bonsai 2 27B + MTP на RTX 5060 Ti, :18100)
+Description=Ксения: запасной мозг Nex-N2.5-mini (RTX 5060 Ti, :18100)
 # 5060 Ti принадлежит Ксении; модели Nexus, которые её занимают, не должны работать одновременно
 Conflicts=ksenia-brain.service nexus-llama.service nexus-tinfield.service nexus-ornith.service nexus-nex.service
 
 [Service]
 Type=simple
-ExecStart=/home/user/Agents/Ksenia/brain/run_brain_bonsai.sh
+ExecStart=/home/user/Agents/Ksenia/brain/run_brain_nex.sh
 Restart=on-failure
 RestartSec=20s
 TimeoutStopSec=60s
-StandardOutput=append:/home/user/Agents/Ksenia/logs/brain-bonsai.log
-StandardError=append:/home/user/Agents/Ksenia/logs/brain-bonsai.log
+StandardOutput=append:/home/user/Agents/Ksenia/logs/brain-nex.log
+StandardError=append:/home/user/Agents/Ksenia/logs/brain-nex.log
 
 [Install]
 WantedBy=default.target

@@ -28,7 +28,7 @@
 
 | Сервис | Порт | Что делает | Где работает |
 |---|---|---|---|
-| `ksenia-brain` | 18100 | мозг: Nex-N2.5-mini (ik_llama.cpp), зрение, 2 ячейки | RTX 5060 Ti |
+| `ksenia-brain` | 18100 | мозг: Ternary Bonsai 2 27B (Qwen3.8-27B) + MTP + зрение, форк PrismML llama.cpp, 2 ячейки; запасной — `ksenia-brain-nex` (Nex-N2.5-mini) | RTX 5060 Ti |
 | `ksenia-voice-out` | 18110 | голос: Fish Audio S2 Pro через s2.cpp (ускоренная ветка) | RTX 2080 Ti |
 | `ksenia-voice-in` | 18120 | слух: faster-whisper large-v3-turbo, Bluetooth-гарнитура | RTX 2080 Ti |
 | `ksenia-core` | 18130 | ядро: характер, диалог, инструменты, динамический бюджет рассуждений | CPU |
@@ -53,7 +53,7 @@
 - Образец голоса «Маша» — корпус [Dialogs](https://huggingface.co/datasets/langswap/dialogs-ru-emotional-conversations)
   (Langswap, Interspeech 2026), лицензия OpenRAIL — см. `voice-out/voices/LICENSE-Dialogs-OpenRAIL.md`.
   Актриса дала письменное согласие на открытое использование.
-- Распознавание: faster-whisper large-v3-turbo. Мозг: Nex-N2.5-mini (GGUF IQ4_XS).
+- Распознавание: faster-whisper large-v3-turbo. Мозг: [Ternary Bonsai 2 27B](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf) (Apache 2.0) с MTP-головой Qwen3.8 ([decent-jawfish/bonsai-2-27b-mtp](https://huggingface.co/decent-jawfish/bonsai-2-27b-mtp)); запасной — Nex-N2.5-mini.
 
 Код проекта — MIT ([LICENSE](LICENSE)).
 

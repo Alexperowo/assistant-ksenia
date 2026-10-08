@@ -1,7 +1,7 @@
 [Unit]
-Description=Ксения: мозг (Nex-N2.5-mini на RTX 5060 Ti, :18100)
+Description=Ксения: мозг (Ternary Bonsai 2 27B + MTP + зрение на RTX 5060 Ti, :18100)
 # 5060 Ti принадлежит Ксении; модели Nexus, которые её занимают, не должны работать одновременно
-Conflicts=nexus-llama.service nexus-tinfield.service nexus-ornith.service nexus-nex.service
+Conflicts=ksenia-brain-nex.service nexus-llama.service nexus-tinfield.service nexus-ornith.service nexus-nex.service
 
 [Service]
 Type=simple
