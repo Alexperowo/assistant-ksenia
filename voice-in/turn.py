@@ -14,6 +14,27 @@ RATE = 16000
 N_SAMPLES = 8 * RATE
 
 
+def dither_zeros(pcm16: np.ndarray, min_run: int = 160, seed: int = 0) -> np.ndarray:
+    """Микрофон JBL глушит паузы до цифрового нуля. Модель учили на живых записях с фоновым шумом, и абсолютная
+    тишина для неё — нетипичный признак «договорил» (0,97–0,99 даже посреди фразы, живой тест 2026-10-08).
+    Заполняем нулевые участки длиннее min_run отсчётов (10 мс) тихим шумом ~ на 46 дБ ниже речи."""
+    x = np.asarray(pcm16, dtype=np.int16)
+    zero = x == 0
+    if zero.sum() < min_run:
+        return x
+    voiced = x[~zero].astype(np.float32)
+    level = max(4.0, 0.005 * float(np.sqrt(np.mean(voiced ** 2))) if voiced.size else 4.0)
+    out = x.copy()
+    # границы серий нулей
+    d = np.diff(np.concatenate(([0], zero.astype(np.int8), [0])))
+    starts, ends = np.where(d == 1)[0], np.where(d == -1)[0]
+    rng = np.random.default_rng(seed)
+    for a, b in zip(starts, ends):
+        if b - a >= min_run:
+            out[a:b] = np.clip(rng.normal(0, level, b - a), -32768, 32767).astype(np.int16)
+    return out
+
+
 class TurnDetector:
     def __init__(self, path=MODEL):
         import onnxruntime as ort
@@ -43,7 +64,7 @@ class TurnDetector:
         return ((mel + 4.0) / 4.0).numpy()[None].astype(np.float32)  # [1, 80, 800]
 
     def complete(self, pcm16: np.ndarray) -> float:
-        """Вероятность, что человек договорил (0…1)."""
+        """Вероятность, что человек договорил (0…1). Нулевые паузы заполняет вызывающий (dither_zeros)."""
         return float(self.sess.run(None, {"input_features": self.features(pcm16)})[0][0][0])
 
 

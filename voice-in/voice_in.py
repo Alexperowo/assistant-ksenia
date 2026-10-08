@@ -146,10 +146,38 @@ def hanging(text: str) -> bool:
     t = text.strip().lower()
     if not t:
         return False
-    if t[-1] in ",-—:;" or t.endswith("..."):
+    if t[-1] in ",-—:;" or t.endswith("...") or t.endswith("…"):
         return True
     words = re.findall(r"[\w-]+", t)
     return bool(words) and words[-1].strip("-") in HANGING_WORDS
+
+
+SHORT_ANSWER = re.compile(r"^(?:да|нет|ага|угу|конечно|давай|не надо|не хочу|хочу|можно|ладно|хорошо|ок|окей|"
+                          r"не знаю|наверное|согласен|верно|точно|оба|первый|второй|третий|любой)(?:[ ,]+\w+){0,2}[.!?]?$",
+                          re.I)
+
+
+def turn_policy(p: float, text: str, ctx: dict, cfg: dict, fast: bool = False):
+    """Конец реплики: ("end", None) — договорил; ("wait", мс тишины, после которых всё же конец).
+
+    Микрофон JBL глушит паузы до цифрового нуля, и Smart Turn почти всегда уверен «договорил» (0,97–0,99) —
+    поэтому решает в первую очередь распознанный текст:
+    - оборвалась на «и», «мне», запятой, «э-э» — ждать дольше (продолжение почти наверняка);
+    - вопрос или восклицание, короткий ответ на вопрос Ксении — конец сразу, даже на быстрой проверке (~0,4 с);
+    - иначе на обычной проверке (~0,8 с) — интонация Smart Turn, затем текст.
+    Если он всё же продолжит, пока Ксения думает, ядро склеит обе части (LiveConversation)."""
+    t = (text or "").strip()
+    if t and hanging(t):
+        return "wait", cfg.get("turn_hang_wait_ms", 3000)
+    words = len(re.findall(r"\w+", t))
+    strong = bool(t) and (t.endswith(("?", "!")) or (ctx.get("asked") and bool(SHORT_ANSWER.match(t))))
+    if strong:
+        return "end", None
+    if fast:
+        return "wait", None
+    if p >= cfg.get("turn_threshold", 0.5) and (words or not t):
+        return "end", None
+    return "wait", cfg.get("turn_wait_ms", 2000)
 
 
 class Ear:
@@ -201,7 +229,11 @@ class Ear:
     def turn_check(self, pcm16: np.ndarray):
         """(вероятность «договорил» по интонации, распознанный пока текст). Без модели — (1.0, «»)."""
         turn = getattr(self, "turn", None)
-        p = turn.complete(pcm16) if turn else 1.0
+        if turn and CONFIG.get("turn_dither", True):
+            import turn as turn_mod
+            p = turn.complete(turn_mod.dither_zeros(pcm16))  # нули микрофона JBL -> тихий шум (см. turn.dither_zeros)
+        else:
+            p = turn.complete(pcm16) if turn else 1.0
         text = ""
         if getattr(self, "model", None) is not None:
             try:
@@ -338,13 +370,15 @@ class LiveSegmenter:
         self.c = c
         self.noise = None
         self.voiced_win, self.pre = [], []
+        self.ctx = {"ksenia": "idle", "asked": False}  # что делает Ксения (присылает ядро)
         self.reset()
 
     def reset(self):
         self.frames, self.speaking, self.silent_ms, self.voiced_ms = [], False, 0, 0
-        self.long_sent, self.checked, self.ended = False, False, False
+        self.long_sent, self.checked, self.fast_checked, self.ended = False, False, False, False
         self.wait_ms = self.c.get("turn_wait_ms", 2000)
         self.probs, self.texts = [], []
+        self.since_partial = 0
 
     def push(self, x: np.ndarray):
         rms = float(np.sqrt(np.mean((x.astype(np.float32) / 32768.0) ** 2)))
@@ -364,18 +398,23 @@ class LiveSegmenter:
                 return "start"
             return None
         self.frames.append(x)
+        self.since_partial += 20
         thr = max(self.noise * 2.0, self.c.get("min_speech_rms", 0.012) * 0.7)
         if rms >= thr:
-            self.silent_ms, self.checked = 0, False
+            self.silent_ms, self.checked, self.fast_checked = 0, False, False
             self.wait_ms = self.c.get("turn_wait_ms", 2000)
             self.voiced_ms += 20
             if not self.long_sent and self.voiced_ms >= self.c.get("barge_ms", 400):
                 self.long_sent = True
                 return "long"
-            return None
+            return self._maybe_partial()
         self.silent_ms += 20
         if len(self.frames) * 20 >= self.c.get("max_s", 120) * 1000:
             return "end"
+        fast_ms = self.c.get("turn_fast_ms", 400)
+        if fast_ms and not self.fast_checked and self.silent_ms >= fast_ms and self.silent_ms < self.c.get("turn_check_ms", 800):
+            self.fast_checked = True
+            return "check_fast"
         if not self.checked and self.silent_ms >= self.c.get("turn_check_ms", 800):
             self.checked = True
             return "check"
@@ -383,18 +422,30 @@ class LiveSegmenter:
             return "end"
         return None
 
+    def _maybe_partial(self):
+        """Пока он говорит — каждые partial_ms частичное распознавание (только первые partial_max_s: для решения
+        «перебивает или поддакивает» хватает начала фразы, а длинный буфер распознавать каждые 0,3 с дорого)."""
+        every = self.c.get("partial_ms", 300)
+        if every and self.since_partial >= every and self.voiced_ms >= self.c.get("partial_min_ms", 300) \
+                and len(self.frames) * 20 <= self.c.get("partial_max_s", 6) * 1000:
+            self.since_partial = 0
+            return "partial"
+        return None
+
     def pcm(self):
         return np.concatenate(self.frames) if self.frames else np.zeros(0, dtype=np.int16)
 
-    def decide(self, p: float, partial: str):
+    def decide(self, p: float, partial: str, fast: bool = False):
         """Ответ turn_check на паузе: "end" — договорил, None — ждём продолжения."""
-        self.probs.append(round(p, 2))
+        if not fast:
+            self.probs.append(round(p, 2))
         if partial:
             self.texts.append(partial[-40:])
-        hang = hanging(partial)
-        if p >= self.c.get("turn_threshold", 0.5) and not hang:
+        verdict, wait = turn_policy(p, partial, self.ctx, self.c, fast=fast)
+        if verdict == "end":
             return "end"
-        self.wait_ms = self.c.get("turn_hang_wait_ms", 3000) if hang else self.c.get("turn_wait_ms", 2000)
+        if wait:
+            self.wait_ms = wait
         return None
 
     def utterance(self):
@@ -553,9 +604,26 @@ async def handle_stream(request):
         async def reader():
             # служебные кадры (ping/pong, закрытие) aiohttp обрабатывает только внутри receive():
             # без чтения сердцебиение не проходило, и поток рвался через полторы минуты (живой тест)
-            async for _ in ws:
-                pass
+            async for msg in ws:
+                # ядро сообщает, что делает Ксения: говорит / думает / задала вопрос — для конца реплики
+                if msg.type == web.WSMsgType.TEXT:
+                    try:
+                        m = json.loads(msg.data)
+                    except ValueError:
+                        continue
+                    if m.get("type") == "context":
+                        seg.ctx.update({k: m[k] for k in ("ksenia", "asked") if k in m})
         reader_task = asyncio.create_task(reader())
+        partial = {"task": None, "utt": 0}
+
+        async def send_partial(pcm, utt_no):
+            try:
+                text = await asyncio.to_thread(ear.transcribe, pcm)
+            except Exception as e:
+                log.warning("частичное распознавание: %r", e)
+                return
+            if text and utt_no == partial["utt"] and not ws.closed:
+                await ws.send_json({"type": "partial", "text": text, "speech_s": round(len(pcm) / RATE, 2)})
         await ws.send_json({"type": "ready", "source": source})
         log.info("Живой режим: микрофон открыт (%s)", source)
         while not ws.closed:
@@ -566,13 +634,24 @@ async def handle_stream(request):
                 await ws.send_json({"type": "error", "reason": "mic_lost"})
                 break
             ev = seg.push(np.frombuffer(buf, dtype=np.int16))
-            if ev == "check":
+            if ev == "partial":
+                if partial["task"] is None or partial["task"].done():  # одно распознавание за раз
+                    partial["task"] = asyncio.create_task(send_partial(seg.pcm(), partial["utt"]))
+                ev = None
+            elif ev == "check_fast":
+                # быстрая проверка (~0,4 с): только текст, конец — лишь при ясных признаках
+                text = await asyncio.to_thread(ear.transcribe, seg.pcm())
+                ev = seg.decide(1.0, text, fast=True)
+            elif ev == "check":
                 ev = seg.decide(*await asyncio.to_thread(ear.turn_check, seg.pcm()))
+                if ev is None:  # пауза, но он не договорил — ядро может ответить своим «угу»
+                    await ws.send_json({"type": "pause", "speech_s": round(seg.voiced_ms / 1000, 1)})
             if ev == "start":
                 await ws.send_json({"type": "speech_start"})
             elif ev == "long":
                 await ws.send_json({"type": "speech_long"})
             elif ev == "end":
+                partial["utt"] += 1  # опоздавшие частичные результаты этой реплики больше не нужны
                 pcm, info = seg.utterance()
                 t1 = time.time()
                 ear._save_debug([pcm])

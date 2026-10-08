@@ -17,6 +17,7 @@ import datetime
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import time
@@ -30,6 +31,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 
 from tools import confirm, daily, desktop, memory, music, research, screen, selfcheck, settings, system, vk, voicectl  # noqa: E402  (инструменты — отдельные модули в core/tools)
 from tools import web as webtool  # noqa: E402  (не путать с aiohttp.web)
+import live_intent  # noqa: E402  (что значит реплика во время речи Ксении)
 
 TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research, daily, voicectl, system, settings, selfcheck]
 TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
@@ -205,6 +207,40 @@ def fix_english_numbers(text: str) -> str:
     return EN_NUM_RE.sub(rep, text)
 
 
+# Ксения — девушка, а модель иногда говорит о себе в мужском роде («я понял», «я рад»). Чиним только в голосе
+# и только сразу после «я» (между ними — пара коротких служебных слов): история остаётся как сгенерирована.
+FEM_ADJ = {"рад": "рада", "готов": "готова", "уверен": "уверена", "согласен": "согласна", "должен": "должна",
+           "сам": "сама", "один": "одна", "виноват": "виновата", "занят": "занята", "свободен": "свободна",
+           "доволен": "довольна", "знаком": "знакома", "прав": "права", "неправ": "неправа", "жив": "жива",
+           "счастлив": "счастлива", "благодарен": "благодарна", "обязан": "обязана", "удивлён": "удивлена",
+           "удивлен": "удивлена", "расстроен": "расстроена", "смущён": "смущена", "смущен": "смущена"}
+FEM_GAP = r"(?:(?:не|уже|ещё|еще|тоже|так|просто|только|бы|же|ведь|сейчас|сегодня|вчера|давно|точно|честно|" \
+          r"тебе|тебя|ему|ей|им|вам|его|её|ее|это|тут|там|всё|все|очень|сразу|снова|опять|наконец),?\s+){0,2}"
+FEM_RE = re.compile(r"(\b[Яя]\s+" + FEM_GAP + r")([а-яё]+)\b")
+
+
+def _feminine(word: str) -> str:
+    low = word.lower()
+    if low in FEM_ADJ:
+        out = FEM_ADJ[low]
+    elif low in ("был", "жил", "пил", "ел", "мыл", "шил", "бил", "сел", "пел", "дал", "спал", "звал", "ждал", "брал",
+                 "врал", "гнал", "лил", "шил"):
+        out = low + "а"
+    elif low in ("мог", "смог", "помог", "сумел"):
+        out = {"мог": "могла", "смог": "смогла", "помог": "помогла", "сумел": "сумела"}[low]
+    elif re.search(r"[шч][её]л$", low):        # пошёл/нашёл/вышел/прочёл -> пошла/нашла/вышла/прочла
+        out = re.sub(r"[её]л$", "ла", low)
+    elif re.search(r"[аяеиыуо]л$", low) and len(low) > 3:   # сказал, понял, смотрел, был -> +а
+        out = low + "а"
+    else:
+        return word
+    return out[0].upper() + out[1:] if word[0].isupper() else out
+
+
+def feminine(text: str) -> str:
+    return FEM_RE.sub(lambda m: m.group(1) + _feminine(m.group(2)), text)
+
+
 def clean_for_speech(text: str, verbatim: bool = False) -> str:
     """Убрать разметку и эмодзи; оставить только разрешённые пометки эмоций.
 
@@ -214,7 +250,7 @@ def clean_for_speech(text: str, verbatim: bool = False) -> str:
         t = m.group(1).strip().lower()
         return f"[{t}]" if t in ALLOWED_TAGS else ""
     if not verbatim:
-        text = fix_english_numbers(strip_thinking(text))
+        text = feminine(fix_english_numbers(strip_thinking(text)))
     if verbatim:
         text = re.sub(r"[\[\]]", " ", text)
         text = re.sub(r"https?://\S+", " ссылка ", text)
@@ -394,6 +430,44 @@ class Speaker:
         self.cancelled = False
         self.recorded = bytearray()  # копия всего, что ушло в наушники (для разбора помех)
         self.gain, self._carry = 1.0, b""
+        # что уже прозвучало: фразы с отметками в секундах звука и «часы» плеера — чтобы после перебивания
+        # знать, на каком месте Ксения остановилась (продолжить оттуда, а не с начала)
+        self.phrases = []
+        self.audio_s = 0.0
+        self._play_end = 0.0
+
+    BYTES_PER_S = 44100 * 2
+
+    def _account(self, nbytes: int, now: float = None):
+        """Отдано плееру nbytes звука: он доиграет их после уже отданного (или сразу, если буфер пуст)."""
+        now = time.time() if now is None else now
+        dur = nbytes / self.BYTES_PER_S
+        self._play_end = max(self._play_end, now) + dur
+        self.audio_s += dur
+
+    def played_s(self, now: float = None) -> float:
+        now = time.time() if now is None else now
+        return max(0.0, self.audio_s - max(0.0, self._play_end - now))
+
+    def progress(self, now: float = None):
+        """(сказано, недосказано) по тексту фраз. Место внутри фразы — по доле прозвучавшего звука, затем назад к началу
+        предложения: продолжать естественно с начала прерванной фразы (ошибка оценки — пара слов, не больше)."""
+        played = self.played_s(now)
+        said, rest = [], []
+        for ph in self.phrases:
+            end = ph["end"] if ph["end"] is not None else self.audio_s
+            if played >= end - 0.05:
+                said.append(ph["text"])
+            elif played <= ph["start"]:
+                rest.append(ph["text"])
+            else:
+                text = ph["text"]
+                cut = int(len(text) * (played - ph["start"]) / max(end - ph["start"], 1e-3))
+                starts = [0] + [m.end() for m in re.finditer(r"[.!?…]+\s+", text)]
+                s0 = max(x for x in starts if x <= cut)
+                said.append(text[:cut].strip())
+                rest.append(text[s0:].strip())
+        return " ".join(x for x in said if x), " ".join(x for x in rest if x)
 
     async def _ensure_player(self):
         if self.player is None or self.player.returncode is not None:
@@ -419,7 +493,9 @@ class Speaker:
         try:
             await self._ensure_player()
             ms = CONFIG.get("bt_warm_ms", 400)
-            self.player.stdin.write(b"\x00\x00" * (44100 * ms // 1000))
+            silence = b"\x00\x00" * (44100 * ms // 1000)
+            self.player.stdin.write(silence)
+            self._account(len(silence))
             await self.player.stdin.drain()
         except Exception as e:
             log.warning("выход не открыт заранее: %r", e)
@@ -440,7 +516,9 @@ class Speaker:
         text = clean_for_speech(text, verbatim=verbatim)
         if not text or self.cancelled:
             return
-        hub.emit({"type": "say", "text": re.sub(r"\[\w+\]\s*", "", text)})  # текст реплики — на экран планшета
+        shown = re.sub(r"\[\w+\]\s*", "", text)
+        hub.emit({"type": "say", "text": shown})  # текст реплики — на экран планшета
+        phrase = None
         params = {"stream": True, "chunked": True, "stream_start_buffer_ms": 0,
                   "output_format": "pcm_s16le", "stream_holdback_frames": 0,
                   "stream_decode_stride_frames": CONFIG.get("tts_stride", 8)}
@@ -474,8 +552,12 @@ class Speaker:
                             timings["first_audio_s"] = round(time.time() - timings["_t0"], 2)
                         if self.gain != 1.0 or self._carry:
                             chunk = self._apply_gain(chunk)
+                        if phrase is None:
+                            phrase = {"text": shown, "start": self.audio_s, "end": None}
+                            self.phrases.append(phrase)
                         self.player.stdin.write(chunk)
                         written += len(chunk)
+                        self._account(len(chunk))
                         self.recorded.extend(chunk)
                         await self.player.stdin.drain()
                     return
@@ -489,6 +571,8 @@ class Speaker:
             log.exception("сбой озвучки")
             await self._drop_player()
         finally:
+            if phrase is not None:
+                phrase["end"] = self.audio_s
             if written % 2 and self.player and self.player.returncode is None and not self.cancelled:
                 # поток оборвался посреди сэмпла: без выравнивания все следующие фразы зазвучат треском
                 self.player.stdin.write(b"\x00")
@@ -558,6 +642,22 @@ ACTION_PATTERNS = [r"\bвключ", r"\bвыключ", r"\bпостав", r"\bп
 
 HISTORY_FILE = os.path.join(ROOT, "..", "data", "history.json")
 
+# Хвост-предложение «Хочешь ещё?», «Рассказать ещё?», «Продолжить?» — живой тест: почти каждый ответ кончался им.
+OFFER_RE = re.compile(r"(?:^|[\s,])(?:хочешь|хотите|рассказать|продолжить|продолжать|интересно|ещё что-нибудь|еще что-нибудь|"
+                      r"что-нибудь ещё|что-нибудь еще|может,? ещё|может,? еще|давай ещё|давай еще|что скажешь|"
+                      r"как тебе|включить ещё|включить еще)\b[^.!?]*\?\s*$", re.I)
+
+
+def split_tail_offer(text: str, whole_ok: bool = False):
+    """(ответ без последней фразы, последняя фраза), если ответ кончается вопросом-предложением; иначе (text, "").
+    whole_ok — остаток целиком может быть предложением (первая фраза ответа уже прозвучала)."""
+    t = text.rstrip()
+    m = list(re.finditer(r"[.!?…]+[\"»)]?\s+", t))
+    head, last = (t[:m[-1].end()], t[m[-1].end():]) if m else ("", t)
+    if (head.strip() or whole_ok) and OFFER_RE.search(last):
+        return head.rstrip(), last.strip()
+    return text, ""
+
 
 INTERNAL_NO_TOOLS = {"ok": False, "error": "в служебной реплике инструменты не выполняются: просто расскажи словами; "
                                         "если нужно действие — предложи его Александру и дождись его ответа"}
@@ -611,6 +711,8 @@ class Ksenia:
         self.session = None
         self.last_tag = None
         self.last_client_t = 0.0  # когда Александр последний раз говорил с планшета
+        # недосказанный ответ: {"said", "rest", "complete", "t", "noted"} — после перебивания, чтобы продолжить
+        self.interrupted = None
 
     @staticmethod
     def _load_history():
@@ -743,6 +845,13 @@ class Ksenia:
             note += ("; у тебя обновились умения" + (f" (новые: {', '.join(NEW_TOOLS)})" if NEW_TOOLS else "")
                      + " — если раньше ты говорила «не могу», это могло устареть: проверь инструментом")
             NEW_TOOLS = None
+        it = self.fresh_interruption()
+        if it and not internal and not guest and not it.get("noted"):
+            # история только дописывается: в ней весь сгенерированный ответ, а прозвучала лишь часть — говорим мозгу правду
+            it["noted"] = True
+            note += (f"; тебя перебили, ты не договорила прошлый ответ: остановилась на «…{it['said'][-120:]}», "
+                     f"недосказано «{it['rest'][:160]}…». Если Александр просит продолжить — продолжай с этого места, "
+                     f"не повторяя сказанного; если он о другом — ответь ему, а к рассказу вернись, только если попросит")
         if first_today and not internal and not user_text.startswith("(служебно"):
             note += ("; это первый разговор за сегодня — тепло поздоровайся по времени суток; можешь коротко "
                      "предложить погоду и напомнить, что стоит на сегодня (remind_list), если это к месту")
@@ -767,6 +876,7 @@ class Ksenia:
                 await speaker.finish()
 
         worker = asyncio.create_task(tts_worker())
+        self._stream_cut = False
         spoken_all = []
         pending = []  # вызовы инструментов, на которые ещё нет ответа в истории
         budget = self.budget_for(user_text)  # динамический бюджет: болтовня 0, задача — больше
@@ -826,6 +936,8 @@ class Ksenia:
             if not worker.done():  # озвучка не должна жить дольше хода (и держать pacat)
                 await speaker.cancel()
                 worker.cancel()
+            if speaker.cancelled and not internal:
+                self.remember_interruption(speaker, queue)
             try:
                 self.save_history()
             except OSError as e:
@@ -834,6 +946,9 @@ class Ksenia:
         timings["llm_done_s"] = round(time.time() - timings["_t0"], 2)
         full = " ".join(x for x in spoken_all if x).strip()
         self.last_tag = (re.match(r"\s*\[(\w+)\]", full) or [None, None])[1]
+        self.recent_tags = (getattr(self, "recent_tags", []) + [self.last_tag])[-3:]
+        self.recent_offers = (getattr(self, "recent_offers", []) + [getattr(self, "_ended_with_offer", False)])[-3:]
+        self._ended_with_offer = False
         return full
 
     async def _step(self, budget, queue, speaker, timings, first_step):
@@ -875,6 +990,7 @@ class Ksenia:
                 else:
                     async for raw in r.content:
                         if speaker.cancelled:
+                            self._stream_cut = True  # ответ не догенерирован: продолжать придётся мозгом
                             break
                         d, err = parse_stream_line(raw)
                         if err:
@@ -896,9 +1012,10 @@ class Ksenia:
                             timings["first_token_s"] = round(time.time() - timings["_t0"], 2)
                         full += delta
                         buf += delta
-                        if first_step and not first_sent and self.last_tag and \
-                                buf.lstrip().startswith(f"[{self.last_tag}]") and len(buf.strip()) > len(self.last_tag) + 2:
-                            buf = buf.lstrip()[len(self.last_tag) + 2:]  # та же эмоция, что в прошлый раз, — не повторяем
+                        if first_step and not first_sent:
+                            mt = re.match(r"\s*\[(\w+)\]\s*", buf)
+                            if mt and len(buf.strip()) > mt.end() and self.tag_too_often(mt.group(1)):
+                                buf = buf[mt.end():]  # пометка эмоции почти в каждом ответе — в голосе не повторяем
                         if first_step and not first_sent:
                             sent, buf = split_first_sentence(buf)
                             if sent:
@@ -925,6 +1042,12 @@ class Ksenia:
             buf = (buf.strip() + " " + BRAIN_FAIL_PHRASE).strip()
         # Промежуточный шаг (после первого и с вызовом инструмента) — это «рассуждения вслух»: не озвучиваем.
         narration = (not first_step) and bool(calls) and not failed
+        if not calls and not failed and buf.strip():
+            kept, offer = split_tail_offer(buf, whole_ok=first_sent)
+            self._ended_with_offer = bool(offer)
+            if offer and self.offer_too_often():
+                log.info("Хвост-предложение не озвучиваю: %s", offer)
+                buf = kept
         if buf.strip() and not speaker.cancelled and not narration:
             await queue.put((buf.strip(), False))  # остаток одним куском: меньше пауз между фразами
         full = strip_thinking(full)
@@ -936,13 +1059,94 @@ class Ksenia:
         if self.speaker:
             await self.speaker.cancel()
 
+    def tag_too_often(self, tag: str) -> bool:
+        """Пометка эмоции в начале — не чаще раза в три ответа и не та же, что недавно (живой тест: [teasing] почти всегда)."""
+        recent = getattr(self, "recent_tags", [])[-2:]
+        return tag == getattr(self, "last_tag", None) or any(recent)
+
+    def offer_too_often(self) -> bool:
+        """«Хочешь ещё?» в конце: если прошлый ответ уже кончался таким вопросом или Александр только что
+        поддакнул — не спрашивать снова (человек так не делает)."""
+        recent = getattr(self, "recent_offers", [])[-2:]
+        if any(recent):
+            return True
+        said = live_intent.norm(self.recent_user_text(1))
+        return bool(said) and all(w in live_intent.REACT_W for w in said.split())
+
+    def fresh_interruption(self):
+        it = getattr(self, "interrupted", None)
+        if it and time.time() - it["t"] < CONFIG.get("resume_window_s", 600):
+            return it
+        return None
+
+    def remember_interruption(self, speaker, queue=None):
+        """Перебили: запомнить, что прозвучало и что нет (включая фразы, до которых очередь не дошла)."""
+        if not hasattr(speaker, "progress"):
+            return
+        said, rest = speaker.progress()
+        left = []
+        while queue is not None and not queue.empty():
+            item = queue.get_nowait()
+            if item:
+                left.append(re.sub(r"\[\w+\]\s*", "", clean_for_speech(item[0], verbatim=item[1])))
+        rest = " ".join(x for x in [rest] + left if x).strip()
+        if not said and not rest:
+            return
+        self.interrupted = {"said": said, "rest": rest, "complete": not getattr(self, "_stream_cut", False),
+                            "t": time.time(), "noted": False}
+        log.info("Перебили: сказано «…%s», недосказано «%s…»", said[-60:], rest[:60])
+
+    def can_resume(self, text: str) -> bool:
+        """«Ладно, продолжай» после перебивания — продолжить недосказанное без нового запроса к мозгу."""
+        it = self.fresh_interruption()
+        if not it or not it["rest"] or not it["complete"]:
+            return False
+        ctx = live_intent.Context(state="idle", interrupted=True)
+        return live_intent.quick(text, ctx).kind == "continue"
+
+    async def resume(self, user_text: str, timings: dict, output: str = "local"):
+        """Досказать прерванный ответ с начала прерванной фразы — мгновенно, без мозга: текст уже сгенерирован.
+        История дописывается: реплика Александра и то, что Ксения сейчас скажет."""
+        it, self.interrupted = self.interrupted, None
+        rest = it["rest"]
+        self.last_turn_t = time.time()
+        self.history.append({"role": "user", "content": f"{user_text}\n\n(служебно: {now_context()}; ядро продолжило "
+                                                        f"твой недосказанный ответ с места, где тебя перебили)"})
+        self.history.append({"role": "assistant", "content": rest})
+        hub.emit({"type": "user", "text": user_text})
+        speaker = Speaker(self.session, output=output)
+        self.speaker = speaker
+        try:
+            await speaker.warm()
+            for part in split_for_reading(rest, max_len=CONFIG.get("resume_chunk_chars", 500)):
+                await speaker.speak(part, timings)
+                if speaker.cancelled:
+                    break
+        finally:
+            if speaker.cancelled:
+                self.remember_interruption(speaker)
+            await speaker.finish()
+            try:
+                self.save_history()
+            except OSError as e:
+                log.error("история не сохранена: %s", e)
+            hub.emit({"type": "state", "state": "idle"})
+        log.info("Продолжила недосказанное: %s…", rest[:80])
+        return rest
+
 
 ks = Ksenia()
 
 
-async def turn(text: str, timings: dict, internal: bool = False, output: str = "local", speaker: dict = None):
+async def turn(text: str, timings: dict, internal: bool = False, output: str = "local", speaker: dict = None,
+               resume: bool = False):
     async with ks.lock:
-        reply = await ks.respond(text, timings, internal=internal, output=output, speaker=speaker)
+        guest = (speaker or {}).get("owner") is False
+        if not internal and not guest and ks.fresh_interruption() and (resume or ks.can_resume(text)) \
+                and ks.interrupted.get("complete"):
+            reply = await ks.resume(text, timings, output=output)
+        else:
+            reply = await ks.respond(text, timings, internal=internal, output=output, speaker=speaker)
     timings.pop("_t0", None)
     log.info("Александр: %s | Ксения: %s | %s", text, reply, timings)
     return reply
@@ -1282,15 +1486,26 @@ def is_backchannel(text: str) -> bool:
 
 
 class LiveConversation(Conversation):
-    """Живой режим (наушники в LE Audio: звук и микрофон одновременно). Микрофон открыт всё время:
-    Александр перебивает Ксению голосом (она замолкает и слушает), договаривает, пока она думает
-    (новая реплика заменяет недодуманный ответ), «ага» её не перебивает. Без сигналов между репликами.
-    Кончается на «пока», на «стоп», когда Ксения молчит, или после live_idle_s тишины."""
+    """Живой режим (наушники в LE Audio: звук и микрофон одновременно). Микрофон открыт всё время, без сигналов.
+
+    Что значит реплика Александра, решает live_intent — по смыслу и по тому, что Ксения сейчас делает:
+    реакция («ничего себе», «правда?») — рассказ идёт дальше в полный голос; «подожди», «стоп», вопрос, просьба —
+    замолкает и слушает. Решение начинается с первых слов (частичное распознавание): на «подожди…» она замолкает,
+    не дожидаясь конца фразы; если по полной фразе это оказалась реакция — продолжает с того же места.
+    Договорил, пока она думала, — обе части склеиваются в одну реплику. Кончается на «пока», на «стоп», когда
+    Ксения молчит, или после live_idle_s тишины."""
 
     def __init__(self):
         super().__init__()
         self.cur = None
-        self.ducked = None  # озвучка, приглушённая на время его речи
+        self.ducked = None  # озвучка, приглушённая на время его речи (по умолчанию выключено)
+        self.judge = None
+        self.ws = None
+        self.early = None      # замолчала по началу фразы: {"kind", "text"} — если это реакция, продолжить
+        self.last_utt = None   # реплика, на которую Ксения сейчас отвечает: {"text", "t"}
+        self.prejudge = None
+        self.ctx_sent = None
+        self.last_bc = 0.0
 
     def busy(self):
         return self.cur is not None and not self.cur.done()
@@ -1305,6 +1520,31 @@ class LiveConversation(Conversation):
         sp = ks.speaker
         return sp is not None and bool(sp.recorded) and not sp.cancelled
 
+    def context(self, partial=False):
+        """Что Ксения делает и что сказала — контекст для решения и для конца реплики в слухе."""
+        speaking = self.busy() and self.speaking()
+        state = "speaking" if speaking else ("thinking" if self.busy() else "idle")
+        sp, said, story = ks.speaker, "", False
+        if sp is not None and getattr(sp, "phrases", None) and self.busy():
+            said, rest = sp.progress()
+            story = len(said) + len(rest) > 300
+        if not said:
+            said = next((m.get("content") or "" for m in reversed(ks.history)
+                         if m.get("role") == "assistant" and m.get("content")), "")
+        said = re.sub(r"\[\w+\]\s*", "", said)
+        return live_intent.Context(state=state, said=said[-300:], asked=said.rstrip().endswith("?"), story=story,
+                                   interrupted=bool(ks.fresh_interruption()), partial=partial)
+
+    async def send_context(self):
+        ctx = self.context()
+        key = (ctx.state, ctx.asked)
+        if self.ws is not None and key != self.ctx_sent:
+            self.ctx_sent = key
+            try:
+                await self.ws.send_json({"type": "context", "ksenia": ctx.state, "asked": ctx.asked})
+            except Exception:
+                pass
+
     async def cancel_turn(self):
         self.ducked = None
         if self.busy():
@@ -1312,10 +1552,10 @@ class LiveConversation(Conversation):
             self.cur.cancel()
             await asyncio.wait({self.cur}, timeout=3)
 
-    async def live_turn(self, text, listen_info, speaker):
+    async def live_turn(self, text, listen_info, speaker, resume=False):
         await music.duck(True)
         try:
-            await turn(text, {"_t0": time.time(), "listen": listen_info}, speaker=speaker)
+            await turn(text, {"_t0": time.time(), "listen": listen_info}, speaker=speaker, resume=resume)
             self.turns += 1
             await deliver_waiting()
         finally:
@@ -1328,8 +1568,132 @@ class LiveConversation(Conversation):
         finally:
             await music.duck(False)
 
+    async def on_partial(self, text):
+        """Начало его фразы, пока он ещё говорит: ясное «подожди…», «стоп», вопрос — замолчать сразу."""
+        if not self.busy() or self.early or not text:
+            return
+        ctx = self.context(partial=True)
+        d = live_intent.quick(text, ctx)
+        words = live_intent.norm(text).split()
+        early = d.sure and (d.kind in ("hold", "stop", "aside") or
+                            (d.kind in ("question", "request", "correction", "goodbye") and len(words) >= 3))
+        if early:
+            log.info("По началу фразы «%s» — %s: Ксения замолкает", text, d.kind)
+            live_intent.log_decision(text, ctx, d, acted="замолчала по началу фразы")
+            self.early = {"kind": d.kind, "text": text}
+            await self.cancel_turn()
+        elif not d.sure and len(words) >= 2 and self.judge and self.judge.enabled and \
+                (self.prejudge is None or self.prejudge.done()):
+            # спорное начало — спросить судью заранее: если фраза так и закончится, ответ уже готов
+            self.prejudge = asyncio.create_task(self._prejudge(text, ctx))
+
+    async def _prejudge(self, text, ctx):
+        try:
+            await asyncio.wait_for(self.judge.ask(ks.session, text, ctx), self.judge.cfg.get("live_judge_timeout_s", 0.8))
+        except Exception:
+            pass
+
+    async def backchannel(self):
+        """Своё «угу», когда Александр долго рассказывает и задумался (по умолчанию выключено: live_backchannels)."""
+        self.last_bc = time.time()
+        sp = Speaker(ks.session)
+        sp.set_volume(CONFIG.get("live_backchannel_volume", 60))
+        try:
+            await sp.speak(random.choice(CONFIG.get("live_backchannel_words", ["Угу.", "Ага.", "Мм."])), {"_t0": time.time()})
+        finally:
+            await sp.finish()
+
+    async def on_utterance(self, ev):
+        """Реплика целиком. Возвращает True — живой режим окончен."""
+        text = str(ev.get("text") or "").strip()
+        speaker = ev.get("speaker") or {}
+        early, self.early = self.early, None
+        if len(text) < 2:
+            await self.unduck()  # шум, а не слова — рассказ дальше в полный голос
+            if early and not self.busy():
+                self.cur = asyncio.create_task(self.live_turn("продолжай", ev.get("timings") or {}, speaker, resume=True))
+            return False
+        if speaker.get("owner") is False and voicectl.STATE["mode"] == "owner_only":
+            log.info("Чужой голос — режим «только Александр»: %s", text)
+            await self.unduck()
+            return False
+        note = agent_note(text)
+        if note is not None:
+            last_reply = next((m.get("content") or "" for m in reversed(ks.history)
+                               if m.get("role") == "assistant" and m.get("content")), "")
+            save_agent_note(note, last_reply)
+            log.info("Заметка для агента: %s", note)
+            await self.unduck()
+            if not self.busy():
+                await say_notice("Записала.")
+            return False
+        ctx = self.context()
+        if early and ctx.state == "idle":
+            ctx.state, ctx.interrupted = "speaking", True  # решаем, как если бы она ещё говорила
+        recent = self.last_utt and time.time() - self.last_utt["t"] < CONFIG.get("live_merge_s", 8)
+        q = live_intent.quick(text, ctx)
+        if ctx.state == "thinking" and recent and not early and \
+                q.kind not in ("hold", "stop", "aside", "goodbye", "noise"):
+            # она ещё ничего не сказала, а он продолжает: это продолжение его же фразы («…и про Карфаген»)
+            d = live_intent.Decision("request", True, why="договаривает, пока Ксения думает")
+        else:
+            d = await live_intent.decide(text, ctx, self.judge, ks.session)
+        kind = d.kind
+        acted = ""
+        try:
+            if kind == "noise":
+                acted = "ничего"
+                if early and not self.busy():
+                    acted = "продолжила после ложной остановки"
+                    self.cur = asyncio.create_task(self.live_turn(text, ev.get("timings") or {}, speaker, resume=True))
+                return False
+            if kind == "continue":
+                await self.unduck()
+                if self.busy():
+                    acted = "говорит дальше"
+                    log.info("Реакция — Ксения продолжает: %s", text)
+                    return False
+                acted = "продолжила недосказанное" if (early or ks.fresh_interruption()) else "ответ"
+                self.cur = asyncio.create_task(self.live_turn(text, ev.get("timings") or {}, speaker,
+                                                              resume=bool(early or ks.fresh_interruption())))
+                return False
+            if kind in ("hold", "aside"):
+                acted = "замолчала и ждёт"
+                await self.cancel_turn()
+                return False
+            if kind == "stop":
+                if self.busy() or early:
+                    acted = "замолчала"
+                    await self.cancel_turn()
+                    return False
+                if not music.playing():
+                    acted = "живой режим окончен"
+                    log.info("«%s» — живой режим окончен", text)
+                    return True
+                acted = "ответ (играет музыка)"
+            merged = text
+            if self.busy() and not self.speaking() and not early and recent:
+                # договорил, пока Ксения думала: это одна реплика, а не новая (раньше вторая часть вытесняла первую)
+                merged = f"{self.last_utt['text']} {text}"
+                acted = "склеила с прошлой частью"
+            if self.busy() and self.speaking():
+                log.info("Александр перебил — Ксения замолкает")
+            await self.cancel_turn()
+            if voicectl.STATE["enrolling"] > 0 and speaker.get("owner") is not False:
+                await self.enroll_step()
+            self.last_utt = {"text": merged, "t": time.time()}
+            acted = acted or "ответ"
+            self.cur = asyncio.create_task(self.live_turn(merged, ev.get("timings") or {}, speaker))
+            if kind == "goodbye" or is_goodbye(text):
+                await asyncio.wait({self.cur})
+                return True
+            return False
+        finally:
+            live_intent.log_decision(text, ctx, d, acted=acted)
+
     async def run(self):
-        self.turns, self.cur = 0, None
+        self.turns, self.cur, self.early, self.last_utt, self.ctx_sent = 0, None, None, None, None
+        self.judge = live_intent.Judge(CONFIG, BRAIN_KEY)
         url = CONFIG["voice_in_url"].replace("http", "ws", 1) + "/stream"
         try:
             async with ks.session.ws_connect(url, heartbeat=20) as ws:
@@ -1338,12 +1702,14 @@ class LiveConversation(Conversation):
                     log.info("Живой режим недоступен (%s) — обычный разговор", first)
                     await ws.close()
                     return await Conversation.run(self)
+                self.ws = ws
                 log.info("Живой режим: слушаю постоянно")
                 hub.emit({"type": "state", "state": "listening", "where": "pc"})
                 last = time.time()
                 while True:
+                    await self.send_context()
                     try:
-                        msg = await ws.receive(timeout=1.0)
+                        msg = await ws.receive(timeout=0.25)
                     except asyncio.TimeoutError:
                         if self.busy():
                             last = time.time()
@@ -1367,6 +1733,17 @@ class LiveConversation(Conversation):
                             self.ducked = ks.speaker
                             ks.speaker.set_volume(CONFIG.get("live_duck_percent", 30))
                         continue
+                    if kind == "partial":
+                        last = time.time()
+                        await self.on_partial(str(ev.get("text") or ""))
+                        continue
+                    if kind == "pause":
+                        # он рассказывает и задумался (слух ждёт продолжения) — можно своё «угу»
+                        if CONFIG.get("live_backchannels", False) and not self.busy() and \
+                                ev.get("speech_s", 0) >= CONFIG.get("live_backchannel_after_s", 8) and \
+                                time.time() - self.last_bc > CONFIG.get("live_backchannel_every_s", 12):
+                            asyncio.create_task(self.backchannel())
+                        continue
                     if kind == "error":
                         log.warning("Живой режим: %s", ev)
                         if ev.get("reason") == "mic_lost":
@@ -1375,48 +1752,7 @@ class LiveConversation(Conversation):
                     if kind != "utterance":
                         continue
                     last = time.time()
-                    text = str(ev.get("text") or "").strip()
-                    speaker = ev.get("speaker") or {}
-                    if len(text) < 2:
-                        await self.unduck()  # шум, а не слова — рассказ дальше в полный голос
-                        continue
-                    if speaker.get("owner") is False and voicectl.STATE["mode"] == "owner_only":
-                        log.info("Чужой голос — режим «только Александр»: %s", text)
-                        await self.unduck()
-                        continue
-                    if self.busy() and is_backchannel(text):
-                        # «ага», «интересно», «рассказывай» — слушает: громкость обратно, рассказ дальше
-                        log.info("Поддакивание — Ксения продолжает: %s", text)
-                        await self.unduck()
-                        continue
-                    if self.busy() and self.speaking():
-                        log.info("Александр перебил — Ксения замолкает")
-                    note = agent_note(text)
-                    if note is not None:
-                        last_reply = next((m.get("content") or "" for m in reversed(ks.history)
-                                           if m.get("role") == "assistant" and m.get("content")), "")
-                        save_agent_note(note, last_reply)
-                        log.info("Заметка для агента: %s", note)
-                        await self.unduck()
-                        if not self.busy():
-                            await say_notice("Записала.")
-                        continue
-                    if is_hold(text):
-                        # «подожди», «погоди», «слушай»… — замолчать и молча ждать, что он скажет дальше
-                        if self.busy():
-                            await self.cancel_turn()
-                            continue
-                        if is_stop(text) and not music.playing():
-                            log.info("«%s» — живой режим окончен", text)
-                            return
-                        continue
-                    # новая реплика важнее недоговорённого ответа: перебил или договорил, пока Ксения думала
-                    await self.cancel_turn()
-                    if voicectl.STATE["enrolling"] > 0 and speaker.get("owner") is not False:
-                        await self.enroll_step()
-                    self.cur = asyncio.create_task(self.live_turn(text, ev.get("timings") or {}, speaker))
-                    if is_goodbye(text):
-                        await asyncio.wait({self.cur})
+                    if await self.on_utterance(ev):
                         return
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             log.error("Живой режим: слух недоступен: %r", e)
@@ -1427,6 +1763,7 @@ class LiveConversation(Conversation):
             log.exception("Сбой живого режима: %s", e)
             await say_notice(CONV_CRASH)
         finally:
+            self.ws = None
             if self.busy():
                 await self.cancel_turn()
             waiting_event.set()
@@ -1519,7 +1856,7 @@ async def stop_conversation():
     return old is not None
 
 
-async def handle_talk(request):
+async def start_talk():
     # Нажатие во время разговора: прервать речь Ксении и сразу слушать заново.
     # Замок — чтобы два быстрых нажатия не запустили два разговора сразу.
     async with talk_lock:
@@ -1528,6 +1865,11 @@ async def handle_talk(request):
         # наушники в LE Audio — живой режим (слушает всегда, можно перебивать); иначе — обычный разговор
         runner = live if CONFIG.get("live_mode", True) and await live_possible() else conv
         conv.task = asyncio.create_task(runner.run())
+    return runner
+
+
+async def handle_talk(request):
+    runner = await start_talk()
     return web.json_response({"ok": True, "mode": "live" if runner is live else "conversation"})
 
 
@@ -1543,6 +1885,167 @@ async def handle_stop(request):
     async with talk_lock:
         await stop_conversation()
     return web.json_response({"ok": True})
+
+
+# Касания наушников. Наушники сами чередуют Play и Pause по своему представлению о состоянии (оно не совпадает
+# с нашим), поэтому все три — одно и то же «одно касание». Двойное и тройное касание наушники обычно шлют
+# как «следующий» и «предыдущий трек» — это зависит от модели, журнал ядра покажет, что пришло.
+TAP = {"PlayPause", "Play", "Pause"}
+
+
+def button_action(event: str, st: dict) -> str:
+    """Что сделать по касанию. st: speaking — Ксения говорит или думает; conversation — разговор идёт;
+    music — "playing" | "paused" | None. Правило, которое легко запомнить: пока Ксения говорит, любое
+    касание — замолчать (как «стоп»; «продолжай» вернёт рассказ)."""
+    if event == "Stop":
+        return "stop_all"
+    if st.get("speaking"):
+        return "hush" if event in TAP or event in ("Next", "Previous") else "none"
+    tune = st.get("music")
+    if event in TAP:
+        if tune == "playing":
+            return "music_pause"
+        if tune == "paused" and not st.get("conversation"):
+            return "music_resume"
+        return "end" if st.get("conversation") else "talk"
+    if event == "Next":
+        return "music_next" if tune == "playing" else "talk"
+    if event == "Previous":
+        return "music_previous" if tune == "playing" else "repeat"
+    return "none"
+
+
+def button_state() -> dict:
+    sp = ks.speaker
+    sounding = sp is not None and not sp.cancelled and getattr(sp, "_play_end", 0.0) > time.time()
+    return {"speaking": ks.lock.locked() or sounding, "conversation": conv.active(), "music": music.status()}
+
+
+def last_reply() -> str:
+    return next((m["content"] for m in reversed(ks.history) if m.get("role") == "assistant"
+                 and isinstance(m.get("content"), str) and m["content"].strip()), "")
+
+
+class HeadsetButtons:
+    """Кнопки наушников через MPRIS: помощник (системный python3 с gi) держит плеер «Ксения» на шине сеанса,
+    касания приходят строками JSON. Своего GATT-сервера для LE Audio не делаем — см. docs/REVIEW-3.md."""
+
+    HELPER = os.path.join(ROOT, "tools", "mpris_helper.py")
+
+    def __init__(self):
+        self.proc = None
+        self.last_t = 0.0
+        self.shown = None
+
+    async def run(self):
+        python = CONFIG.get("headset_buttons_python", "/usr/bin/python3")
+        for attempt in range(5):
+            ready = False
+            try:
+                self.proc = await asyncio.create_subprocess_exec(
+                    python, self.HELPER, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL)
+            except OSError as e:
+                log.warning("Кнопки наушников: помощник не запустился: %s", e)
+                return
+            self.shown = None
+            pusher = asyncio.create_task(self.push_state())
+            try:
+                async for line in self.proc.stdout:
+                    try:
+                        msg = json.loads(line)
+                    except ValueError:
+                        continue
+                    if msg.get("ready"):
+                        ready = True
+                        log.info("Кнопки наушников: плеер «Ксения» на шине сеанса")
+                    elif msg.get("error"):
+                        log.warning("Кнопки наушников: %s", msg["error"])
+                    elif msg.get("event"):
+                        await self.on_event(msg["event"])
+            finally:
+                pusher.cancel()
+                if self.proc.returncode is None:
+                    self.proc.kill()
+                await self.proc.wait()
+            if not ready:  # нет gi или шины сеанса — повторять бесполезно
+                log.warning("Кнопки наушников выключены: помощник MPRIS не поднялся (код %s)", self.proc.returncode)
+                return
+            await asyncio.sleep(CONFIG.get("headset_buttons_retry_s", 10) * (attempt + 1))
+        log.warning("Кнопки наушников: помощник падает раз за разом — выключаю")
+
+    def status(self):
+        """Что показывать плееру: «Играет», пока Ксения говорит или играет музыка, иначе «Пауза» —
+        приостановленный плеер KDE по-прежнему считает своим и отдаёт ему медиакнопки."""
+        st = button_state()
+        if st["speaking"]:
+            return "Playing", "Ксения говорит"
+        if st["music"]:
+            return ("Playing" if st["music"] == "playing" else "Paused"), music.title() or "Музыка"
+        return "Paused", "Ксения"
+
+    async def push_state(self):
+        while True:
+            cur = self.status()
+            if cur != self.shown:
+                self.shown = cur
+                line = json.dumps({"status": cur[0], "title": cur[1]}, ensure_ascii=False) + "\n"
+                self.proc.stdin.write(line.encode())
+                await self.proc.stdin.drain()
+            await asyncio.sleep(0.3)
+
+    async def on_event(self, event: str):
+        now = time.time()
+        if now - self.last_t < CONFIG.get("headset_buttons_debounce_s", 0.35):
+            return  # одно касание иногда приходит дважды (медиаклавиша и mpris-proxy)
+        self.last_t = now
+        action = button_action(event, button_state())
+        log.info("Кнопка наушников: %s -> %s", event, action)
+        try:
+            await self.act(action)
+        except Exception as e:
+            log.warning("Кнопка наушников: %s не выполнено: %r", action, e)
+
+    async def act(self, action: str):
+        if action == "hush":
+            if live.busy():
+                await live.cancel_turn()
+            else:
+                await ks.stop()
+        elif action == "talk":
+            await start_talk()
+        elif action in ("end", "stop_all"):
+            async with talk_lock:
+                ended = await stop_conversation()
+            if action == "stop_all" and music.playing():
+                await music.call("music_control", {"action": "pause"}, ks.session)
+            elif ended and CONFIG.get("headset_buttons_end_phrase", "Отдыхаю."):
+                await say_notice(CONFIG.get("headset_buttons_end_phrase", "Отдыхаю."))  # без звука непонятно, сработало ли
+        elif action.startswith("music_"):
+            await music.call("music_control", {"action": action[len("music_"):]}, ks.session)
+        elif action == "repeat":
+            await self.repeat()
+
+    async def repeat(self):
+        """Повторить последний ответ — мимо истории и мозга (история только дописывается, повтор в неё не идёт)."""
+        text = last_reply()
+        if not text:
+            await say_notice("Я пока ничего не говорила.")
+            return
+        async with ks.lock:
+            sp = Speaker(ks.session)
+            ks.speaker = sp  # касание во время повтора — замолчать
+            try:
+                await sp.warm()
+                for part in split_for_reading(text, max_len=CONFIG.get("resume_chunk_chars", 500)):
+                    await sp.speak(part, {"_t0": time.time()})
+                    if sp.cancelled:
+                        break
+            finally:
+                await sp.finish()
+
+
+buttons = HeadsetButtons()
 
 
 async def handle_status(request):
@@ -1606,6 +2109,8 @@ async def on_start(app):
     # ссылки на фоновые задачи храним: цикл событий держит задачи только слабыми ссылками
     BACKGROUND.extend([asyncio.create_task(findings_loop()), asyncio.create_task(reminders_loop()),
                        asyncio.create_task(music.book_autosave_loop()), asyncio.create_task(warmup())])
+    if CONFIG.get("headset_buttons", True):
+        BACKGROUND.append(asyncio.create_task(buttons.run()))
 
 
 async def on_cleanup(app):

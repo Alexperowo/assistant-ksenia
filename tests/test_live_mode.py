@@ -28,6 +28,10 @@ def run(seg, fr, decide=(0.9, "")):
     evs, utts = [], []
     for k, f in enumerate(fr):
         ev = seg.push(f)
+        if ev == "partial":  # частичное распознавание — отдельные тесты
+            continue
+        if ev == "check_fast":
+            ev = seg.decide(*decide, fast=True)
         if ev == "check":
             ev = seg.decide(*decide)
         if ev:
