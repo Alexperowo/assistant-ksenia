@@ -256,6 +256,43 @@ ACTION_PATTERNS = [r"\bвключ", r"\bвыключ", r"\bпостав", r"\bп
 HISTORY_FILE = os.path.join(ROOT, "..", "data", "history.json")
 
 
+BRAIN_FAIL_PHRASE = "[sigh] Ой, у меня что-то с головой. Мозг не отвечает, проверь, пожалуйста, сервис."
+
+
+def parse_stream_line(raw: bytes):
+    """Строка потока llama-server -> (delta | None, ошибка | None). Пустые, служебные и битые строки — (None, None)."""
+    line = raw.decode("utf-8", "replace").strip()
+    if not line.startswith("data:"):
+        return None, None
+    payload = line[5:].strip()
+    if payload == "[DONE]":
+        return None, None
+    try:
+        obj = json.loads(payload)
+    except json.JSONDecodeError:
+        log.warning("brain: битая строка потока: %s", payload[:120])
+        return None, None
+    if not isinstance(obj, dict):
+        return None, None
+    if obj.get("error"):
+        return None, f"ошибка в потоке: {str(obj['error'])[:300]}"
+    choices = obj.get("choices")
+    if not choices or not isinstance(choices[0], dict):
+        return None, None  # например, последний кусок только с usage
+    return choices[0].get("delta") or {}, None
+
+
+def merge_tool_call(calls: dict, tc: dict):
+    """Дописать кусок потокового tool_call в слот по index (имя и аргументы приходят частями)."""
+    slot = calls.setdefault(tc.get("index", 0), {"id": "", "type": "function",
+                                                 "function": {"name": "", "arguments": ""}})
+    if tc.get("id"):
+        slot["id"] = tc["id"]
+    fn = tc.get("function") or {}
+    slot["function"]["name"] += fn.get("name") or ""
+    slot["function"]["arguments"] += fn.get("arguments") or ""
+
+
 class Ksenia:
     def __init__(self):
         self.history = self._load_history()
@@ -351,52 +388,61 @@ class Ksenia:
         return full
 
     async def _step(self, budget, queue, speaker, timings, first_step):
-        """Один запрос к мозгу: речь идёт в озвучку по ходу, вызовы инструментов собираются."""
+        """Один запрос к мозгу: речь идёт в озвучку по ходу, вызовы инструментов собираются.
+
+        Возвращает (текст, вызовы, сбой). При сбое или перебивании вызовы отбрасываются: их аргументы
+        могли оборваться на полуслове, а исполнять половину команды нельзя."""
         msgs = [{"role": "system", "content": PERSONA}] + self._window()
         body = {"messages": msgs, "stream": True, "max_tokens": CONFIG.get("max_tokens", 400),
                 "thinking_budget_tokens": budget, "tools": TOOL_SCHEMAS}
         full, buf, first_sent = "", "", False
         calls = {}
+        failed = False
         try:
             async with self.session.post(CONFIG["brain_url"] + "/v1/chat/completions", json=body,
                                          headers={"Authorization": "Bearer " + BRAIN_KEY},
                                          timeout=aiohttp.ClientTimeout(total=180)) as r:
-                async for raw in r.content:
-                    line = raw.decode("utf-8", "ignore").strip()
-                    if not line.startswith("data:") or line.endswith("[DONE]"):
-                        continue
-                    d = json.loads(line[5:])["choices"][0]["delta"]
-                    for tc in d.get("tool_calls") or []:
-                        slot = calls.setdefault(tc.get("index", 0), {"id": "", "type": "function",
-                                                                     "function": {"name": "", "arguments": ""}})
-                        if tc.get("id"):
-                            slot["id"] = tc["id"]
-                        fn = tc.get("function") or {}
-                        slot["function"]["name"] += fn.get("name") or ""
-                        slot["function"]["arguments"] += fn.get("arguments") or ""
-                    delta = d.get("content") or ""
-                    if not delta:
-                        continue
-                    if "first_token_s" not in timings:
-                        timings["first_token_s"] = round(time.time() - timings["_t0"], 2)
-                    full += delta
-                    buf += delta
-                    if first_step and not first_sent and self.last_tag and \
-                            buf.lstrip().startswith(f"[{self.last_tag}]") and len(buf.strip()) > len(self.last_tag) + 2:
-                        buf = buf.lstrip()[len(self.last_tag) + 2:]  # та же эмоция, что в прошлый раз, — не повторяем
-                    if not first_sent:
-                        sent, buf = split_first_sentence(buf)
-                        if sent:
-                            await queue.put((sent, False))  # первая фраза — сразу, чтобы заговорить как можно раньше
-                            first_sent = True
-                    if speaker.cancelled:
-                        break
-        except aiohttp.ClientError as e:
-            log.error("brain недоступен: %s", e)
-            buf = "[sigh] Ой, у меня что-то с головой. Мозг не отвечает, проверь, пожалуйста, сервис."
-        if buf.strip():
+                if r.status != 200:
+                    log.error("brain ответил %s: %s", r.status, (await r.text())[:300])
+                    failed = True
+                else:
+                    async for raw in r.content:
+                        if speaker.cancelled:
+                            break
+                        d, err = parse_stream_line(raw)
+                        if err:
+                            log.error("brain: %s", err)
+                            failed = True
+                            break
+                        if d is None:
+                            continue
+                        for tc in d.get("tool_calls") or []:
+                            merge_tool_call(calls, tc)
+                        delta = d.get("content") or ""
+                        if not delta:
+                            continue
+                        if "first_token_s" not in timings:
+                            timings["first_token_s"] = round(time.time() - timings["_t0"], 2)
+                        full += delta
+                        buf += delta
+                        if first_step and not first_sent and self.last_tag and \
+                                buf.lstrip().startswith(f"[{self.last_tag}]") and len(buf.strip()) > len(self.last_tag) + 2:
+                            buf = buf.lstrip()[len(self.last_tag) + 2:]  # та же эмоция, что в прошлый раз, — не повторяем
+                        if not first_sent:
+                            sent, buf = split_first_sentence(buf)
+                            if sent:
+                                await queue.put((sent, False))  # первая фраза — сразу, чтобы заговорить как можно раньше
+                                first_sent = True
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:  # общий таймаут aiohttp — TimeoutError, не ClientError
+            log.error("brain недоступен: %r", e)
+            failed = True
+        if failed:
+            buf = (buf.strip() + " " + BRAIN_FAIL_PHRASE).strip()
+        if buf.strip() and not speaker.cancelled:
             await queue.put((buf.strip(), False))  # остаток одним куском: меньше пауз между фразами
-        return full.strip(), [calls[i] for i in sorted(calls)], False
+        if failed or speaker.cancelled:
+            return full.strip(), [], failed
+        return full.strip(), [calls[i] for i in sorted(calls)], failed
 
     async def stop(self):
         if self.speaker:

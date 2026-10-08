@@ -99,3 +99,77 @@ def test_step_ignores_reasoning_and_keepalive_lines(ks):
     lines = [": keep-alive\n", "\n", sse({"reasoning_content": "думаю..."}), sse({"content": "Ага, поняла тебя."})]
     ((content, _, _), _), _ = run_step(ks, FakeResponse(200, lines))
     assert content == "Ага, поняла тебя."
+
+
+def queued_text(items):
+    return " ".join(i[0] for i in items)
+
+
+def test_step_http_error_says_so_aloud(ks):
+    ((content, calls, failed), items), _ = run_step(ks, FakeResponse(503, body='{"error":"Loading model"}'))
+    assert failed and calls == [] and content == ""
+    assert "Мозг не отвечает" in queued_text(items)
+
+
+def test_step_timeout_is_handled(ks):
+    # общий таймаут aiohttp — TimeoutError, а не ClientError: раньше он ронял ход и оставлял озвучку висеть
+    ((content, calls, failed), items), _ = run_step(ks, TimeoutError())
+    assert failed and "Мозг не отвечает" in queued_text(items)
+
+
+def test_step_connection_error_is_handled(ks):
+    import aiohttp
+    ((_, _, failed), items), _ = run_step(ks, aiohttp.ClientConnectionError("refused"))
+    assert failed and "Мозг не отвечает" in queued_text(items)
+
+
+def test_step_error_event_in_stream(ks):
+    lines = [sse({"content": "Сейчас"}), sse(raw='{"error": {"code": 500, "message": "context overflow"}}')]
+    ((content, calls, failed), items), _ = run_step(ks, FakeResponse(200, lines))
+    assert failed and content == "Сейчас"
+    assert queued_text(items).startswith("Сейчас") and "Мозг не отвечает" in queued_text(items)
+
+
+def test_step_broken_stream_drops_half_tool_call(ks):
+    import aiohttp
+    lines = [sse({"content": "Включаю."}),
+             sse({"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "music_play", "arguments": "{\"qu"}}]})]
+    resp = FakeResponse(200, lines, error=aiohttp.ClientPayloadError("oops"))
+    ((content, calls, failed), _), _ = run_step(ks, resp)
+    assert failed and calls == []  # половину команды не исполняем
+
+
+def test_step_skips_malformed_and_usage_only_lines(ks):
+    lines = [sse(raw="{oops"), sse(raw='{"choices": [], "usage": {"total_tokens": 5}}'), sse(raw="[1, 2]"),
+             sse({"content": "Всё хорошо, я тут."}), "data: [DONE]\n"]
+    ((content, _, failed), _), _ = run_step(ks, FakeResponse(200, lines))
+    assert not failed and content == "Всё хорошо, я тут."
+
+
+def test_step_cancelled_returns_no_calls_and_no_speech(ks):
+    lines = [sse({"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "music_status", "arguments": "{}"}}]})]
+    ((content, calls, failed), items), _ = run_step(ks, FakeResponse(200, lines), cancelled=True)
+    assert calls == [] and items == [] and not failed
+
+
+def test_step_does_not_repeat_last_emotion_tag(ks):
+    ks.last_tag = "laughing"
+    lines = [sse({"content": "[laughing] Ну ты и шутник! "}), sse({"content": "Ладно."})]
+    ((content, _, _), items), _ = run_step(ks, FakeResponse(200, lines))
+    assert content.startswith("[laughing]")  # в историю — как сгенерировано
+    assert items[0][0] == "Ну ты и шутник!"
+
+
+def test_parse_stream_line():
+    assert core.parse_stream_line(b"data: [DONE]") == (None, None)
+    assert core.parse_stream_line(b": ping") == (None, None)
+    assert core.parse_stream_line('data: {"choices":[{"delta":{"content":"ё"}}]}'.encode()) == ({"content": "ё"}, None)
+    d, err = core.parse_stream_line(b'data: {"error": "boom"}')
+    assert d is None and "boom" in err
+
+
+def test_merge_tool_call_without_index_defaults_to_zero():
+    calls = {}
+    core.merge_tool_call(calls, {"function": {"name": "read_more"}})
+    core.merge_tool_call(calls, {"function": {"arguments": "{}"}})
+    assert calls[0]["function"] == {"name": "read_more", "arguments": "{}"}
