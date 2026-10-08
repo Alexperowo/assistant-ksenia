@@ -187,6 +187,23 @@ class ThinkFilter:
         return rest
 
 
+# 2-битный мозг иногда пишет числа по-английски: «плюс thirteen», «plus seventeen» (живой тест 2026-10-08)
+EN_NUMS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+           "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+           "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30,
+           "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
+EN_NUM_RE = re.compile(r"\b(?:(plus|minus)\s+)?(" + "|".join(sorted(EN_NUMS, key=len, reverse=True)) +
+                       r")(?:[\s-]+(one|two|three|four|five|six|seven|eight|nine))?\b", re.I)
+
+
+def fix_english_numbers(text: str) -> str:
+    def rep(m):
+        n = EN_NUMS[m.group(2).lower()] + (EN_NUMS[m.group(3).lower()] if m.group(3) else 0)
+        sign = {"plus": "плюс ", "minus": "минус "}.get((m.group(1) or "").lower(), "")
+        return f"{sign}{n}"
+    return EN_NUM_RE.sub(rep, text)
+
+
 def clean_for_speech(text: str, verbatim: bool = False) -> str:
     """Убрать разметку и эмодзи; оставить только разрешённые пометки эмоций.
 
@@ -196,7 +213,7 @@ def clean_for_speech(text: str, verbatim: bool = False) -> str:
         t = m.group(1).strip().lower()
         return f"[{t}]" if t in ALLOWED_TAGS else ""
     if not verbatim:
-        text = strip_thinking(text)
+        text = fix_english_numbers(strip_thinking(text))
     if verbatim:
         text = re.sub(r"[\[\]]", " ", text)
         text = re.sub(r"https?://\S+", " ссылка ", text)
@@ -1044,7 +1061,9 @@ STOP_PHRASES = {_words(w) for w in ("стоп", "хватит", "отбой", "�
 
 
 def is_stop(text: str) -> bool:
-    return _words(text) in STOP_PHRASES
+    # GigaAM иногда пишет «Stop.» латиницей и «СStop.» (живой тест 2026-10-08)
+    t = re.sub(r"\b[сc]?stop\b", "стоп", _words(text))
+    return t in STOP_PHRASES
 
 
 def is_goodbye(text: str) -> bool:
@@ -1146,7 +1165,7 @@ class Conversation:
                 if speaker.get("owner") is False and voicectl.STATE["mode"] == "owner_only":
                     log.info("Чужой голос (%.2f) — режим «только Александр», не отвечаю: %s", speaker.get("score", 0), text)
                     continue
-                if is_stop(text) and not music._state.get("station"):
+                if is_stop(text) and not music.playing():
                     # «стоп» без музыки — закончить разговор молча (раньше Ксения отвечала и спрашивала ещё);
                     # при музыке «стоп» уходит мозгу — скорее всего, это про музыку
                     log.info("«%s» — разговор окончен", text)
@@ -1158,6 +1177,11 @@ class Conversation:
                 self.turns += 1
                 await deliver_waiting()  # находка помощника или напоминание — рассказать до следующего «слушаю»
                 if is_goodbye(text) or self.turns >= CONFIG.get("max_turns", 50):
+                    return
+                if music.playing():
+                    # играет музыка: не ждать следующую реплику — пока слушаем, наушники в режиме гарнитуры,
+                    # а музыка приглушена; Александр слышал её еле-еле (живой тест 2026-10-08)
+                    log.info("Играет музыка — разговор окончен, музыка громко")
                     return
         except asyncio.CancelledError:
             pass

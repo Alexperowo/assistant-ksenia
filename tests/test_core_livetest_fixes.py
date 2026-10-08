@@ -30,3 +30,14 @@ def test_recent_user_text_takes_last_two_without_service_notes():
     t = ks.recent_user_text()
     assert t == "напомни мне позвонить через пять минут"
     assert core.asked_for("remind_set", t)
+
+
+def test_latin_stop_from_gigaam():
+    assert core.is_stop("Stop.") and core.is_stop("СStop.") and core.is_stop("Ксения, stop")
+    assert not core.is_stop("stop the music now")
+
+
+def test_english_numbers_become_digits():
+    assert core.clean_for_speech("сейчас плюс thirteen, от plus four до plus eleven") == "сейчас плюс 13, от плюс 4 до плюс 11"
+    assert core.clean_for_speech("twenty-five градусов") == "25 градусов"
+    assert core.clean_for_speech("Someone is here") == "Someone is here"

@@ -187,10 +187,19 @@ async def call(name, args, session):
         await asyncio.sleep(0.6)
         return {"ok": p.returncode == 0, "action": args.get("action"), "window": before}
     if name == "app_menu":
+        # при спящем мониторе Plasma ждёт видеокарту и не отвечает на D-Bus (живой тест 2026-10-08) — будим;
+        # меню открывают, чтобы им пользоваться, поэтому монитор обратно не усыпляем
+        if await asyncio.to_thread(screen._dpms_is_off):
+            await asyncio.to_thread(screen._run, "kscreen-doctor", "--dpms", "on", timeout=5)
+            await asyncio.sleep(1.5)
         p = await asyncio.create_subprocess_exec("qdbus6", "org.kde.plasmashell", "/PlasmaShell",
                                                  "org.kde.PlasmaShell.activateLauncherMenu",
                                                  stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        await p.wait()
+        try:
+            await asyncio.wait_for(p.wait(), 6)
+        except asyncio.TimeoutError:
+            p.kill()
+            return {"ok": False, "error": "панель Plasma не ответила"}
         return {"ok": p.returncode == 0, "note": "меню открыто, в нём сразу поиск: можно вписать название (ui_type)"}
     if name == "window_read":
         res = await _helper("read")

@@ -211,3 +211,23 @@ def test_mic_lost_mid_phrase_keeps_what_was_said(rec):
 def test_mic_stalls(rec):
     audio, info = rec(pcm(noise(0.5)), stall=True)
     assert audio is None and info["reason"] == "mic_lost"
+
+
+def test_hanging_phrase_waits_even_if_intonation_says_done(rec, monkeypatch):
+    # «Расскажи мне…» — Smart Turn уверен (0.99), но фраза оборвана на «мне»: ждём, и продолжение попадает в запись
+    texts = iter(["Расскажи мне.", "Расскажи мне какой сегодня день недели."])
+    monkeypatch.setattr(voice_in.Ear, "model", object(), raising=False)
+    monkeypatch.setattr(voice_in.Ear, "transcribe", lambda self, pcm: next(texts), raising=False)
+    (audio, info), ft = run_with_turn(rec, monkeypatch,
+                                      pcm(noise(0.5), speech(0.8), np.zeros(int(RATE * 1.2)), speech(1.0), noise(3.0)),
+                                      [0.99, 0.99])
+    assert info["turn_text"][0].endswith("мне.")
+    assert info["audio_s"] == pytest.approx(0.5 + 0.8 + 1.2 + 1.0 + 0.2, abs=0.05)
+
+
+def test_hanging_words():
+    assert voice_in.hanging("Расскажи мне.")
+    assert voice_in.hanging("Просто слишком короткие фразы,")
+    assert voice_in.hanging("отправить сообщение, э-э")
+    assert not voice_in.hanging("Включи русский рок.")
+    assert not voice_in.hanging("")

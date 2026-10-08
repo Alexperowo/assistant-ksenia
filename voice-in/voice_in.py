@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+import re
 import subprocess
 import time
 import urllib.parse
@@ -102,6 +103,25 @@ def fix_name(t: str) -> str:
     return re.sub(NAME_SLIPS, "Ксения", t, flags=re.IGNORECASE)
 
 
+# Фраза, оборванная на этом слове, явно не закончена: «расскажи мне…», «включи…», «а потом и…», «э-э…»
+HANGING_WORDS = set("""и а но или либо что чтобы как какой какая какое какие каким который которая где когда куда откуда
+если потому поэтому то это этот эта мне меня мной тебе тебя ты я он она мы вы они его её их ему ей им
+в во на с со к ко по о об обо про за из от до для у при без над под через между перед после около
+ну вот так типа короче значит э ээ эээ э-э эм м мм ммм а-а слушай скажи расскажи давай включи открой найди
+покажи напиши посмотри поставь сделай прочитай прочти отправь узнай запусти не очень самый ещё еще уже""".split())
+
+
+def hanging(text: str) -> bool:
+    """Распознанное в паузе обрывается так, что продолжение почти наверняка будет."""
+    t = text.strip().lower()
+    if not t:
+        return False
+    if t[-1] in ",-—:;" or t.endswith("..."):
+        return True
+    words = re.findall(r"[\w-]+", t)
+    return bool(words) and words[-1].strip("-") in HANGING_WORDS
+
+
 class Ear:
     def __init__(self):
         t0 = time.time()
@@ -147,6 +167,18 @@ class Ear:
         except Exception:
             pass
 
+    def turn_check(self, pcm16: np.ndarray):
+        """(вероятность «договорил» по интонации, распознанный пока текст). Без модели — (1.0, «»)."""
+        turn = getattr(self, "turn", None)
+        p = turn.complete(pcm16) if turn else 1.0
+        text = ""
+        if getattr(self, "model", None) is not None:
+            try:
+                text = self.transcribe(pcm16)
+            except Exception as e:
+                log.warning("распознавание в паузе: %r", e)
+        return p, text
+
     def transcribe(self, pcm16: np.ndarray):
         audio = pcm16.astype(np.float32) / 32768.0
         if self.engine == "gigaam":
@@ -181,7 +213,8 @@ class Ear:
             "parec", "-d", source, "--raw", f"--rate={RATE}", "--channels=1", "--format=s16le",
             "--latency-msec=20", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         frames, speech_started, silent_ms, noise, voiced_win = [], False, 0, None, []
-        turn, turn_checked, turn_probs = getattr(self, "turn", None), False, []
+        smart = CONFIG.get("smart_turn", True)
+        turn_checked, turn_probs, turn_texts = False, [], []
         t_start = time.time()
         t_speech = None
         try:
@@ -233,14 +266,17 @@ class Ear:
                         turn_checked = False
                     if elapsed > max_s:
                         break
-                    if turn and not turn_checked and silent_ms >= CONFIG.get("turn_check_ms", 300):
-                        # короткая пауза: договорил ли? (Smart Turn; иначе ждём до turn_wait_ms тишины)
+                    if smart and not turn_checked and silent_ms >= CONFIG.get("turn_check_ms", 800):
+                        # пауза: договорил ли? Интонация (Smart Turn) + смысл (на чём оборвалась фраза);
+                        # если нет — ждём продолжения до turn_wait_ms тишины
                         turn_checked = True
-                        p = await asyncio.to_thread(turn.complete, np.concatenate(frames))
+                        p, partial = await asyncio.to_thread(self.turn_check, np.concatenate(frames))
                         turn_probs.append(round(p, 2))
-                        if p >= CONFIG.get("turn_threshold", 0.5):
+                        if partial:
+                            turn_texts.append(partial[-40:])
+                        if p >= CONFIG.get("turn_threshold", 0.5) and not hanging(partial):
                             break
-                    if silent_ms >= (CONFIG.get("turn_wait_ms", 2000) if turn else silence_ms):
+                    if silent_ms >= (CONFIG.get("turn_wait_ms", 2000) if smart else silence_ms):
                         break
         finally:
             rec.kill()
@@ -252,7 +288,8 @@ class Ear:
         if cut:
             pcm = pcm[:-cut]
         return pcm, {"speech_start_s": round(t_speech - t_start, 2), "audio_s": round(len(pcm) / RATE, 2),
-                     **({"turn_p": turn_probs} if turn_probs else {})}
+                     **({"turn_p": turn_probs} if turn_probs else {}),
+                     **({"turn_text": turn_texts} if turn_texts else {})}
 
 
 ear: Ear = None

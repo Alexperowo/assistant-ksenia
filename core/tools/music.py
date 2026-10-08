@@ -273,6 +273,7 @@ async def _play_tracks(tracks, label):
     await _ipc("set_property", "pause", False)
     _state["playlist"] = [_track_name(tracks[0])]
     _state["station"] = f"Яндекс Музыка: {label}"
+    _state["paused"] = False
     await _apply_volume()
     _start_append(gen, [(t, None) for t in tracks[1:]], lambda t, _: _track_name(t))
 
@@ -337,6 +338,7 @@ async def _play_book(album_id, chapter=0, seconds=0.0):
     await _ipc("set_property", "pause", False)
     _state["playlist"] = [None] * chapter + [f"{title}, глава {chapter + 1}"]
     _state["station"] = f"Аудиокнига: {title}"
+    _state["paused"] = False
     await _apply_volume()
 
     _start_append(gen, [(t, i) for i, t in enumerate(tracks[chapter + 1:chapter + 40], start=chapter + 1)],
@@ -361,6 +363,7 @@ async def _play_station(st):
     await _ipc("loadfile", st["url_resolved"], "replace")
     await _ipc("set_property", "pause", False)
     _state["station"] = st["name"]
+    _state["paused"] = False
     await _apply_volume()
 
 
@@ -370,6 +373,11 @@ async def _apply_volume():
 
 
 _duck_depth = 0  # вложенность: разговор + реплика внутри него не должны вернуть громкость раньше времени
+
+
+def playing() -> bool:
+    """Музыка или книга играет (не выключена и не на паузе)."""
+    return bool(_state["station"]) and not _state.get("paused")
 
 
 async def duck(on: bool):
@@ -457,8 +465,10 @@ async def call(name: str, args: dict, session) -> dict:
             await save_book_position()
         if a == "pause":
             await _ipc("set_property", "pause", True)
+            _state["paused"] = True
         elif a == "resume":
             await _ipc("set_property", "pause", False)
+            _state["paused"] = False
         elif a == "stop":
             _new_playback()
             await _ipc("stop")
