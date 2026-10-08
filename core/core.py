@@ -478,7 +478,8 @@ class Speaker:
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             log.error("voice-out недоступен или оборвал поток: %r", e)
         except OSError as e:  # pacat закрылся (наушники отключились) — BrokenPipe/ConnectionReset при drain
-            log.error("плеер закрылся: %r", e)
+            if not self.cancelled:  # после «замолчи» плеер закрыт нарочно
+                log.error("плеер закрылся: %r", e)
             await self._drop_player()
         except Exception:
             log.exception("сбой озвучки")
@@ -517,6 +518,23 @@ class Speaker:
                 await self._drop_player()
             except Exception:
                 pass
+
+    async def set_volume(self, percent: int):
+        """Громкость своей озвучки (живой режим: тише, пока Александр говорит; обратно — если это было «ага»)."""
+        p = self.player
+        if p is None or isinstance(p, ClientPlayer) or p.returncode is not None:
+            return
+        try:
+            out = (await asyncio.to_thread(subprocess.run, ["pactl", "list", "sink-inputs"], capture_output=True,
+                                           text=True, timeout=3)).stdout
+        except (OSError, subprocess.SubprocessError):
+            return
+        for block in out.split("Sink Input #")[1:]:
+            if f'application.process.id = "{p.pid}"' in block:
+                idx = block.split("\n", 1)[0].strip()
+                await asyncio.to_thread(subprocess.run, ["pactl", "set-sink-input-volume", idx, f"{percent}%"],
+                                        capture_output=True, timeout=3)
+                return
 
     async def cancel(self):
         self.cancelled = True
@@ -1085,7 +1103,7 @@ STOP_PHRASES = {_words(w) for w in ("стоп", "хватит", "отбой", "�
 
 def is_stop(text: str) -> bool:
     # GigaAM иногда пишет «Stop.» латиницей и «СStop.» (живой тест 2026-10-08)
-    t = re.sub(r"\b[сc]?stop\b", "стоп", _words(text))
+    t = re.sub(r"\b(?:[сc]?stop|[сc]top|top)\b", "стоп", _words(text))
     return t in STOP_PHRASES
 
 
@@ -1238,11 +1256,28 @@ HOLD = {_words(w) for w in ("подожди", "погоди", "постой", "�
 
 
 def is_hold(text: str) -> bool:
-    return re.sub(r"\b[сc]?stop\b", "стоп", _words(text)) in HOLD
+    return re.sub(r"\b(?:[сc]?stop|[сc]top|top)\b", "стоп", _words(text)) in HOLD
+
+
+# Реакции слушателя: человек рассказывает дальше, а не отвечает на них (живой тест 2026-10-08:
+# «да, серьёзно», «интересно», «ничего себе», «рассказывай» обрывали рассказ про Рим раз за разом)
+FEEDBACK_WORDS = set("""ага угу да да-да ну так хм м мм ммм ок окей понятно ясно понял поняла понимаю интересно
+интересненько круто класс классно здорово отлично супер вау ого ох ух ты ничего себе вот это надо же серьёзно
+правда правильно верно конечно хорошо ладно прикольно забавно обалдеть офигеть ясненько угу-угу ага-ага
+рассказывай рассказывай-рассказывай продолжай дальше давай слушаю внимательно я тебя буду слушать ещё же
+нет не ксения""".replace("ё", "е").split())
+
+
+def is_feedback(text: str) -> bool:
+    """Поддакивание или «продолжай»: не вопрос и все слова — из реакций слушателя."""
+    if "?" in text:
+        return False
+    words = _words(text).split()
+    return 0 < len(words) <= 8 and all(w in FEEDBACK_WORDS for w in words)
 
 
 def is_backchannel(text: str) -> bool:
-    return _words(text) in BACKCHANNEL
+    return _words(text) in BACKCHANNEL or is_feedback(text)
 
 
 class LiveConversation(Conversation):
@@ -1254,9 +1289,15 @@ class LiveConversation(Conversation):
     def __init__(self):
         super().__init__()
         self.cur = None
+        self.ducked = None  # озвучка, приглушённая на время его речи
 
     def busy(self):
         return self.cur is not None and not self.cur.done()
+
+    async def unduck(self):
+        sp, self.ducked = self.ducked, None
+        if sp is not None and not sp.cancelled:
+            await sp.set_volume(100)
 
     @staticmethod
     def speaking():
@@ -1264,6 +1305,7 @@ class LiveConversation(Conversation):
         return sp is not None and bool(sp.recorded) and not sp.cancelled
 
     async def cancel_turn(self):
+        self.ducked = None
         if self.busy():
             await ks.stop()
             self.cur.cancel()
@@ -1317,9 +1359,10 @@ class LiveConversation(Conversation):
                     kind = ev.get("type")
                     if kind in ("speech_start", "speech_long"):
                         last = time.time()
-                        if kind == "speech_long" and self.busy() and self.speaking():
-                            log.info("Александр перебил — Ксения замолкает")
-                            await ks.stop()
+                        if kind == "speech_long" and self.busy() and self.speaking() and not self.ducked:
+                            # как человек: не обрывать на полуслове, а говорить тише и понять, что он сказал
+                            self.ducked = ks.speaker
+                            await ks.speaker.set_volume(CONFIG.get("live_duck_percent", 30))
                         continue
                     if kind == "error":
                         log.warning("Живой режим: %s", ev)
@@ -1332,18 +1375,26 @@ class LiveConversation(Conversation):
                     text = str(ev.get("text") or "").strip()
                     speaker = ev.get("speaker") or {}
                     if len(text) < 2:
+                        await self.unduck()  # шум, а не слова — рассказ дальше в полный голос
                         continue
                     if speaker.get("owner") is False and voicectl.STATE["mode"] == "owner_only":
                         log.info("Чужой голос — режим «только Александр»: %s", text)
+                        await self.unduck()
                         continue
-                    if self.busy() and self.speaking() and is_backchannel(text):
-                        continue  # «ага» — слушает, не перебивает
+                    if self.busy() and is_backchannel(text):
+                        # «ага», «интересно», «рассказывай» — слушает: громкость обратно, рассказ дальше
+                        log.info("Поддакивание — Ксения продолжает: %s", text)
+                        await self.unduck()
+                        continue
+                    if self.busy() and self.speaking():
+                        log.info("Александр перебил — Ксения замолкает")
                     note = agent_note(text)
                     if note is not None:
                         last_reply = next((m.get("content") or "" for m in reversed(ks.history)
                                            if m.get("role") == "assistant" and m.get("content")), "")
                         save_agent_note(note, last_reply)
                         log.info("Заметка для агента: %s", note)
+                        await self.unduck()
                         if not self.busy():
                             await say_notice("Записала.")
                         continue

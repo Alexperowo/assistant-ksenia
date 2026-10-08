@@ -174,3 +174,28 @@ def test_live_hold_words_do_not_get_answered(live_env):
 def test_hold_words():
     assert core.is_hold("Подожди.") and core.is_hold("Ксения, погоди!") and core.is_hold("Секундочку")
     assert not core.is_hold("Подожди, а как звали лисичку?")
+
+
+def test_feedback_detection():
+    for t in ("Да, серьёзно.", "Ага, ага, понял тебя.", "Интересно.", "Ничего себе!", "Круто.",
+              "Продолжай, продолжай.", "Нет, ты рассказывай, рассказывай, я тебя буду слушать.", "Давай, рассказывай."):
+        assert core.is_backchannel(t), t
+    for t in ("А ты в этом уверен?", "Слушай, а расскажи лучше про Млечный путь.", "Подожди, а ты слышала про Войджер?",
+              "Включи музыку."):
+        assert not core.is_backchannel(t), t
+    assert core.is_hold("Сtop.") and core.is_hold("top.")
+
+
+def test_live_feedback_during_speech_keeps_talking(live_env, monkeypatch):
+    stops = []
+
+    async def fake_stop():
+        stops.append(1)
+    monkeypatch.setattr(core.ks, "stop", fake_stop)
+    monkeypatch.setattr(core.LiveConversation, "speaking", staticmethod(lambda: True))
+
+    async def slow_turn(text, timings, speaker=None, **kw):
+        await asyncio.sleep(0.5)
+    monkeypatch.setattr(core, "turn", slow_turn)
+    turns, said = live_env([{"type": "ready"}, utt("Расскажи про Рим."), 0.05, utt("Интересно."), utt("Круто.")])
+    assert stops == []  # поддакивания не обрывают рассказ
