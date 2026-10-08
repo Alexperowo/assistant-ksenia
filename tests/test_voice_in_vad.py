@@ -133,6 +133,49 @@ def test_quick_word_right_after_loud_beep_tail(rec):
     assert info["speech_start_s"] == pytest.approx(1.07, abs=0.05)
 
 
+class FakeTurn:
+    """Smart Turn: «не договорил» на первой паузе, «договорил» на следующих."""
+    def __init__(self, answers):
+        self.answers, self.calls = list(answers), 0
+
+    def complete(self, pcm):
+        self.calls += 1
+        return self.answers.pop(0) if self.answers else 0.9
+
+
+def run_with_turn(rec, monkeypatch, data, answers):
+    ft = FakeTurn(answers)
+    monkeypatch.setattr(voice_in.Ear, "turn", ft, raising=False)
+    return rec(data), ft
+
+
+def test_turn_mid_phrase_pause_does_not_cut(rec, monkeypatch):
+    # пауза 1 с посреди фразы: модель говорит «не договорил» — ждём, вторая часть попадает в запись
+    (audio, info), ft = run_with_turn(rec, monkeypatch,
+                                      pcm(noise(0.5), speech(1.0), np.zeros(int(RATE * 1.0)), speech(1.0), noise(2.5)),
+                                      [0.1, 0.9])
+    assert info["turn_p"] == [0.1, 0.9]
+    assert info["audio_s"] == pytest.approx(0.5 + 1.0 + 1.0 + 1.0 + 0.2, abs=0.05)
+
+
+def test_turn_complete_ends_fast(rec, monkeypatch):
+    (audio, info), ft = run_with_turn(rec, monkeypatch, pcm(noise(0.5), speech(1.0), noise(2.5)), [0.95])
+    assert ft.calls == 1
+    assert info["audio_s"] == pytest.approx(0.5 + 1.0 + 0.2, abs=0.05)  # конец через 300 мс, а не 700
+
+
+def test_turn_incomplete_waits_then_ends(rec, monkeypatch):
+    (audio, info), ft = run_with_turn(rec, monkeypatch, pcm(noise(0.5), speech(1.0), noise(3.0)), [0.1])
+    assert ft.calls == 1 and info["audio_s"] == pytest.approx(0.5 + 1.0 + 0.2, abs=0.05)
+    # ушло 2 с тишины ожидания, хвост обрезан до 200 мс
+
+
+def test_name_slips_fixed():
+    assert voice_in.fix_name("Сеня, посмотри на экран") == "Ксения, посмотри на экран"
+    assert voice_in.fix_name("привет, ксенья") == "привет, Ксения"
+    assert voice_in.fix_name("Арсеня пришёл") == "Арсеня пришёл"
+
+
 def test_short_click_is_not_speech(rec):
     audio, info = rec(pcm(noise(1.0), speech(0.06, amp=0.5), noise(3.0)))
     assert audio is None and info["reason"] == "no_speech"

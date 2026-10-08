@@ -136,3 +136,20 @@ def test_empty_after_cleaning_is_not_sent(players):
     session = FakeSession()
     speak_all(session, ["😀", "**", "[smiles]"])
     assert session.requests == []
+
+
+def test_warm_opens_player_with_silence_before_speech(players):
+    # канал Bluetooth будится тишиной заранее; речь идёт в тот же плеер, не во второй
+    made, plan = players
+    session = FakeSession(FakeResponse(200, chunks=[b"\x01\x02"]))
+    sp = core.Speaker(session)
+
+    async def go():
+        await sp.warm()
+        await sp.speak("Привет.", {"_t0": 0})
+        await sp.finish()
+
+    asyncio.run(go())
+    assert len(made) == 1
+    silence = 44100 * core.CONFIG.get("bt_warm_ms", 400) // 1000 * 2
+    assert made[0].stdin.data == b"\x00" * silence + b"\x01\x02"

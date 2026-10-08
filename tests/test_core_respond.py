@@ -18,6 +18,9 @@ class FakeSpeaker:
         self.finished = False
         FakeSpeaker.instances.append(self)
 
+    async def warm(self):
+        pass
+
     async def speak(self, text, timings, verbatim=False):
         if not self.cancelled:
             self.spoken.append((text, verbatim))

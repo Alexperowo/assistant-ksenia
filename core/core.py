@@ -378,7 +378,21 @@ class Speaker:
             self.player = await asyncio.create_subprocess_exec(
                 *args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL)
-            hub.emit({"type": "state", "state": "speaking", "where": "pc"})
+
+    async def warm(self):
+        """Открыть выход заранее, пока мозг думает: после возврата наушников из HFP в A2DP канал
+        Bluetooth поднимается не сразу, и начало ответа «зажёвывалось» (живой тест 2026-10-08).
+        Тишина в начале будит канал; к первой фразе он уже играет."""
+        if self.output == "client" and hub.connected():
+            return
+        try:
+            await self._ensure_player()
+            ms = CONFIG.get("bt_warm_ms", 400)
+            self.player.stdin.write(b"\x00\x00" * (44100 * ms // 1000))
+            await self.player.stdin.drain()
+        except Exception as e:
+            log.warning("выход не открыт заранее: %r", e)
+            await self._drop_player()
 
     async def _drop_player(self):
         """Закрыть сломанный плеер: следующая фраза откроет новый (возможно, уже в другой выход)."""
@@ -420,6 +434,8 @@ class Speaker:
                         log.error("voice-out %s: %s", r.status, (await r.text())[:200])
                         return
                     await self._ensure_player()
+                    if not written and not isinstance(self.player, ClientPlayer):
+                        hub.emit({"type": "state", "state": "speaking", "where": "pc"})
                     async for chunk in r.content.iter_chunked(8192):
                         if self.cancelled:
                             return
@@ -677,6 +693,7 @@ class Ksenia:
         hub.emit({"type": "state", "state": "thinking"})
         speaker = Speaker(self.session, output=output)
         self.speaker = speaker
+        await speaker.warm()
         queue: asyncio.Queue = asyncio.Queue()
 
         async def tts_worker():

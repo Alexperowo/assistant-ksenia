@@ -93,6 +93,15 @@ def clean_gigaam(t: str) -> str:
     return " ".join(t.split()).strip()
 
 
+# Микрофон JBL глушит тихое начало слова: «Ксения» доходит как «Сеня» (живой тест 2026-10-08)
+NAME_SLIPS = r"(?<!\w)(?:сеня|сенея|сения|сенья|ксеня|ксенья|ксенея|ксени)(?!\w)"
+
+
+def fix_name(t: str) -> str:
+    import re
+    return re.sub(NAME_SLIPS, "Ксения", t, flags=re.IGNORECASE)
+
+
 class Ear:
     def __init__(self):
         t0 = time.time()
@@ -114,6 +123,9 @@ class Ear:
         except Exception as e:
             self.vp = None
             log.warning("Отпечаток голоса недоступен: %r", e)
+        import turn
+        self.turn = turn.load(log) if CONFIG.get("smart_turn", True) else None
+        log.info("Конец реплики: %s", "Smart Turn v3.2" if self.turn else f"тишина {CONFIG.get('silence_ms', 800)} мс")
         self.lock = asyncio.Lock()
         self.busy = False
 
@@ -123,16 +135,22 @@ class Ear:
 
     @staticmethod
     def _save_debug(frames):
-        # последняя запись микрофона — для разбора (перезаписывается каждый раз)
+        # записи микрофона — для разбора: последняя и 30 последних в logs/listens (только на этом компьютере)
         try:
-            sf.write(os.path.join(ROOT, "..", "logs", "last_listen.wav"), np.concatenate(frames), RATE)
+            pcm = np.concatenate(frames)
+            sf.write(os.path.join(ROOT, "..", "logs", "last_listen.wav"), pcm, RATE)
+            d = os.path.join(ROOT, "..", "logs", "listens")
+            os.makedirs(d, exist_ok=True)
+            sf.write(os.path.join(d, time.strftime("%Y%m%d-%H%M%S") + ".wav"), pcm, RATE)
+            for old in sorted(os.listdir(d))[:-30]:
+                os.remove(os.path.join(d, old))
         except Exception:
             pass
 
     def transcribe(self, pcm16: np.ndarray):
         audio = pcm16.astype(np.float32) / 32768.0
         if self.engine == "gigaam":
-            return clean_gigaam(self.model.recognize(audio, sample_rate=RATE) or "")
+            return fix_name(clean_gigaam(self.model.recognize(audio, sample_rate=RATE) or ""))
         segs, info = self.model.transcribe(
             audio, language=CONFIG.get("language", "ru"), beam_size=CONFIG.get("beam_size", 5),
             vad_filter=False, condition_on_previous_text=False,
@@ -143,7 +161,7 @@ class Ear:
         if any(h in low for h in HALLUCINATIONS) and len(low) < 60:
             log.info("Отброшена типичная галлюцинация Whisper: %s", text)
             return ""
-        return text
+        return fix_name(text)
 
     async def record_utterance(self, source, sink_for_beep, client_gone=lambda: False):
         """Запись до конца реплики: энергетический детектор с адаптивным порогом шума."""
@@ -163,6 +181,7 @@ class Ear:
             "parec", "-d", source, "--raw", f"--rate={RATE}", "--channels=1", "--format=s16le",
             "--latency-msec=20", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         frames, speech_started, silent_ms, noise, voiced_win = [], False, 0, None, []
+        turn, turn_checked, turn_probs = getattr(self, "turn", None), False, []
         t_start = time.time()
         t_speech = None
         try:
@@ -210,7 +229,18 @@ class Ear:
                 else:
                     thr = max(noise * 2.0, CONFIG.get("min_speech_rms", 0.012) * 0.7)
                     silent_ms = silent_ms + 20 if rms < thr else 0
-                    if silent_ms >= silence_ms or elapsed > max_s:
+                    if silent_ms == 0:
+                        turn_checked = False
+                    if elapsed > max_s:
+                        break
+                    if turn and not turn_checked and silent_ms >= CONFIG.get("turn_check_ms", 300):
+                        # короткая пауза: договорил ли? (Smart Turn; иначе ждём до turn_wait_ms тишины)
+                        turn_checked = True
+                        p = await asyncio.to_thread(turn.complete, np.concatenate(frames))
+                        turn_probs.append(round(p, 2))
+                        if p >= CONFIG.get("turn_threshold", 0.5):
+                            break
+                    if silent_ms >= (CONFIG.get("turn_wait_ms", 2000) if turn else silence_ms):
                         break
         finally:
             rec.kill()
@@ -221,7 +251,8 @@ class Ear:
         cut = max(0, silent_ms - 200) * RATE // 1000
         if cut:
             pcm = pcm[:-cut]
-        return pcm, {"speech_start_s": round(t_speech - t_start, 2), "audio_s": round(len(pcm) / RATE, 2)}
+        return pcm, {"speech_start_s": round(t_speech - t_start, 2), "audio_s": round(len(pcm) / RATE, 2),
+                     **({"turn_p": turn_probs} if turn_probs else {})}
 
 
 ear: Ear = None

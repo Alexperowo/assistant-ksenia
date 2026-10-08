@@ -154,6 +154,7 @@ def test_guest_voice_cannot_run_tools_or_confirm(monkeypatch):
     class FakeSpeaker:
         cancelled = False
         def __init__(self, *a, **k): pass
+        async def warm(self): pass
         async def speak(self, *a, **k): pass
         async def finish(self): pass
         async def cancel(self): pass
