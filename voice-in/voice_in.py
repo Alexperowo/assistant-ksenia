@@ -84,11 +84,29 @@ HALLUCINATIONS = ("продолжение следует", "субтитры", "
 BEEP = b"\x00\x00" * int(RATE * 0.35) + make_beep(freq=880, ms=200, vol=0.3)
 
 
+def clean_gigaam(t: str) -> str:
+    """GigaAM e2e оформляет речь как диалог в книге: «— Фраза.— Ещё.» — убираем тире в начале реплик
+    и сдвоенную пунктуацию («.!»)."""
+    import re
+    t = re.sub(r"(^|[.!?…])\s*[—–-]\s+", r"\1 ", t.strip())
+    t = re.sub(r"[.]([!?])", r"\1", t)
+    return " ".join(t.split()).strip()
+
+
 class Ear:
     def __init__(self):
         t0 = time.time()
-        self.model = WhisperModel(CONFIG["model_dir"], device="cuda", compute_type=CONFIG.get("compute_type", "int8_float16"))
-        log.info("Whisper загружен за %.1f с", time.time() - t0)
+        # Движок распознавания: GigaAM v3 e2e-CTC (по замерам 2026-10-08: та же точность 4,0%, в 11 раз быстрее
+        # Whisper, CTC не «выдумывает» текст на шуме) или Whisper (запасной). Переключение — config.json "engine".
+        self.engine = CONFIG.get("engine", "gigaam")
+        if self.engine == "gigaam":
+            import onnx_asr
+            self.model = onnx_asr.load_model(CONFIG.get("gigaam_model", "gigaam-v3-e2e-ctc"),
+                                             providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+            self.model.recognize(np.zeros(RATE, dtype=np.float32), sample_rate=RATE)  # прогрев
+        else:
+            self.model = WhisperModel(CONFIG["model_dir"], device="cuda", compute_type=CONFIG.get("compute_type", "int8_float16"))
+        log.info("Распознавание (%s) загружено за %.1f с", self.engine, time.time() - t0)
         self.lock = asyncio.Lock()
         self.busy = False
 
@@ -106,6 +124,8 @@ class Ear:
 
     def transcribe(self, pcm16: np.ndarray):
         audio = pcm16.astype(np.float32) / 32768.0
+        if self.engine == "gigaam":
+            return clean_gigaam(self.model.recognize(audio, sample_rate=RATE) or "")
         segs, info = self.model.transcribe(
             audio, language=CONFIG.get("language", "ru"), beam_size=CONFIG.get("beam_size", 5),
             vad_filter=False, condition_on_previous_text=False,
