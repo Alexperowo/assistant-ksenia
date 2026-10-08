@@ -24,10 +24,10 @@ from aiohttp import web
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-from tools import confirm, music, screen, vk  # noqa: E402  (инструменты — отдельные модули в core/tools)
+from tools import confirm, desktop, music, screen, vk  # noqa: E402  (инструменты — отдельные модули в core/tools)
 from tools import web as webtool  # noqa: E402  (не путать с aiohttp.web)
 
-TOOL_MODULES = [music, screen, vk, webtool]
+TOOL_MODULES = [music, screen, vk, webtool, desktop]
 TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
 TOOL_INDEX = {sch["function"]["name"]: m for m in TOOL_MODULES for sch in m.SCHEMAS}
 
