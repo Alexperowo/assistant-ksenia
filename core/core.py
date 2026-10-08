@@ -1229,6 +1229,18 @@ BACKCHANNEL = {_words(w) for w in ("ага", "угу", "ага ага", "угу 
                                     "м", "мм", "ммм", "ок", "окей", "так", "ну да", "ага понятно")}
 
 
+# Как люди просят замолчать на полуслове: не «стоп», а «подожди», «погоди», «секунду», «слушай»
+HOLD = {_words(w) for w in ("подожди", "погоди", "постой", "стой", "секунду", "секундочку", "минутку", "минуточку",
+                             "минуту", "слушай", "тихо", "тише", "погоди секунду", "подожди секунду", "подожди минутку",
+                             "ой подожди", "так подожди", "так погоди", "ксения подожди", "ксения погоди",
+                             "слушай подожди", "подожди подожди", "погоди погоди", "стоп", "так стоп", "ксения стоп",
+                             "хватит", "ну хватит", "эй", "алло")}
+
+
+def is_hold(text: str) -> bool:
+    return re.sub(r"\b[сc]?stop\b", "стоп", _words(text)) in HOLD
+
+
 def is_backchannel(text: str) -> bool:
     return _words(text) in BACKCHANNEL
 
@@ -1335,13 +1347,15 @@ class LiveConversation(Conversation):
                         if not self.busy():
                             await say_notice("Записала.")
                         continue
-                    if is_stop(text):
+                    if is_hold(text):
+                        # «подожди», «погоди», «слушай»… — замолчать и молча ждать, что он скажет дальше
                         if self.busy():
-                            await self.cancel_turn()  # замолчать и слушать дальше
+                            await self.cancel_turn()
                             continue
-                        if not music.playing():
+                        if is_stop(text) and not music.playing():
                             log.info("«%s» — живой режим окончен", text)
                             return
+                        continue
                     # новая реплика важнее недоговорённого ответа: перебил или договорил, пока Ксения думала
                     await self.cancel_turn()
                     if voicectl.STATE["enrolling"] > 0 and speaker.get("owner") is not False:

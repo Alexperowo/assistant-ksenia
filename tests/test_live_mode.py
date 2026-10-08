@@ -163,3 +163,14 @@ def test_live_falls_back_when_not_duplex(live_env, monkeypatch):
     monkeypatch.setattr(core.Conversation, "run", fake_run)
     live_env([{"type": "error", "reason": "not_duplex"}])
     assert called == [True]
+
+
+def test_live_hold_words_do_not_get_answered(live_env):
+    turns, said = live_env([{"type": "ready"}, utt("Подожди."), utt("Погоди секунду"), utt("Слушай!"), 0.1,
+                            utt("А как звали лисичку?")])
+    assert turns == ["А как звали лисичку?"]
+
+
+def test_hold_words():
+    assert core.is_hold("Подожди.") and core.is_hold("Ксения, погоди!") and core.is_hold("Секундочку")
+    assert not core.is_hold("Подожди, а как звали лисичку?")
