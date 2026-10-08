@@ -151,3 +151,25 @@ def test_unexpected_error_does_not_leave_worker(ks):
     assert asyncio.run(go()) == []
     assert ks.history[-1]["role"] == "user"
 
+
+
+def test_long_silence_gets_a_filler_not_in_history(ks, monkeypatch):
+    """Мозг думает дольше filler_s — Ксения говорит «Хм, секунду», в историю это не попадает."""
+    monkeypatch.setitem(core.CONFIG, "filler_s", 0.05)
+
+    async def slow_step(budget, queue, speaker, timings, first_step):
+        await asyncio.sleep(0.2)
+        await queue.put(("Ответ.", False))
+        return "Ответ.", [], False
+    ks._step = slow_step
+    asyncio.run(ks.respond("вопрос", {"_t0": 0}))
+    spoken = [t for t, _ in FakeSpeaker.instances[0].spoken]
+    assert spoken[0] in core.Ksenia.FILLERS and spoken[1] == "Ответ."
+    assert all(m.get("content") not in core.Ksenia.FILLERS for m in ks.history)
+
+
+def test_quick_answer_gets_no_filler(ks, monkeypatch):
+    monkeypatch.setitem(core.CONFIG, "filler_s", 0.2)
+    script_steps(ks, [("Быстро.", [])])
+    asyncio.run(ks.respond("вопрос", {"_t0": 0}))
+    assert [t for t, _ in FakeSpeaker.instances[0].spoken] == ["Быстро."]

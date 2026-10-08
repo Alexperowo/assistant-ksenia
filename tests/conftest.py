@@ -29,3 +29,21 @@ if "soundfile" not in sys.modules:
         sf.write = lambda *a, **k: None
         sf.read = lambda *a, **k: (None, 16000)
         sys.modules["soundfile"] = sf
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_writes_to_real_data(monkeypatch, tmp_path):
+    """Тесты не пишут в настоящие журналы Ксении (data/): живой тест журнала решений засорялся прогонами тестов."""
+    try:
+        import live_intent
+        monkeypatch.setattr(live_intent, "DECISIONS_FILE", str(tmp_path / "live_decisions.jsonl"))
+    except ImportError:
+        pass
+    try:
+        import core
+        monkeypatch.setattr(core, "NOTES_FILE", str(tmp_path / "agent_notes.md"))
+    except ImportError:
+        pass

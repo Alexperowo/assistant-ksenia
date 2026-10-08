@@ -164,3 +164,38 @@ def test_gain_scales_samples_across_odd_chunks():
     assert np.frombuffer(out, dtype=np.int16).tolist() == [500, -1000, 1500]
     sp.set_volume(100)
     assert sp._apply_gain(x) == x
+
+
+def test_cancel_fades_out_instead_of_cutting(players):
+    """Перебили посреди фразы: в плеер уходит затухающий хвост, вход закрывается, звук не рвётся на полуслоге."""
+    import numpy as np
+    made, plan = players
+    loud = (np.ones(44100, dtype=np.int16) * 10000).tobytes()  # 1 с ровного звука кусками по 8192 байт
+
+    class SlowContent:
+        async def iter_chunked(self, n):
+            for i in range(0, len(loud), 8192):
+                await asyncio.sleep(0.005)  # голос приходит потоком, а не разом
+                yield loud[i:i + 8192]
+
+    class SlowResponse(FakeResponse):
+        def __init__(self):
+            super().__init__(200)
+            self.content = SlowContent()
+
+    session = FakeSession(SlowResponse())
+    sp = core.Speaker(session)
+
+    async def go():
+        task = asyncio.create_task(sp.speak("Длинная фраза.", {"_t0": 0}))
+        while not made or len(made[0].stdin.data) < 8192 * 2:
+            await asyncio.sleep(0)
+        await sp.cancel()
+        await task
+
+    asyncio.run(go())
+    data = np.frombuffer(bytes(made[0].stdin.data), dtype=np.int16)
+    assert made[0].stdin.closed
+    tail = data[-int(44100 * 0.12):]
+    assert tail[0] > 8000 and abs(int(tail[-1])) < 200  # громкость плавно уходит в ноль
+    assert np.all(np.diff(tail.astype(np.int32)) <= 1)   # без скачков вверх

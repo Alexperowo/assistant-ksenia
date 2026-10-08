@@ -16,5 +16,6 @@
   "max_turns": 50,
   "max_steps": 12,
   "budget_task": 0,
-  "budget_hard": 1024
+  "budget_hard": 1024,
+  "filler_s": 2.0
 }

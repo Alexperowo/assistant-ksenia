@@ -435,6 +435,10 @@ class Speaker:
         self.phrases = []
         self.audio_s = 0.0
         self._play_end = 0.0
+        # мягкое замолкание: при перебивании не обрывать звук на полуслоге, а затухнуть за ~120 мс
+        self._streaming = False
+        self._faded = asyncio.Event()
+        self.started = False
 
     BYTES_PER_S = 44100 * 2
 
@@ -516,6 +520,7 @@ class Speaker:
         text = clean_for_speech(text, verbatim=verbatim)
         if not text or self.cancelled:
             return
+        self.started = True  # речь уже пошла в озвучку — «Хм, секунду» не нужно
         shown = re.sub(r"\[\w+\]\s*", "", text)
         hub.emit({"type": "say", "text": shown})  # текст реплики — на экран планшета
         phrase = None
@@ -545,8 +550,10 @@ class Speaker:
                     await self._ensure_player()
                     if not written and not isinstance(self.player, ClientPlayer):
                         hub.emit({"type": "state", "state": "speaking", "where": "pc"})
+                    self._streaming = True
                     async for chunk in r.content.iter_chunked(8192):
                         if self.cancelled:
+                            await self._fade_out(chunk)
                             return
                         if "first_audio_s" not in timings:
                             timings["first_audio_s"] = round(time.time() - timings["_t0"], 2)
@@ -571,6 +578,9 @@ class Speaker:
             log.exception("сбой озвучки")
             await self._drop_player()
         finally:
+            self._streaming = False
+            if self.cancelled:
+                self._faded.set()  # затухать нечего — cancel() не ждёт
             if phrase is not None:
                 phrase["end"] = self.audio_s
             if written % 2 and self.player and self.player.returncode is None and not self.cancelled:
@@ -621,8 +631,39 @@ class Speaker:
         x = np.frombuffer(data[:cut], dtype=np.int16)
         return (x * self.gain).astype(np.int16).tobytes() if self.gain != 1.0 else data[:cut]
 
+    async def _fade_out(self, chunk: bytes):
+        """Дописать в плеер начало следующего куска звука с затуханием до нуля и закрыть вход: pacat доиграет
+        буфер (~60 мс) и затухание — человек «осекается», а не выключается посреди слога."""
+        try:
+            p = self.player
+            ms = CONFIG.get("fade_ms", 120)
+            if ms > 0 and p is not None and not isinstance(p, ClientPlayer) and p.returncode is None:
+                data = self._carry + chunk
+                n = min(len(data) // 2, 44100 * ms // 1000)
+                if n:
+                    x = np.frombuffer(data[:n * 2], dtype=np.int16).astype(np.float32)
+                    x *= np.linspace(self.gain, 0.0, n, dtype=np.float32)
+                    tail = x.astype(np.int16).tobytes()
+                    p.stdin.write(tail)
+                    self._account(len(tail))
+                    self.recorded.extend(tail)
+                p.stdin.close()
+        except (OSError, ValueError):
+            pass
+        finally:
+            self._faded.set()
+
     async def cancel(self):
         self.cancelled = True
+        p = self.player
+        if self._streaming and p is not None and not isinstance(p, ClientPlayer) and p.returncode is None:
+            # звук идёт прямо сейчас: дать озвучке дописать затухание (следующий кусок приходит за десятки мс),
+            # затем pacat доигрывает его сам; всё ограничено долями секунды
+            try:
+                await asyncio.wait_for(self._faded.wait(), timeout=0.25)
+                await asyncio.wait_for(p.wait(), timeout=0.5)
+            except asyncio.TimeoutError:
+                pass
         await self._drop_player()
 
 
@@ -876,6 +917,7 @@ class Ksenia:
                 await speaker.finish()
 
         worker = asyncio.create_task(tts_worker())
+        filler = asyncio.create_task(self._filler(speaker, queue)) if not internal else None
         self._stream_cut = False
         spoken_all = []
         pending = []  # вызовы инструментов, на которые ещё нет ответа в истории
@@ -928,6 +970,8 @@ class Ksenia:
             await queue.put(None)
             await worker
         finally:
+            if filler:
+                filler.cancel()
             # Перебили или упали посреди хода. История по-прежнему только дописывается, но каждый вызов
             # инструмента обязан получить ответ — иначе следующий запрос к мозгу будет с «висящим» вызовом.
             for c in pending:
@@ -950,6 +994,22 @@ class Ksenia:
         self.recent_offers = (getattr(self, "recent_offers", []) + [getattr(self, "_ended_with_offer", False)])[-3:]
         self._ended_with_offer = False
         return full
+
+    FILLERS = ("Хм, секунду.", "Сейчас посмотрю.", "Так, минутку.", "Сейчас.")
+
+    async def _filler(self, speaker, queue):
+        """Молчание больше filler_s (мозг долго думает или инструмент ищет) — живое «Хм, секунду», как сказал бы
+        человек. Только в голос, мимо истории: кэш мозга не трогаем. Не повторяет одну и ту же фразу подряд."""
+        wait = CONFIG.get("filler_s", 1.8)
+        if wait <= 0:
+            return
+        await asyncio.sleep(wait)
+        if getattr(speaker, "started", False) or speaker.cancelled or not queue.empty():
+            return
+        i = (getattr(self, "_filler_i", -1) + 1) % len(self.FILLERS)
+        self._filler_i = i
+        log.info("Долго думает — говорю «%s»", self.FILLERS[i])
+        await queue.put((self.FILLERS[i], True))
 
     async def _step(self, budget, queue, speaker, timings, first_step):
         """Один запрос к мозгу: речь идёт в озвучку по ходу, вызовы инструментов собираются.
