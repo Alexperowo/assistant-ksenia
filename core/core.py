@@ -94,18 +94,31 @@ def split_first_sentence(buf: str, min_len: int = 12):
     return None, buf
 
 
+def _cut_point(sent: str, limit: int) -> int:
+    """Где резать слишком длинное предложение: по запятой во второй половине, иначе по пробелу, иначе по лимиту."""
+    comma = sent.rfind(", ", 0, limit)
+    if comma > limit // 2:
+        return comma + 1  # запятая остаётся в первом куске
+    space = sent.rfind(" ", 0, limit + 1)
+    return space if space > limit // 3 else limit
+
+
 def split_for_reading(text: str, max_len: int = 220):
-    """Длинный текст -> куски по предложениям (одна озвучка s2 — не больше ~45 с звука)."""
+    """Длинный текст -> куски по предложениям, каждый не длиннее max_len (одна озвучка s2 — не больше ~45 с звука)."""
     parts, cur = [], ""
     for sent in re.split(r"(?<=[.!?…])\s+|\n+", text):
         sent = sent.strip()
         if not sent:
             continue
         while len(sent) > max_len:  # очень длинное предложение режем по запятым/пробелам
-            cut = max(sent.rfind(", ", 0, max_len), sent.rfind(" ", 0, max_len))
-            cut = cut if cut > max_len // 3 else max_len
-            parts.append((cur + " " + sent[:cut]).strip()) if cur else parts.append(sent[:cut].strip())
-            cur, sent = "", sent[cut:].lstrip(", ")
+            room = max_len - len(cur) - 1 if cur else max_len
+            if cur and room < max_len // 3:
+                parts.append(cur)
+                cur, room = "", max_len
+            cut = _cut_point(sent, room)
+            piece = sent[:cut].strip()
+            parts.append(f"{cur} {piece}" if cur else piece)
+            cur, sent = "", sent[cut:].lstrip(" ,")
         if len(cur) + len(sent) + 1 > max_len and cur:
             parts.append(cur)
             cur = sent
