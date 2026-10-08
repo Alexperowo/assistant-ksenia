@@ -188,12 +188,18 @@ class Speaker:
             await self.player.wait()
 
 
+ACTION_PATTERNS = [r"\bвключ", r"\bвыключ", r"\bпостав", r"\bпауз", r"\bпродолж", r"\bчитай", r"\bнайди",
+                   r"\bоткрой", r"\bзакрой", r"\bсделай", r"\bгромче", r"\bтише", r"\bследующ", r"\bпредыдущ",
+                   r"что (сейчас )?играет", r"\bзапусти", r"\bостанов", r"\bнапомни", r"\bнапиши", r"\bотправь",
+                   r"\bбыстрее", r"\bмедленнее", r"\bпереключи", r"\bстоп\b"]
+
 HISTORY_FILE = os.path.join(ROOT, "..", "data", "history.json")
 
 
 class Ksenia:
     def __init__(self):
         self.history = self._load_history()
+        self.window_start = 0
         self.lock = asyncio.Lock()
         self.speaker = None
         self.session = None
@@ -214,8 +220,23 @@ class Ksenia:
             json.dump(self.history[-CONFIG.get("history_keep", 200):], f, ensure_ascii=False, indent=1)
         os.replace(tmp, HISTORY_FILE)
 
+    def _window(self):
+        """Окно истории для мозга. Гибридный Nex пересчитывает всё при любом изменении начала,
+        поэтому окно не скользит каждую реплику, а изредка прыгает вперёд большим шагом."""
+        max_n = CONFIG.get("history_max", 120)
+        if len(self.history) - self.window_start > max_n:
+            self.window_start = len(self.history) - max_n // 2
+        # начало окна — на реплике пользователя (нельзя начинать с ответа инструмента)
+        while self.window_start < len(self.history) and self.history[self.window_start]["role"] != "user":
+            self.window_start += 1
+        return self.history[self.window_start:]
+
     def budget_for(self, text: str) -> int:
-        # Этап 1: только разговор -> без рассуждений. Позже: задачи и инструменты повышают бюджет.
+        """Динамический бюджет: болтовня — 0; реплика похожа на просьбу что-то сделать — немного подумать,
+        чтобы модель не отвечала по памяти, а вызвала инструмент."""
+        t = text.lower()
+        if any(re.search(p, t) for p in ACTION_PATTERNS):
+            return CONFIG.get("budget_action", 256)
         return CONFIG.get("budget_chat", 0)
 
     async def respond(self, user_text: str, timings: dict):
@@ -265,8 +286,7 @@ class Ksenia:
 
     async def _step(self, budget, queue, speaker, timings, first_step):
         """Один запрос к мозгу: речь идёт в озвучку по ходу, вызовы инструментов собираются."""
-        msgs = [{"role": "system", "content": PERSONA}]
-        msgs += self.history[-CONFIG.get("history_messages", 30):]
+        msgs = [{"role": "system", "content": PERSONA}] + self._window()
         body = {"messages": msgs, "stream": True, "max_tokens": CONFIG.get("max_tokens", 400),
                 "thinking_budget_tokens": budget, "tools": TOOL_SCHEMAS}
         full, buf, first_sent = "", "", False
@@ -410,8 +430,27 @@ async def handle_status(request):
                               "history": len(ks.history), "sink": pick_output_sink()})
 
 
+async def warmup():
+    """Прогреть кэш мозга текущей историей, чтобы первая реплика после перезапуска не ждала пересчёта."""
+    try:
+        msgs = [{"role": "system", "content": PERSONA}] + ks._window()
+        if msgs[-1]["role"] == "assistant":
+            body = {"messages": msgs + [{"role": "user", "content": "."}], "max_tokens": 1,
+                    "thinking_budget_tokens": 0, "tools": TOOL_SCHEMAS}
+            t0 = time.time()
+            async with ks.session.post(CONFIG["brain_url"] + "/v1/chat/completions", json=body,
+                                       headers={"Authorization": "Bearer " + BRAIN_KEY},
+                                       timeout=aiohttp.ClientTimeout(total=300)) as r:
+                await r.read()
+            log.info("Кэш мозга прогрет за %.1f с (%d сообщений)", time.time() - t0, len(msgs))
+    except Exception as e:
+        log.warning("Прогрев не удался: %s", e)
+
+
 async def on_start(app):
     ks.session = aiohttp.ClientSession()
+    asyncio.create_task(music.book_autosave_loop())
+    asyncio.create_task(warmup())
 
 
 async def on_cleanup(app):

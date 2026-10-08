@@ -5,3 +5,4 @@ brain/api_key
 voice-tests/
 __pycache__/
 *.bak-*
+secrets/
