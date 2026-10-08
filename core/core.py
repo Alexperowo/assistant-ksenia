@@ -24,10 +24,10 @@ from aiohttp import web
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-from tools import confirm, desktop, memory, music, screen, vk  # noqa: E402  (инструменты — отдельные модули в core/tools)
+from tools import confirm, desktop, memory, music, research, screen, vk  # noqa: E402  (инструменты — отдельные модули в core/tools)
 from tools import web as webtool  # noqa: E402  (не путать с aiohttp.web)
 
-TOOL_MODULES = [music, screen, vk, webtool, desktop, memory]
+TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research]
 TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
 TOOL_INDEX = {sch["function"]["name"]: m for m in TOOL_MODULES for sch in m.SCHEMAS}
 
@@ -736,6 +736,7 @@ class Conversation:
                 timings = {"_t0": time.time(), "listen": info}
                 await turn(text, timings)
                 self.turns += 1
+                await deliver_waiting()  # фоновый помощник принёс находку — рассказать до следующего «слушаю»
                 if is_goodbye(text) or self.turns >= CONFIG.get("max_turns", 50):
                     return
         except asyncio.CancelledError:
@@ -748,6 +749,35 @@ class Conversation:
 
 
 conv = Conversation()
+waiting_findings = []  # находки, ждущие паузы в разговоре
+
+
+def finding_prompt(f):
+    src = ", ".join(f.get("sources") or []) or "без источников"
+    return (f"(служебно: фоновый помощник принёс ответ на вопрос «{f['question']}»: {f['answer']} "
+            f"Источники: {src}. Коротко и естественно расскажи Александру, например «О, нашла…». "
+            f"Это не его реплика — не отвечай на неё как на вопрос.)")
+
+
+async def deliver_waiting():
+    while waiting_findings:
+        f = waiting_findings.pop(0)
+        await turn(finding_prompt(f), {"_t0": time.time(), "finding": True})
+
+
+async def findings_loop():
+    """Находки фоновых помощников: в разговоре — после текущей реплики, без разговора — сразу голосом."""
+    while True:
+        f = await research.findings.get()
+        waiting_findings.append(f)
+        while ks.lock.locked():
+            await asyncio.sleep(0.3)
+        if not conv.active():
+            await music.duck(True)
+            try:
+                await deliver_waiting()
+            finally:
+                await music.duck(False)
 talk_lock = asyncio.Lock()
 
 
@@ -828,6 +858,8 @@ BACKGROUND = []
 
 async def on_start(app):
     ks.session = aiohttp.ClientSession()
+    research.CTX.update({"brain_url": CONFIG["brain_url"], "brain_key": BRAIN_KEY})
+    asyncio.create_task(findings_loop())
     # ссылки на фоновые задачи храним: цикл событий держит задачи только слабыми ссылками
     BACKGROUND.extend([asyncio.create_task(music.book_autosave_loop()), asyncio.create_task(warmup())])
 
