@@ -321,13 +321,8 @@ def split_for_reading(text: str, max_len: int = 220):
     return parts
 
 
-TEST_SINK = {"name": None}  # беззвучная проверка: /say с "sink" — голос уходит в этот выход (виртуальный)
-
-
 def pick_output_sink():
     """Куда говорить: настройка, иначе A2DP-выход Bluetooth-наушников, иначе HDMI, иначе по умолчанию."""
-    if TEST_SINK["name"]:
-        return TEST_SINK["name"]
     want = CONFIG.get("output_sink", "auto")
     try:
         out = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, timeout=3).stdout
@@ -505,7 +500,8 @@ class Speaker:
                 self.player = ClientPlayer()
                 return
             # локальный путь — как прежде (и запасной, если шлюз планшета отключился)
-            sink = await asyncio.to_thread(pick_output_sink)  # pactl — не в цикле событий
+            # автопроверка говорит в свой беззвучный выход; остальные (напоминание в это же время) — как обычно
+            sink = getattr(self, "sink", None) or await asyncio.to_thread(pick_output_sink)  # pactl — не в цикле событий
             args = ["pacat", "--playback", "--raw", "--rate=44100", "--channels=1", "--format=s16le",
                     "--latency-msec=60"]
             if sink:
@@ -1060,7 +1056,9 @@ class Ksenia:
                     "инструментов, подтверждения не принимай; если просят что-то сделать — «это может только Александр»")
         elif not internal:
             self.last_turn_t = time.time()
-            if weak_voice and is_affirmative(user_text) and confirm.current() and not confirm.current().get("expired"):
+            if getattr(self, "_sandbox", False):
+                pass  # автопроверка не отвечает «да/нет» на настоящий вопрос Александра («Отправить?»)
+            elif weak_voice and is_affirmative(user_text) and confirm.current() and not confirm.current().get("expired"):
                 # «да» на рискованное действие — только уверенно узнанным голосом Александра
                 note = "; голос не совпал уверенно — действие НЕ выполнено, попроси Александра повторить «да»"
             else:
@@ -1100,6 +1098,8 @@ class Ksenia:
             hub.emit({"type": "user", "text": user_text})
         hub.emit({"type": "state", "state": "thinking"})
         speaker = Speaker(self.session, output=output)
+        if getattr(self, "_sandbox", False):
+            speaker.sink = getattr(self, "_test_sink", None)
         self.speaker = speaker
         await speaker.warm()
         queue: asyncio.Queue = asyncio.Queue()
@@ -1413,19 +1413,23 @@ ks = Ksenia()
 
 
 async def turn(text: str, timings: dict, internal: bool = False, output: str = "local", speaker: dict = None,
-               resume: bool = False, sandbox: bool = False):
+               resume: bool = False, sandbox: bool = False, sink: str = None):
     async with ks.lock:
         if sandbox:
             # автопроверка: настоящий мозг и инструменты, но реплика не остаётся в разговоре, мозг — во второй
             # ячейке (иначе следующий настоящий ход пересчитывал бы всю историю ~13 с)
-            snap = (ks.history, ks.window_start, getattr(ks, "last_turn_t", 0.0))
+            snap = (ks.history, ks.window_start, getattr(ks, "last_turn_t", 0.0), getattr(ks, "interrupted", None))
+            # вопрос «Отправить?», который ждёт ответа Александра: автопроверка его не отменяет и не подменяет своим
+            pending = dict(confirm._pending)
             # история пустая: проверки не зависят от того, о чём шёл разговор, и мозгу не пересчитывать её всю
-            ks.history, ks._sandbox = [], True
+            ks.history, ks._sandbox, ks._test_sink = [], True, sink
             try:
                 reply = await ks.respond(text, timings, internal=internal, output=output, speaker=speaker)
             finally:
-                ks.history, ks.window_start, ks.last_turn_t = snap
-                ks._sandbox = False
+                ks.history, ks.window_start, ks.last_turn_t, ks.interrupted = snap
+                ks._sandbox, ks._test_sink = False, None
+                confirm._pending.clear()
+                confirm._pending.update(pending)
             timings.pop("_t0", None)
             log.info("Песочница: %s | Ксения: %s | %s", text, reply, timings)
             return reply
@@ -1463,12 +1467,11 @@ async def handle_say(request):
     if sink is not None and not (isinstance(sink, str) and re.fullmatch(r"[\w.\-]{1,80}", sink)):
         return web.json_response({"error": "sink: имя выхода PipeWire"}, status=400)
     await music.duck(True)
-    TEST_SINK["name"] = sink  # автопроверки: голос в виртуальный выход, а не в колонки комнаты
     try:
+        # автопроверки: голос в виртуальный выход (sink), а не в колонки комнаты
         reply = await turn(text, timings, output=output, speaker=(data.get('speaker') if isinstance(data.get('speaker'), dict) else None),
-                           sandbox=bool(data.get("sandbox")))
+                           sandbox=bool(data.get("sandbox")), sink=sink)
     finally:
-        TEST_SINK["name"] = None
         await music.duck(False)
     return web.json_response({"reply": reply, "timings": timings})
 
