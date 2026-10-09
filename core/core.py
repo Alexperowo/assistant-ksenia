@@ -29,13 +29,13 @@ from aiohttp import web
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-from tools import confirm, daily, desktop, headphones, memory, music, research, screen, selfcheck, settings, system, vk, voicectl  # noqa: E402  (инструменты — отдельные модули в core/tools)
+from tools import confirm, daily, desktop, files, headphones, memory, music, research, screen, selfcheck, settings, system, vk, voicectl  # noqa: E402  (инструменты — отдельные модули в core/tools)
 from tools import web as webtool  # noqa: E402  (не путать с aiohttp.web)
 import speech_norm  # noqa: E402
 import diary  # noqa: E402
 import live_intent  # noqa: E402  (что значит реплика во время речи Ксении)
 
-TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research, daily, voicectl, system, settings, selfcheck, headphones]
+TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research, daily, voicectl, system, settings, selfcheck, headphones, files]
 TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
 TOOL_INDEX = {sch["function"]["name"]: m for m in TOOL_MODULES for sch in m.SCHEMAS}
 
@@ -749,7 +749,7 @@ TOOL_ACKS = {
     "vk_read": ("Открываю переписку.",), "screen_describe": ("Смотрю на экран.", "Сейчас гляну."),
     "screen_read": ("Читаю с экрана.",), "window_read": ("Читаю окно.",), "app_open": ("Открываю.",),
     "self_check": ("Сейчас проверю себя.",), "system": ("Сейчас проверю.",),
-    "headphones": ("Секунду, займусь наушниками.",),
+    "headphones": ("Секунду, займусь наушниками.",), "files": ("Сейчас посмотрю.", "Секунду, гляну."),
 }
 
 
