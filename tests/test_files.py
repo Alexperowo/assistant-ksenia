@@ -61,3 +61,23 @@ def test_move_and_trash_need_yes(home):
 def test_any_word_fallback(home):
     r = run({"action": "find", "query": "Ксения договор"})
     assert [f["name"] for f in r["files"]] == ["Договор аренды 2026.txt"]
+
+
+def test_find_text_on_screenshot():
+    """Надпись на снимке находится по словам, центр — в пикселях снимка."""
+    import shutil
+    from PIL import Image, ImageDraw, ImageFont
+    from tools import desktop
+    if not shutil.which("tesseract"):
+        pytest.skip("нет tesseract")
+    im = Image.new("RGB", (1200, 400), "white")
+    d = ImageDraw.Draw(im)
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 48)
+    except OSError:
+        pytest.skip("нет шрифта")
+    d.text((100, 80), "Отмена", fill="black", font=font)
+    d.text((700, 250), "Сохранить файл", fill="black", font=font)
+    x, y = desktop._find_text(im, "сохранить файл")
+    assert 700 < x < 1150 and 250 < y < 320
+    assert desktop._find_text(im, "удалить") is None
