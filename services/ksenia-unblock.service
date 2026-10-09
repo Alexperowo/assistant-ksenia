@@ -1,0 +1,13 @@
+[Unit]
+Description=Ксения: обход замедления YouTube только для её инструментов (byedpi + мостик, 127.0.0.1:10801/10802)
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/user/Agents/Ksenia/net/unblock.py
+Restart=on-failure
+RestartSec=5s
+StandardOutput=append:/home/user/Agents/Ksenia/logs/unblock.log
+StandardError=append:/home/user/Agents/Ksenia/logs/unblock.log
+
+[Install]
+WantedBy=default.target

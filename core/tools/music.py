@@ -6,6 +6,7 @@ YouTube и SoundCloud из сети Александра недоступны, r
 import asyncio
 import json
 import os
+import subprocess
 import random
 import urllib.parse
 
@@ -73,6 +74,12 @@ SCHEMAS = [
             "query": {"type": "string", "description": "например «Кино Группа крови», «Земфира», «Сплин Гранатовый альбом»"},
             "kind": {"type": "string", "enum": ["track", "artist", "album"]}},
             "required": ["query", "kind"]}}},
+    {"type": "function", "function": {
+        "name": "youtube",
+        "description": ("YouTube: найти и включить. По умолчанию — только звук в обычном проигрывателе (песня, подкаст, "
+                        "лекция, интервью); video=true — видео на весь экран монитора. query — что искать."),
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string"}, "video": {"type": "boolean"}}, "required": ["query"]}}},
     {"type": "function", "function": {
         "name": "music_wave",
         "description": "Яндекс Музыка: «Моя волна» — персональный поток под вкус Александра, или его любимые треки (liked=true).",
@@ -260,6 +267,65 @@ def _ym_collect(kind, query=None, liked=False, limit=12):
         tracks = [t for vol in (alb.volumes or []) for t in vol][:30]
         return tracks, f"{alb.title} — {', '.join(a.name for a in (alb.artists or []))}"
     return [], None
+
+
+TIMEOUTS = {"youtube": 75}
+
+# YouTube в сети Александра заблокирован; обход — локальная служба ksenia-unblock (byedpi + мостик), только для
+# инструментов Ксении (решение 2026-10-09: VPN на весь компьютер мешает другим программам)
+YT_SOCKS, YT_HTTP = "socks5://127.0.0.1:10801", "http://127.0.0.1:10802"
+YTDLP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".venv", "bin", "yt-dlp")
+_video = {"proc": None}
+CONFIG_VIDEO = {"on": False}
+
+
+def _yt_find(query, video=False):
+    """(название, длительность, ссылка на страницу, ссылка на звук) — первый результат поиска YouTube."""
+    fmt = "bestaudio" if not video else "best"
+    out = subprocess.run([YTDLP, "--proxy", YT_SOCKS, "--no-warnings", "-f", fmt, "--print", "%(title)s",
+                          "--print", "%(duration)s", "--print", "%(webpage_url)s", "-g", f"ytsearch1:{query}"],
+                         capture_output=True, text=True, timeout=60).stdout.strip().splitlines()
+    if len(out) < 4:
+        return None
+    title, dur, page, link = out[0], out[1], out[2], out[3]
+    return title, int(float(dur)) if dur.replace(".", "").isdigit() else None, page, link
+
+
+async def _youtube(query, video):
+    found = await asyncio.to_thread(_yt_find, query, False)
+    if not found:
+        return {"ok": False, "error": f"на YouTube ничего не нашла по «{query}» (или не открылся — служба ksenia-unblock)"}
+    title, dur, page, link = found
+    if video and not CONFIG_VIDEO["on"]:
+        video = False  # видео на весь экран ещё не работает через обход (раздельные потоки) — пока звук
+        if _video["proc"] and _video["proc"].returncode is None:
+            _video["proc"].terminate()
+        await _pause_for_video()
+        _video["proc"] = await asyncio.create_subprocess_exec(
+            "mpv", "--fs", "--force-window=immediate", f"--http-proxy={YT_HTTP}",
+            f"--ytdl-raw-options=proxy={YT_SOCKS}", f"--script-opts=ytdl_hook-ytdl_path={YTDLP}",
+            "--ytdl-format=bestvideo[height<=1080]+bestaudio/best", page,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+        return {"ok": True, "video": title, "minutes": round(dur / 60) if dur else None,
+                "note": "видео открыто на весь экран; закрыть — window_action close или «выключи видео»"}
+    gen = _new_playback()
+    await save_book_position()
+    _book["id"] = None
+    await _ensure_mpv()
+    # прокси — только для этого файла: радио и Яндекс идут напрямую, как раньше
+    await _ipc("loadfile", link, "replace", -1, f"http-proxy={YT_HTTP}")
+    await _ipc("set_property", "pause", False)
+    _state["playlist"] = [title]
+    _state["station"] = f"YouTube: {title}"
+    _state["paused"] = False
+    await _apply_volume()
+    return {"ok": True, "playing": title, "source": "YouTube", "minutes": round(dur / 60) if dur else None}
+
+
+async def _pause_for_video():
+    if _state["station"] and not _state.get("paused"):
+        await _ipc("set_property", "pause", True)
+        _state["paused"] = True
 
 
 async def _play_tracks(tracks, label):
@@ -456,6 +522,8 @@ async def call(name: str, args: dict, session) -> dict:
             return await _play_book(book_id)
         except Exception as e:
             return {"ok": False, "error": f"Яндекс Музыка не ответила: {e}"}
+    if name == "youtube":
+        return await _youtube(args.get("query", ""), bool(args.get("video")))
     if name in ("music_song", "music_wave"):
         if not os.path.exists(TOKEN_FILE):
             return {"ok": False, "error": "Яндекс Музыка не подключена (нет ключа)"}
