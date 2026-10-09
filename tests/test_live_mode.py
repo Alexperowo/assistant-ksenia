@@ -203,3 +203,20 @@ def test_live_feedback_during_speech_keeps_talking(live_env, monkeypatch):
     monkeypatch.setattr(core, "turn", slow_turn)
     turns, said = live_env([{"type": "ready"}, utt("Расскажи про Рим."), 0.05, utt("Интересно."), utt("Круто.")])
     assert stops == []  # поддакивания не обрывают рассказ
+
+
+def test_guest_cannot_stop_ksenia(live_env, monkeypatch):
+    stops = []
+
+    async def fake_stop():
+        stops.append(1)
+    monkeypatch.setattr(core.ks, "stop", fake_stop)
+    monkeypatch.setattr(core.LiveConversation, "speaking", staticmethod(lambda: True))
+
+    async def slow_turn(text, timings, speaker=None, **kw):
+        await asyncio.sleep(0.5)
+    monkeypatch.setattr(core, "turn", slow_turn)
+    guest = {"type": "utterance", "text": "Подожди.", "speaker": {"owner": False, "enrolled": True}, "timings": {}}
+    turns, said = live_env([{"type": "ready"}, utt("Расскажи про Рим."), 0.05,
+                            {"type": "partial", "text": "Подожди", "owner": False}, guest])
+    assert stops == []

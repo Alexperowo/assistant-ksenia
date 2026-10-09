@@ -1748,9 +1748,10 @@ class LiveConversation(Conversation):
         finally:
             await music.duck(False)
 
-    async def on_partial(self, text):
-        """Начало его фразы, пока он ещё говорит: ясное «подожди…», «стоп», вопрос — замолчать сразу."""
-        if not self.busy() or self.early or not text:
+    async def on_partial(self, text, owner=None):
+        """Начало его фразы, пока он ещё говорит: ясное «подожди…», «стоп», вопрос — замолчать сразу.
+        Голос уверенно чужой (есть образец и не совпал) — не останавливаться по началу фразы."""
+        if not self.busy() or self.early or not text or owner is False:
             return
         ctx = self.context(partial=True)
         d = live_intent.quick(text, ctx)
@@ -1837,6 +1838,11 @@ class LiveConversation(Conversation):
                 self.cur = asyncio.create_task(self.live_turn(text, ev.get("timings") or {}, speaker,
                                                               resume=bool(early or ks.fresh_interruption())))
                 return False
+            if kind in ("hold", "aside", "stop") and speaker.get("owner") is False and self.busy():
+                # голос уверенно чужой (образец есть и не совпал): гость не останавливает Ксению на полуслове
+                acted = "чужой голос — говорит дальше"
+                log.info("Чужой голос просит замолчать — Ксения продолжает: %s", text)
+                return False
             if kind in ("hold", "aside"):
                 acted = "замолчала и ждёт"
                 await self.cancel_turn()
@@ -1915,7 +1921,7 @@ class LiveConversation(Conversation):
                         continue
                     if kind == "partial":
                         last = time.time()
-                        await self.on_partial(str(ev.get("text") or ""))
+                        await self.on_partial(str(ev.get("text") or ""), ev.get("owner"))
                         continue
                     if kind == "pause":
                         # он рассказывает и задумался (слух ждёт продолжения) — можно своё «угу»

@@ -698,8 +698,18 @@ async def handle_stream(request):
             except Exception as e:
                 log.warning("частичное распознавание: %r", e)
                 return
+            # чей голос — один раз на реплику, как только набралась секунда: «подожди» гостя не должно
+            # останавливать Ксению (совет Fable, REVIEW-3 п. 10.8); без образца голоса — None
+            owner = partial.get("owner") if partial.get("owner_utt") == utt_no else None
+            if owner is None and ear.vp is not None and ear.vp.centroid is not None and len(pcm) >= RATE:
+                try:
+                    owner = (await asyncio.to_thread(ear.vp.check, pcm)).get("owner")
+                    partial.update({"owner": owner, "owner_utt": utt_no})
+                except Exception:
+                    owner = None
             if text and utt_no == partial["utt"] and not ws.closed:
-                await ws.send_json({"type": "partial", "text": text, "speech_s": round(len(pcm) / RATE, 2)})
+                await ws.send_json({"type": "partial", "text": text, "speech_s": round(len(pcm) / RATE, 2),
+                                    "owner": owner})
         await ws.send_json({"type": "ready", "source": source})
         log.info("Живой режим: микрофон открыт (%s)", source)
         while not ws.closed:
