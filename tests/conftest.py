@@ -45,5 +45,14 @@ def _no_writes_to_real_data(monkeypatch, tmp_path):
     try:
         import core
         monkeypatch.setattr(core, "NOTES_FILE", str(tmp_path / "agent_notes.md"))
+        # ночью Ксения тише (night_gain) — тесты озвучки не должны зависеть от времени запуска
+        monkeypatch.setitem(core.CONFIG, "night_from", 24)
+        monkeypatch.setitem(core.CONFIG, "night_to", 0)
+    except ImportError:
+        pass
+    try:
+        import voice_in
+        monkeypatch.setattr(voice_in.Mood, "FILE", str(tmp_path / "voice_baseline.json"))
+        monkeypatch.setattr(voice_in, "mood", voice_in.Mood())
     except ImportError:
         pass

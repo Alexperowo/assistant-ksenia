@@ -231,3 +231,13 @@ def test_hanging_words():
     assert voice_in.hanging("отправить сообщение, э-э")
     assert not voice_in.hanging("Включи русский рок.")
     assert not voice_in.hanging("")
+
+
+def test_mood_hint_after_baseline():
+    m = voice_in.Mood()
+    normal = (speech(2.0, amp=0.2) * 32767).astype(np.int16)
+    for _ in range(12):
+        assert m.hint(normal, "обычная фраза из пяти слов", "le") is None
+    tired = (speech(4.0, amp=0.05) * 32767).astype(np.int16)  # тише и медленнее (те же слова за вдвое дольше)
+    assert "тише и медленнее" in m.hint(tired, "обычная фраза из пяти слов", "le")
+    assert m.hint(normal[:8000], "коротко", "le") is None  # коротко — не судим

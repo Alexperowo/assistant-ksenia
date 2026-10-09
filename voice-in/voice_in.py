@@ -483,6 +483,54 @@ class LiveSegmenter:
         return pcm, info
 
 
+class Mood:
+    """Настроение по голосу — грубо, но честно: громкость и темп реплики против обычных для Александра
+    (совет Fable, REVIEW-3 п. 10.5). Обычные значения копятся отдельно для каждого микрофона (LE Audio и HFP
+    звучат по-разному); подсказка — только при заметном отклонении и когда образцов уже хватает."""
+
+    FILE = os.path.join(ROOT, "..", "data", "voice_baseline.json")
+
+    def __init__(self):
+        try:
+            with open(self.FILE, encoding="utf-8") as f:
+                self.base = json.load(f)
+        except (OSError, ValueError):
+            self.base = {}
+
+    def _save(self):
+        try:
+            os.makedirs(os.path.dirname(self.FILE), exist_ok=True)
+            with open(self.FILE, "w", encoding="utf-8") as f:
+                json.dump(self.base, f)
+        except OSError:
+            pass
+
+    def hint(self, pcm16, text, mic="default"):
+        words = len(re.findall(r"\w+", text or ""))
+        if pcm16 is None or len(pcm16) < RATE or words < 3:
+            return None
+        f = pcm16[:len(pcm16) // FRAME * FRAME].reshape(-1, FRAME).astype(np.float32) / 32768.0
+        rms = np.sqrt((f ** 2).mean(1))
+        voiced = rms[rms > CONFIG.get("min_speech_rms", 0.012)]
+        if len(voiced) < 15:
+            return None
+        loud, rate = float(np.median(voiced)), words / (len(voiced) * FRAME / RATE)
+        b = self.base.setdefault(mic, {"loud": loud, "rate": rate, "n": 0})
+        hint = None
+        if b["n"] >= CONFIG.get("mood_min_samples", 10):
+            ql, qr = loud / max(b["loud"], 1e-4), rate / max(b["rate"], 1e-3)
+            if ql < 0.6 and qr < 0.85:
+                hint = "говорит заметно тише и медленнее обычного — возможно, устал"
+            elif ql > 1.6 and qr > 1.2:
+                hint = "говорит заметно громче и быстрее обычного — возможно, взволнован или раздражён"
+        a = 0.1  # обычное — медленно скользящее среднее
+        b["loud"], b["rate"], b["n"] = (1 - a) * b["loud"] + a * loud, (1 - a) * b["rate"] + a * rate, b["n"] + 1
+        self._save()
+        return hint
+
+
+mood = Mood()
+
 ear: Ear = None
 
 
@@ -551,6 +599,9 @@ async def handle_listen(request):
         timings["stt_s"] = round(time.time() - t1, 2)
         if sure and (sure["weak"] or sure["mean"] < CONFIG.get("asr_unsure_mean", -0.2)):
             timings["asr"] = sure
+        m = mood.hint(pcm, text, "hfp" if restore else "le" if timings.get("mode") == "le" else "default")
+        if m:
+            timings["mood"] = m
         speaker = await spk_task if spk_task else {"owner": None, "enrolled": False}
         if restore_task:
             # ответ Ксении должен играть уже в A2DP: ждём конца переключения (идёт параллельно с распознаванием)
@@ -687,6 +738,9 @@ async def handle_stream(request):
                 info["stt_s"] = round(time.time() - t1, 2)
                 if sure and (sure["weak"] or sure["mean"] < CONFIG.get("asr_unsure_mean", -0.2)):
                     info["asr"] = sure
+                m = mood.hint(pcm, text, "le")
+                if m:
+                    info["mood"] = m
                 speaker = await spk if spk else {"owner": None, "enrolled": False}
                 log.info("Живой режим, услышала (%s, голос %s): %s", info, speaker, text)
                 await ws.send_json({"type": "utterance", "text": text, "speaker": speaker, "timings": info})

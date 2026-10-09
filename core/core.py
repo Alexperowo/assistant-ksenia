@@ -441,7 +441,10 @@ class Speaker:
         self.player = None
         self.cancelled = False
         self.recorded = bytearray()  # копия всего, что ушло в наушники (для разбора помех)
-        self.gain, self._carry = 1.0, b""
+        # поздно вечером и ночью — тише (night_gain), как сказал бы человек рядом со спящими
+        hour = datetime.datetime.now().hour
+        night = hour >= CONFIG.get("night_from", 23) or hour < CONFIG.get("night_to", 7)
+        self.gain, self._carry = (CONFIG.get("night_gain", 0.75) if night else 1.0), b""
         # что уже прозвучало: фразы с отметками в секундах звука и «часы» плеера — чтобы после перебивания
         # знать, на каком месте Ксения остановилась (продолжить оттуда, а не с начала)
         self.phrases = []
@@ -978,6 +981,9 @@ class Ksenia:
         elif not internal and asr.get("weak"):
             note += ("; распознавание не уверено в словах: «" + "», «".join(asr["weak"]) + "» — если от них зависит "
                      "смысл, уточни коротко, иначе отвечай как обычно")
+        mood = ((timings or {}).get("listen") or {}).get("mood")
+        if mood and not internal:
+            note += f"; по голосу: {mood} — будь мягче и короче, не комментируй это вслух"
         global NEW_TOOLS
         if NEW_TOOLS is not None and not internal and not guest:
             note += ("; у тебя обновились умения" + (f" (новые: {', '.join(NEW_TOOLS)})" if NEW_TOOLS else "")
@@ -992,7 +998,8 @@ class Ksenia:
                      f"не повторяя сказанного; если он о другом — ответь ему, а к рассказу вернись, только если попросит")
         if first_today and not internal and not user_text.startswith("(служебно"):
             note += ("; это первый разговор за сегодня — тепло поздоровайся по времени суток; можешь коротко "
-                     "предложить погоду и напомнить, что стоит на сегодня (remind_list), если это к месту")
+                     "предложить погоду и напомнить, что стоит на сегодня (remind_list), если это к месту; "
+                     "иногда (не каждый день) можешь сама предложить свежую новость про нейросети — твою любимую тему")
         self.history.append({"role": "user", "content": f"{user_text}\n\n(служебно: {now_context()}{note})"})
         if not internal:
             hub.emit({"type": "user", "text": user_text})
