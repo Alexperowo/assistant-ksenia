@@ -124,6 +124,9 @@ def read_key(path):
 
 BRAIN_KEY = read_key(CONFIG["brain_key_file"])
 
+# инструменты с последствиями после хода — в песочнице автопроверки не исполняются
+SANDBOX_STUB = {"research_background", "remind_set", "remind_cancel", "memory_remember", "memory_forget", "vk_send",
+                "watch_rule", "voice_enroll", "voice_mode", "dictate", "setting", "system"}
 ALLOWED_TAGS = {"laughing", "sigh", "teasing", "excited", "surprised", "whisper", "annoyed", "warm"}
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа",
           "сентября", "октября", "ноября", "декабря"]
@@ -882,6 +885,8 @@ class Ksenia:
             return []
 
     def save_history(self):
+        if getattr(self, "_sandbox", False):
+            return  # автопроверка не пишет в историю разговора
         os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
         tmp = HISTORY_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
@@ -1074,11 +1079,15 @@ class Ksenia:
                         result = {"ok": False, "error": "говорит не Александр — действия выполняет только он"}
                     elif not asked_for(c["function"]["name"], self.recent_user_text()):
                         result = UNASKED_RESULT
+                    elif getattr(self, "_sandbox", False) and c["function"]["name"] in SANDBOX_STUB:
+                        # автопроверка: фоновый поиск, напоминание или подтверждение потом пришли бы в настоящий разговор
+                        result = {"ok": True, "sandbox": True, "note": "песочница: принято, но не выполнено"}
                     else:
                         result = await run_tool(c["function"]["name"], c["function"].get("arguments") or "{}", self.session)
                     if self._acked and self._acked["tool"] == c["function"]["name"] and isinstance(result, dict):
                         result = {**result, "already_said": f"ты уже сказала вслух «{self._acked['said']}» — не повторяй, скажи результат"}
                     any_error = any_error or not result.get("ok", False)
+                    timings.setdefault("tools", []).append({"name": c["function"]["name"], "ok": bool(result.get("ok"))})
                     log.info("Инструмент %s(%s) -> %s", c["function"]["name"], c["function"].get("arguments"),
                              {k: (v[:200] + "…" if isinstance(v, str) and len(v) > 200 else v) for k, v in result.items()})
                     if result.get("speak_verbatim") and not speaker.cancelled:
@@ -1148,7 +1157,7 @@ class Ksenia:
                 "thinking_budget_tokens": budget, "tools": TOOL_SCHEMAS,
                 # разговор — всегда в ячейке 0: иначе сервер отдаёт реплику в ячейку зрения/помощника (1),
                 # и гибридный мозг пересчитывает весь разговор (~10 с на 8 тыс. токенов)
-                "id_slot": CONFIG.get("brain_slot", 0)}
+                "id_slot": CONFIG.get("research_slot", 1) if getattr(self, "_sandbox", False) else CONFIG.get("brain_slot", 0)}
         # Бюджет 0 — размышления выключаются шаблоном (Qwen3.8/Bonsai: ни одного служебного токена).
         # Nex этот выключатель игнорирует, но слушается бюджета — поэтому шлём оба.
         # Бюджет > 0 — уровень рассуждения как подсказка шаблону (low/medium/xhigh; «high» шаблон Bonsai не принимает),
@@ -1332,8 +1341,22 @@ ks = Ksenia()
 
 
 async def turn(text: str, timings: dict, internal: bool = False, output: str = "local", speaker: dict = None,
-               resume: bool = False):
+               resume: bool = False, sandbox: bool = False):
     async with ks.lock:
+        if sandbox:
+            # автопроверка: настоящий мозг и инструменты, но реплика не остаётся в разговоре, мозг — во второй
+            # ячейке (иначе следующий настоящий ход пересчитывал бы всю историю ~13 с)
+            snap = (ks.history, ks.window_start, getattr(ks, "last_turn_t", 0.0))
+            # история пустая: проверки не зависят от того, о чём шёл разговор, и мозгу не пересчитывать её всю
+            ks.history, ks._sandbox = [], True
+            try:
+                reply = await ks.respond(text, timings, internal=internal, output=output, speaker=speaker)
+            finally:
+                ks.history, ks.window_start, ks.last_turn_t = snap
+                ks._sandbox = False
+            timings.pop("_t0", None)
+            log.info("Песочница: %s | Ксения: %s | %s", text, reply, timings)
+            return reply
         guest = (speaker or {}).get("owner") is False
         if not internal and not guest and ks.fresh_interruption() and (resume or ks.can_resume(text)) \
                 and ks.interrupted.get("complete"):
@@ -1370,7 +1393,8 @@ async def handle_say(request):
     await music.duck(True)
     TEST_SINK["name"] = sink  # автопроверки: голос в виртуальный выход, а не в колонки комнаты
     try:
-        reply = await turn(text, timings, output=output, speaker=(data.get('speaker') if isinstance(data.get('speaker'), dict) else None))
+        reply = await turn(text, timings, output=output, speaker=(data.get('speaker') if isinstance(data.get('speaker'), dict) else None),
+                           sandbox=bool(data.get("sandbox")))
     finally:
         TEST_SINK["name"] = None
         await music.duck(False)
