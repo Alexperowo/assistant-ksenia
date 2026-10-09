@@ -310,8 +310,13 @@ def split_for_reading(text: str, max_len: int = 220):
     return parts
 
 
+TEST_SINK = {"name": None}  # беззвучная проверка: /say с "sink" — голос уходит в этот выход (виртуальный)
+
+
 def pick_output_sink():
     """Куда говорить: настройка, иначе A2DP-выход Bluetooth-наушников, иначе HDMI, иначе по умолчанию."""
+    if TEST_SINK["name"]:
+        return TEST_SINK["name"]
     want = CONFIG.get("output_sink", "auto")
     try:
         out = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, timeout=3).stdout
@@ -441,6 +446,11 @@ class Speaker:
         self._streaming = False
         self._faded = asyncio.Event()
         self.started = False
+        # звук от голосового движка складывается в очередь, а отдельная задача играет её: движок быстрее
+        # реального времени, и следующая фраза синтезируется, пока звучит текущая — без пауз ~0,5 с между
+        # предложениями (раньше синтез ждал, пока проиграется предыдущая фраза)
+        self._q: asyncio.Queue = asyncio.Queue()
+        self._play_task = None
 
     BYTES_PER_S = 44100 * 2
 
@@ -564,11 +574,11 @@ class Speaker:
                         if phrase is None:
                             phrase = {"text": shown, "start": self.audio_s, "end": None}
                             self.phrases.append(phrase)
-                        self.player.stdin.write(chunk)
+                        self._send(chunk)
                         written += len(chunk)
                         self._account(len(chunk))
                         self.recorded.extend(chunk)
-                        await self.player.stdin.drain()
+                        await asyncio.sleep(0)
                     return
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             log.error("voice-out недоступен или оборвал поток: %r", e)
@@ -585,9 +595,9 @@ class Speaker:
                 self._faded.set()  # затухать нечего — cancel() не ждёт
             if phrase is not None:
                 phrase["end"] = self.audio_s
-            if written % 2 and self.player and self.player.returncode is None and not self.cancelled:
+            if written % 2 and not self.cancelled:
                 # поток оборвался посреди сэмпла: без выравнивания все следующие фразы зазвучат треском
-                self.player.stdin.write(b"\x00")
+                self._send(b"\x00")
                 self.recorded.append(0)
 
     def save_recording(self):
@@ -603,11 +613,50 @@ class Speaker:
         for old in files[:-30]:
             os.remove(os.path.join(d, old))
 
+    def _send(self, chunk: bytes):
+        if self._play_task is None or self._play_task.done():
+            self._play_task = asyncio.create_task(self._play_loop())
+        self._q.put_nowait(chunk)
+
+    async def _play_loop(self):
+        """Играть очередь звука в плеер (pacat сам держит темп реального времени через drain)."""
+        while True:
+            chunk = await self._q.get()
+            if chunk is None:
+                return
+            if self.cancelled:
+                continue
+            try:
+                await self._ensure_player()
+                self.player.stdin.write(chunk)
+                await self.player.stdin.drain()
+            except (OSError, AttributeError) as e:  # pacat закрылся (наушники отключились)
+                if not self.cancelled:
+                    log.error("плеер закрылся: %r", e)
+                await self._drop_player()
+
+    def _take_queued(self, nbytes: int) -> bytes:
+        """Забрать из очереди ещё не сыгранный звук (для затухания при перебивании) и очистить её."""
+        buf = bytearray()
+        while not self._q.empty():
+            item = self._q.get_nowait()
+            if item and len(buf) < nbytes:
+                buf.extend(item)
+        return bytes(buf[:nbytes - nbytes % 2])
+
     async def finish(self):
         try:
             self.save_recording()
         except OSError as e:
             log.warning("запись ответа не сохранена: %s", e)
+        if self._play_task is not None and not self._play_task.done():
+            self._q.put_nowait(None)
+            left = max(0.0, self._play_end - time.time())
+            try:
+                await asyncio.wait_for(self._play_task, timeout=left + self.FINISH_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                log.warning("очередь звука не доиграла — останавливаю")
+                self._play_task.cancel()
         if self.player and self.player.returncode is None:
             try:
                 self.player.stdin.close()
@@ -658,7 +707,16 @@ class Speaker:
     async def cancel(self):
         self.cancelled = True
         p = self.player
-        if self._streaming and p is not None and not isinstance(p, ClientPlayer) and p.returncode is None:
+        ms = CONFIG.get("fade_ms", 120)
+        queued = self._take_queued(44100 * ms // 1000 * 2)
+        if queued and ms > 0 and p is not None and not isinstance(p, ClientPlayer) and p.returncode is None:
+            # следующий звук уже синтезирован и лежит в очереди: из него — затухание, остальное выбросить
+            await self._fade_out(queued)
+            try:
+                await asyncio.wait_for(p.wait(), timeout=0.5)
+            except asyncio.TimeoutError:
+                pass
+        elif self._streaming and p is not None and not isinstance(p, ClientPlayer) and p.returncode is None:
             # звук идёт прямо сейчас: дать озвучке дописать затухание (следующий кусок приходит за десятки мс),
             # затем pacat доигрывает его сам; всё ограничено долями секунды
             try:
@@ -666,7 +724,30 @@ class Speaker:
                 await asyncio.wait_for(p.wait(), timeout=0.5)
             except asyncio.TimeoutError:
                 pass
+        if self._play_task is not None and not self._play_task.done():
+            self._q.put_nowait(None)
         await self._drop_player()
+
+
+# Живое «Включаю» до результата: модель сначала молча вызывает инструмент, и первый звук на командах был через
+# 4,7 с (медиана по журналу). Как только из потока мозга пришло имя медленного инструмента, а сказано ещё ничего —
+# Ксения сразу говорит короткую фразу (≈1,5 с вместо 4,7); модели в ответе инструмента сообщается, что это уже
+# прозвучало. Быстрые инструменты (громкость, пауза, напоминание) — без фразы: человек просто сделал бы.
+TOOL_ACKS = {
+    "music_play": ("Включаю.", "Сейчас включу."), "music_song": ("Ищу песню.", "Сейчас найду."),
+    "music_wave": ("Включаю волну.",), "audiobook": ("Сейчас найду книгу.", "Ищу книгу."),
+    "weather": ("Смотрю погоду.", "Сейчас гляну погоду."), "web_search": ("Сейчас поищу.", "Ищу."),
+    "web_open": ("Открываю.",), "web_outline": ("Смотрю страницу.",), "vk_unread": ("Смотрю ВКонтакте.",),
+    "vk_read": ("Открываю переписку.",), "screen_describe": ("Смотрю на экран.", "Сейчас гляну."),
+    "screen_read": ("Читаю с экрана.",), "window_read": ("Читаю окно.",), "app_open": ("Открываю.",),
+    "self_check": ("Сейчас проверю себя.",), "system": ("Сейчас проверю.",),
+    "headphones": ("Секунду, займусь наушниками.",),
+}
+
+
+def tool_ack(name: str, turn: int = 0):
+    acks = TOOL_ACKS.get(name)
+    return acks[turn % len(acks)] if acks else None
 
 
 ACTION_PATTERNS = [r"\bвключ", r"\bвыключ", r"\bпостав", r"\bпауз", r"\bпродолж", r"\bнайди",
@@ -921,6 +1002,7 @@ class Ksenia:
         worker = asyncio.create_task(tts_worker())
         filler = asyncio.create_task(self._filler(speaker, queue)) if not internal else None
         self._stream_cut = False
+        self._acked = None  # «Включаю» уже сказано в этом ходе
         spoken_all = []
         pending = []  # вызовы инструментов, на которые ещё нет ответа в истории
         budget = self.budget_for(user_text)  # динамический бюджет: болтовня 0, задача — больше
@@ -955,6 +1037,8 @@ class Ksenia:
                         result = UNASKED_RESULT
                     else:
                         result = await run_tool(c["function"]["name"], c["function"].get("arguments") or "{}", self.session)
+                    if self._acked and self._acked["tool"] == c["function"]["name"] and isinstance(result, dict):
+                        result = {**result, "already_said": f"ты уже сказала вслух «{self._acked['said']}» — не повторяй, скажи результат"}
                     any_error = any_error or not result.get("ok", False)
                     log.info("Инструмент %s(%s) -> %s", c["function"]["name"], c["function"].get("arguments"),
                              {k: (v[:200] + "…" if isinstance(v, str) and len(v) > 200 else v) for k, v in result.items()})
@@ -1063,6 +1147,14 @@ class Ksenia:
                             continue
                         for tc in d.get("tool_calls") or []:
                             merge_tool_call(calls, tc)
+                        if calls and not getattr(self, "_acked", None) and not full.strip() and not getattr(speaker, "started", False):
+                            name = next((c["function"]["name"] for c in calls.values() if c["function"]["name"]), "")
+                            ack = tool_ack(name, getattr(self, "_ack_i", 0))
+                            if ack and name in TOOL_INDEX:
+                                self._acked = {"tool": name, "said": ack}
+                                self._ack_i = getattr(self, "_ack_i", 0) + 1
+                                timings.setdefault("ack_s", round(time.time() - timings["_t0"], 2))
+                                await queue.put((ack, True))
                         self._last_reasoning += d.get("reasoning_content") or ""
                         delta = think.feed(d.get("content") or "")
                         if think.reset:
@@ -1233,10 +1325,15 @@ async def handle_say(request):
             await stop_conversation()
     else:
         await ks.stop()
+    sink = data.get("sink")
+    if sink is not None and not (isinstance(sink, str) and re.fullmatch(r"[\w.\-]{1,80}", sink)):
+        return web.json_response({"error": "sink: имя выхода PipeWire"}, status=400)
     await music.duck(True)
+    TEST_SINK["name"] = sink  # автопроверки: голос в виртуальный выход, а не в колонки комнаты
     try:
         reply = await turn(text, timings, output=output, speaker=(data.get('speaker') if isinstance(data.get('speaker'), dict) else None))
     finally:
+        TEST_SINK["name"] = None
         await music.duck(False)
     return web.json_response({"reply": reply, "timings": timings})
 

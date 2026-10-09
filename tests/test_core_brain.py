@@ -219,3 +219,29 @@ def test_server_disconnect_twice_is_a_failure(ks):
     import aiohttp
     ((content, _, failed), items), reqs = run_step(ks, aiohttp.ServerDisconnectedError(), aiohttp.ServerDisconnectedError())
     assert failed and len(reqs) == 2 and "Мозг не отвечает" in queued_text(items)
+
+
+def test_silent_tool_call_gets_spoken_ack_immediately(ks):
+    """Модель молча вызывает медленный инструмент — Ксения сразу говорит «Включаю.», не дожидаясь результата."""
+    lines = [
+        sse({"tool_calls": [{"index": 0, "id": "c1", "type": "function", "function": {"name": "music_", "arguments": ""}}]}),
+        sse({"tool_calls": [{"index": 0, "function": {"name": "play", "arguments": "{\"query\": \"rock\"}"}}]}),
+        "data: [DONE]\n",
+    ]
+    ((content, calls, _), items), _ = run_step(ks, FakeResponse(200, lines))
+    assert calls[0]["function"]["name"] == "music_play"
+    assert items == [("Включаю.", True)]
+    assert ks._acked == {"tool": "music_play", "said": "Включаю."}
+
+
+def test_no_ack_when_model_already_spoke_or_tool_is_fast(ks):
+    lines = [sse({"content": "Включаю джаз."}),
+             sse({"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "music_play", "arguments": "{}"}}]}),
+             "data: [DONE]\n"]
+    ((_, _, _), items), _ = run_step(ks, FakeResponse(200, lines))
+    assert all(i[0] != "Включаю." for i in items)
+    ks._acked = None
+    lines = [sse({"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "setting", "arguments": "{}"}}]}),
+             "data: [DONE]\n"]
+    ((_, _, _), items), _ = run_step(ks, FakeResponse(200, lines))
+    assert items == []  # громкость — быстро, без «Сейчас»
