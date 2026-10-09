@@ -79,3 +79,30 @@ def test_startup_check_once_per_boot_and_silent_when_fine(tmp_path, monkeypatch)
     monkeypatch.setattr(core.selfcheck, "call", lambda *a: asyncio.sleep(0, {"problems": ["мозг не работает"]}))
     asyncio.run(core.startup_check())
     assert said == []  # второй раз за ту же загрузку — не проверяет
+
+
+def test_unsure_asr_asks_to_repeat(monkeypatch, tmp_path):
+    import asyncio
+    seen = []
+    k = core.Ksenia.__new__(core.Ksenia)
+    k.history, k.window_start, k.last_tag, k.speaker, k.session = [], 0, None, None, None
+    k.lock = asyncio.Lock()
+    monkeypatch.setattr(core, "HISTORY_FILE", str(tmp_path / "h.json"))
+
+    async def fake_step(budget, queue, speaker, timings, first_step):
+        seen.append(k.history[-1]["content"])
+        return "Что-что?", [], False
+    k._step = fake_step
+
+    class Sp:
+        cancelled, started, recorded = False, False, b""
+        async def warm(self): pass
+        async def speak(self, *a, **kw): pass
+        async def finish(self): pass
+        async def cancel(self): pass
+        def progress(self): return "", ""
+    monkeypatch.setattr(core, "Speaker", lambda *a, **kw: Sp())
+    asyncio.run(k.respond("Замеер.", {"_t0": 0, "listen": {"asr": {"mean": -0.38, "weak": ["Замеер"]}}}))
+    assert "переспроси" in seen[-1]
+    asyncio.run(k.respond("Расскажи про Древний Рим.", {"_t0": 0, "listen": {"asr": {"mean": -0.04, "weak": ["Древний"]}}}))
+    assert "не уверено в словах: «Древний»" in seen[-1]

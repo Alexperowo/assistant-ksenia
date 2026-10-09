@@ -970,6 +970,14 @@ class Ksenia:
             else:
                 # служебная реплика между «Отправить?» и ответом Александра раньше отменяла действие как «не да»
                 note = await self._resolve_confirmation(user_text)
+        # не расслышала: человек переспросит, а не угадает (совет Fable, REVIEW-3 п. 10.2)
+        asr = ((timings or {}).get("listen") or {}).get("asr") or {}
+        if not internal and asr.get("mean", 0) < CONFIG.get("asr_unsure_mean", -0.2):
+            note += ("; распознавание речи почти не уверено в этой реплике — если смысл неясен, не угадывай, "
+                     "переспроси коротко и по-живому («Что-что? Не расслышала»)")
+        elif not internal and asr.get("weak"):
+            note += ("; распознавание не уверено в словах: «" + "», «".join(asr["weak"]) + "» — если от них зависит "
+                     "смысл, уточни коротко, иначе отвечай как обычно")
         global NEW_TOOLS
         if NEW_TOOLS is not None and not internal and not guest:
             note += ("; у тебя обновились умения" + (f" (новые: {', '.join(NEW_TOOLS)})" if NEW_TOOLS else "")

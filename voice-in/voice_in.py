@@ -191,6 +191,7 @@ class Ear:
             self.model = onnx_asr.load_model(CONFIG.get("gigaam_model", "gigaam-v3-e2e-ctc"),
                                              providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
             self.model.recognize(np.zeros(RATE, dtype=np.float32), sample_rate=RATE)  # прогрев
+            self.model_ts = self.model.with_timestamps()  # та же модель, плюс уверенность по слогам
         else:
             self.model = WhisperModel(CONFIG["model_dir"], device="cuda", compute_type=CONFIG.get("compute_type", "int8_float16"))
         log.info("Распознавание (%s) загружено за %.1f с", self.engine, time.time() - t0)
@@ -241,6 +242,28 @@ class Ear:
             except Exception as e:
                 log.warning("распознавание в паузе: %r", e)
         return p, text
+
+    def transcribe_sure(self, pcm16: np.ndarray):
+        """(текст, уверенность) — уверенность GigaAM по слогам: {"mean": средний logprob, "weak": [слова]}.
+        Явный мусор («Замеер») — mean около −0,4, нормальная речь — около 0 (замер 2026-10-09)."""
+        if self.engine != "gigaam" or getattr(self, "model_ts", None) is None:
+            return self.transcribe(pcm16), None
+        r = self.model_ts.recognize(pcm16.astype(np.float32) / 32768.0, sample_rate=RATE)
+        text = fix_name(clean_gigaam(r.text or ""))
+        words, cur = [], None
+        for tok, lp in zip(r.tokens or [], r.logprobs or []):
+            if tok.startswith(" ") or cur is None:
+                cur = [tok.strip(), lp]
+                words.append(cur)
+            else:
+                cur[0] += tok
+                cur[1] += lp
+        lps = [lp for tok, lp in zip(r.tokens or [], r.logprobs or []) if tok.strip() and tok.strip() not in ",.?!—-…"]
+        mean = float(np.mean(lps)) if lps else 0.0
+        filler = re.compile(r"^(?:[аэмх]+|хм+|ну|аа?-а+|э-э+|м-м+)$", re.I)  # «хмм», «а-а» — не важны для смысла
+        weak = [w.strip(",.?!—-…") for w, lp in words if lp < CONFIG.get("asr_weak_word", -0.7)
+                and w.strip(",.?!—-…") and not filler.match(w.strip(",.?!—-…"))]
+        return text, {"mean": round(mean, 3), "weak": weak[:3]}
 
     def transcribe(self, pcm16: np.ndarray):
         audio = pcm16.astype(np.float32) / 32768.0
@@ -524,8 +547,10 @@ async def handle_listen(request):
             return web.json_response({"text": "", "timings": timings})
         t1 = time.time()
         spk_task = asyncio.create_task(asyncio.to_thread(ear.vp.check, pcm)) if ear.vp else None
-        text = await asyncio.to_thread(ear.transcribe, pcm)
+        text, sure = await asyncio.to_thread(ear.transcribe_sure, pcm)
         timings["stt_s"] = round(time.time() - t1, 2)
+        if sure and (sure["weak"] or sure["mean"] < CONFIG.get("asr_unsure_mean", -0.2)):
+            timings["asr"] = sure
         speaker = await spk_task if spk_task else {"owner": None, "enrolled": False}
         if restore_task:
             # ответ Ксении должен играть уже в A2DP: ждём конца переключения (идёт параллельно с распознаванием)
@@ -658,8 +683,10 @@ async def handle_stream(request):
                 t1 = time.time()
                 ear._save_debug([pcm])
                 spk = asyncio.create_task(asyncio.to_thread(ear.vp.check, pcm)) if ear.vp else None
-                text = await asyncio.to_thread(ear.transcribe, pcm)
+                text, sure = await asyncio.to_thread(ear.transcribe_sure, pcm)
                 info["stt_s"] = round(time.time() - t1, 2)
+                if sure and (sure["weak"] or sure["mean"] < CONFIG.get("asr_unsure_mean", -0.2)):
+                    info["asr"] = sure
                 speaker = await spk if spk else {"owner": None, "enrolled": False}
                 log.info("Живой режим, услышала (%s, голос %s): %s", info, speaker, text)
                 await ws.send_json({"type": "utterance", "text": text, "speaker": speaker, "timings": info})
