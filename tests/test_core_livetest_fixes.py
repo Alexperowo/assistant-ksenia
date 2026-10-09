@@ -143,3 +143,13 @@ def test_reminder_replayed_on_speakers_only_with_headset(monkeypatch):
     assert "alsa_output.pci-0000_07_00.1.hdmi-stereo" in played
     monkeypatch.setattr(core.subprocess, "run", lambda *a, **k: R("2\talsa_output.hdmi-stereo\tPipeWire\n"))
     assert asyncio.run(core.replay_on_speakers(b"\x00\x00")) is False  # без наушников голос и так в колонках
+
+
+def test_wifi_connect_needs_yes():
+    import asyncio
+    from tools import confirm, settings
+    confirm.cancel()
+    r = asyncio.run(settings.call("setting", {"action": "wifi_connect", "value": "Сосед"}, None))
+    assert r.get("prepared") and "вернусь на прежнюю" in r["speak_verbatim"]
+    confirm.cancel()
+    assert not asyncio.run(settings.call("setting", {"action": "brightness_set", "value": "300"}, None))["ok"]
