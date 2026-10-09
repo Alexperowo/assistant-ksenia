@@ -276,13 +276,15 @@ TIMEOUTS = {"youtube": 75}
 YT_SOCKS, YT_HTTP = "socks5://127.0.0.1:10801", "http://127.0.0.1:10802"
 YTDLP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".venv", "bin", "yt-dlp")
 _video = {"proc": None}
-CONFIG_VIDEO = {"on": False}
+CONFIG_VIDEO = {"on": True}
+DENO = os.path.expanduser("~/.local/bin/deno")
 
 
 def _yt_find(query, video=False):
     """(название, длительность, ссылка на страницу, ссылка на звук) — первый результат поиска YouTube."""
     fmt = "bestaudio" if not video else "best"
-    out = subprocess.run([YTDLP, "--proxy", YT_SOCKS, "--no-warnings", "-f", fmt, "--print", "%(title)s",
+    js = ["--js-runtimes", f"deno:{DENO}"] if os.path.exists(DENO) else []  # без JS-движка YouTube отдаёт не все форматы
+    out = subprocess.run([YTDLP, "--proxy", YT_SOCKS, "--no-warnings", *js, "-f", fmt, "--print", "%(title)s",
                           "--print", "%(duration)s", "--print", "%(webpage_url)s", "-g", f"ytsearch1:{query}"],
                          capture_output=True, text=True, timeout=60).stdout.strip().splitlines()
     if len(out) < 4:
@@ -297,14 +299,24 @@ async def _youtube(query, video):
         return {"ok": False, "error": f"на YouTube ничего не нашла по «{query}» (или не открылся — служба ksenia-unblock)"}
     title, dur, page, link = found
     if video and not CONFIG_VIDEO["on"]:
-        video = False  # видео на весь экран ещё не работает через обход (раздельные потоки) — пока звук
+        video = False
         if _video["proc"] and _video["proc"].returncode is None:
             _video["proc"].terminate()
         await _pause_for_video()
+        try:  # спящий монитор — разбудить, видео же смотрят
+            from tools import screen
+            if await asyncio.to_thread(screen._dpms_is_off):
+                await asyncio.to_thread(screen._run, "kscreen-doctor", "--dpms", "on", timeout=5)
+        except Exception:
+            pass
+        # картинка и звук у YouTube — раздельные потоки: прокси для них задаётся на уровне сетевого модуля
+        # (stream-lavf-o), одного --http-proxy мало (замер 2026-10-09)
         _video["proc"] = await asyncio.create_subprocess_exec(
             "mpv", "--fs", "--force-window=immediate", f"--http-proxy={YT_HTTP}",
-            f"--ytdl-raw-options=proxy={YT_SOCKS}", f"--script-opts=ytdl_hook-ytdl_path={YTDLP}",
-            "--ytdl-format=bestvideo[height<=1080]+bestaudio/best", page,
+            f"--stream-lavf-o=http_proxy={YT_HTTP}",
+            f"--ytdl-raw-options=proxy={YT_SOCKS}" + (f",js-runtimes=deno:{DENO}" if os.path.exists(DENO) else ""),
+            f"--script-opts=ytdl_hook-ytdl_path={YTDLP}",
+            "--ytdl-format=bestvideo[height<=1080][vcodec^=avc1]+bestaudio/bestvideo[height<=1080]+bestaudio/best", page,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
         return {"ok": True, "video": title, "minutes": round(dur / 60) if dur else None,
                 "note": "видео открыто на весь экран; закрыть — window_action close или «выключи видео»"}
@@ -550,6 +562,8 @@ async def call(name: str, args: dict, session) -> dict:
             await _ipc("set_property", "pause", False)
             _state["paused"] = False
         elif a == "stop":
+            if _video["proc"] and _video["proc"].returncode is None:
+                _video["proc"].terminate()  # «выключи» — и видео с YouTube
             _new_playback()
             await _ipc("stop")
             await _ipc("playlist-clear")
