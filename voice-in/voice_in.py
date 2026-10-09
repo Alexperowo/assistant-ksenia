@@ -790,10 +790,11 @@ async def handle_stream(request):
         log.info("Живой режим: микрофон открыт (%s)", source)
         while not ws.closed:
             try:
-                buf = await asyncio.wait_for(mic.readexactly(FRAME * 2), timeout=3)
+                # звук с планшета идёт по Wi-Fi — запас на заминки сети больше, чем у микрофона наушников
+                buf = await asyncio.wait_for(mic.readexactly(FRAME * 2), timeout=10 if push else 3)
             except (asyncio.IncompleteReadError, asyncio.TimeoutError) as e:
                 log.warning("Живой режим: микрофон оборвался: %r", e)
-                await ws.send_json({"type": "error", "reason": "mic_lost"})
+                await ws.send_json({"type": "error", "reason": "push_lost" if push else "mic_lost"})
                 if headset and not push:  # канал LE Audio мог не подняться — проверить и починить в фоне
                     asyncio.create_task(headset.check_and_recover("микрофон оборвался"))
                 break

@@ -2103,6 +2103,8 @@ class LiveConversation(Conversation):
                         log.warning("Живой режим: %s", ev)
                         if ev.get("reason") == "mic_lost":
                             await say_notice(LISTEN_FAIL["mic_lost"])
+                        elif ev.get("reason") == "push_lost":
+                            await say_notice("Связь с планшетом прервалась. Включи живой разговор ещё раз.")
                         return
                     if kind != "utterance":
                         continue
