@@ -1979,6 +1979,28 @@ def reminder_prompt(r):
             f"Скажи ему об этом коротко и по-живому. Это не его реплика.)")
 
 
+async def replay_on_speakers(pcm: bytes):
+    """Повторить уже сказанное через колонки монитора (HDMI) — напоминание «и в наушники, и в колонки»
+    (решение Александра 2026-10-09: наушники могут лежать рядом). Только если наушники подключены:
+    без них голос и так шёл в колонки."""
+    sinks = await asyncio.to_thread(subprocess.run, ["pactl", "list", "sinks", "short"], capture_output=True,
+                                    text=True, timeout=3)
+    names = [ln.split("\t")[1] for ln in sinks.stdout.splitlines() if "\t" in ln]
+    if not any(n.startswith("bluez_output.") for n in names):
+        return False
+    hdmi = next((n for n in names if "hdmi" in n), None)
+    if not hdmi or not pcm:
+        return False
+    p = await asyncio.create_subprocess_exec("pacat", "--playback", "-d", hdmi, "--raw", "--rate=44100", "--channels=1",
+                                             "--format=s16le", stdin=asyncio.subprocess.PIPE,
+                                             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    p.stdin.write(pcm)
+    await p.stdin.drain()
+    p.stdin.close()
+    await asyncio.wait_for(p.wait(), timeout=len(pcm) / 88200 + 10)
+    return True
+
+
 async def deliver_waiting():
     """Сказать накопившиеся служебные реплики. В разговоре — между репликами Александра (не пока слушаем:
     иначе голос Ксении в гарнитуре HFP попадёт в микрофон), без разговора — сразу."""
@@ -1986,6 +2008,10 @@ async def deliver_waiting():
         prompt = waiting.pop(0)
         try:
             await turn(prompt, {"_t0": time.time(), "internal": True}, internal=True, output=preferred_output())
+            if prompt.startswith("(служебно: пришло время напоминания") and CONFIG.get("reminders_both", True) \
+                    and ks.speaker is not None and not ks.speaker.cancelled:
+                if await replay_on_speakers(bytes(ks.speaker.recorded)):
+                    log.info("Напоминание повторено в колонки")
         except Exception:
             log.exception("служебная реплика не сказана: %s", prompt[:120])
 

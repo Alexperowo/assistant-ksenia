@@ -106,3 +106,40 @@ def test_unsure_asr_asks_to_repeat(monkeypatch, tmp_path):
     assert "переспроси" in seen[-1]
     asyncio.run(k.respond("Расскажи про Древний Рим.", {"_t0": 0, "listen": {"asr": {"mean": -0.04, "weak": ["Древний"]}}}))
     assert "не уверено в словах: «Древний»" in seen[-1]
+
+
+def test_reminder_replayed_on_speakers_only_with_headset(monkeypatch):
+    import asyncio
+    import subprocess as sp
+    played = []
+
+    class R:
+        def __init__(self, out):
+            self.stdout = out
+
+    class P:
+        def __init__(self):
+            self.stdin = self
+
+        def write(self, b):
+            played.append(len(b))
+
+        async def drain(self):
+            pass
+
+        def close(self):
+            pass
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*a, **k):
+        played.append(a[a.index("-d") + 1])
+        return P()
+    monkeypatch.setattr(core.asyncio, "create_subprocess_exec", fake_exec)
+    with_headset = "1\tbluez_output.AA_BB.1\tPipeWire\n2\talsa_output.pci-0000_07_00.1.hdmi-stereo\tPipeWire\n"
+    monkeypatch.setattr(core.subprocess, "run", lambda *a, **k: R(with_headset))
+    assert asyncio.run(core.replay_on_speakers(b"\x00\x00" * 100)) is True
+    assert "alsa_output.pci-0000_07_00.1.hdmi-stereo" in played
+    monkeypatch.setattr(core.subprocess, "run", lambda *a, **k: R("2\talsa_output.hdmi-stereo\tPipeWire\n"))
+    assert asyncio.run(core.replay_on_speakers(b"\x00\x00")) is False  # без наушников голос и так в колонках
