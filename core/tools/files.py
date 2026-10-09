@@ -83,7 +83,6 @@ def search(query="", kind=None, roots=None, limit=10, max_files=200000, time_lim
     """Файлы, в названии которых есть все слова запроса (по началу слова), новые — первыми.
     Ничего не нашлось по всем словам — по любому из них («Ксения ksenia» -> ksenia.desktop)."""
     words = _norm(query)
-
     exts = KIND_EXT.get((kind or "").lower())
     found, seen, t0 = [], 0, time.time()
     for root in roots or [HOME]:
