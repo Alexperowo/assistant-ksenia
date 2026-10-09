@@ -1,0 +1,13 @@
+[Unit]
+Description=Ксения: судья реплик живого режима (NeoHorse-1-4B на RTX 2080 Ti, :18150)
+
+[Service]
+Type=simple
+ExecStart=/home/user/Agents/Ksenia/brain/run_judge.sh
+Restart=on-failure
+RestartSec=10s
+StandardOutput=append:/home/user/Agents/Ksenia/logs/judge.log
+StandardError=append:/home/user/Agents/Ksenia/logs/judge.log
+
+[Install]
+WantedBy=default.target
