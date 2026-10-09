@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#000000">
-  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#070912">
+  <meta name="color-scheme" content="dark">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/icon-192x192.png">
@@ -12,75 +12,118 @@
   <title>Ксения</title>
 </head>
 <body>
-  <!-- Объявления для TalkBack: состояние — сразу (assertive), реплики — по очереди (polite) -->
+  <!-- Объявления для TalkBack: состояние — сразу (assertive), реплики и итоги действий — по очереди (polite) -->
   <div id="announce-now" class="sr-only" role="alert" aria-live="assertive" aria-atomic="true"></div>
   <div id="announce" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+  <div class="backdrop" aria-hidden="true"><div class="aurora a1"></div><div class="aurora a2"></div></div>
 
-  <main id="app" hidden>
-    <header class="state" id="state-box" data-state="idle">
-      <span class="state-mark" aria-hidden="true"></span>
-      <h1 id="state" tabindex="-1">Готова</h1>
-    </header>
-
-    <!-- Подтверждение рискованного действия: решает ядро, кнопки просто говорят «да» / «нет» -->
-    <section id="confirm" class="confirm" hidden aria-labelledby="confirm-q">
-      <p id="confirm-q" class="confirm-q" tabindex="-1"></p>
-      <div class="confirm-buttons">
-        <button id="yes" class="big yes" type="button">Да</button>
-        <button id="no" class="big no" type="button">Нет</button>
+  <div id="app" hidden>
+    <!-- ===== Разговор ===== -->
+    <section id="view-talk" class="view" aria-labelledby="state">
+      <div class="stage">
+        <div id="orb" class="orb" data-state="idle" aria-hidden="true">
+          <div class="orb-glow"></div>
+          <div class="orb-ring r1"></div><div class="orb-ring r2"></div><div class="orb-ring r3"></div>
+          <div class="orb-core"><div class="orb-swirl"></div><div class="orb-shine"></div></div>
+        </div>
+        <h1 id="state" class="state-word" tabindex="-1">Готова</h1>
+        <p id="state-sub" class="state-sub">Нажми «Говорить» или скажи «Ксения» в наушники</p>
       </div>
-    </section>
 
-    <button id="talk" class="talk" type="button" aria-describedby="talk-hint">Говорить</button>
-    <p id="talk-hint" class="hint">Нажмите и говорите после сигнала. Я сама пойму, когда вы закончили.</p>
-    <button id="stop" class="big stop" type="button" hidden>Стоп</button>
+      <!-- Подтверждение рискованного действия: решает ядро, кнопки просто говорят «да» / «нет» -->
+      <section id="confirm" class="card confirm" hidden aria-labelledby="confirm-q">
+        <p id="confirm-q" class="confirm-q" tabindex="-1"></p>
+        <div class="two">
+          <button id="yes" class="btn yes" type="button">Да</button>
+          <button id="no" class="btn no" type="button">Нет</button>
+        </div>
+      </section>
 
-    <section class="last" aria-label="Последний обмен">
-      <p class="who">Вы сказали</p>
-      <p id="last-user" class="said">—</p>
-      <p class="who">Ксения</p>
-      <p id="last-ksenia" class="said ksenia">—</p>
-    </section>
-
-    <section class="history" aria-labelledby="history-title">
-      <h2 id="history-title">Разговор, новые сверху</h2>
-      <ol id="history" role="log" aria-live="off" reversed></ol>
-    </section>
-
-    <details class="settings">
-      <summary>Настройки</summary>
-      <fieldset>
-        <legend>Как говорить</legend>
-        <label class="option"><input type="radio" name="mode" value="tap" checked>
-          Нажал — говорю до паузы</label>
-        <label class="option"><input type="radio" name="mode" value="hold">
-          Держу кнопку, пока говорю</label>
-      </fieldset>
-      <label class="option"><input type="checkbox" id="vibrate" checked> Вибрация</label>
-      <label class="option"><input type="checkbox" id="earcons" checked> Звуковые сигналы</label>
-      <div class="font-buttons">
-        <button id="font-down" class="small" type="button">Шрифт меньше</button>
-        <button id="font-up" class="small" type="button">Шрифт крупнее</button>
+      <div class="actions">
+        <button id="talk" class="btn primary talk" type="button" aria-describedby="talk-hint">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2Z"/></svg>
+          <span id="talk-label">Говорить</span>
+        </button>
+        <button id="stop" class="btn ghost" type="button" hidden>Стоп</button>
       </div>
-      <button id="logout" class="small" type="button">Выйти на этом планшете</button>
-    </details>
-  </main>
+      <p id="talk-hint" class="hint">Нажми и говори после сигнала — я сама пойму, когда ты закончишь.</p>
 
-  <main id="login" hidden>
+      <section id="last" class="card last empty" aria-label="Последний обмен">
+        <p class="who">Ты</p>
+        <p id="last-user" class="said"></p>
+        <p class="who ks">Ксения</p>
+        <p id="last-ksenia" class="said ksenia"></p>
+      </section>
+
+      <details class="card history">
+        <summary>Весь разговор</summary>
+        <ol id="history" role="log" aria-live="off" reversed></ol>
+      </details>
+    </section>
+
+    <!-- ===== Управление ===== -->
+    <section id="view-control" class="view" hidden aria-labelledby="h-control">
+      <h1 id="h-control" class="view-title" tabindex="-1">Управление</h1>
+      <div id="control-body" class="cards"><p class="loading">Загружаю…</p></div>
+    </section>
+
+    <!-- ===== Память ===== -->
+    <section id="view-memory" class="view" hidden aria-labelledby="h-memory">
+      <h1 id="h-memory" class="view-title" tabindex="-1">Память</h1>
+      <div id="memory-body" class="cards"><p class="loading">Загружаю…</p></div>
+    </section>
+
+    <!-- ===== Состояние ===== -->
+    <section id="view-status" class="view" hidden aria-labelledby="h-status">
+      <h1 id="h-status" class="view-title" tabindex="-1">Состояние</h1>
+      <div id="status-body" class="cards"><p class="loading">Загружаю…</p></div>
+      <section class="card" aria-labelledby="h-device">
+        <h2 id="h-device">Это устройство</h2>
+        <div class="seg" role="radiogroup" aria-label="Как говорить">
+          <label class="seg-opt"><input type="radio" name="mode" value="tap" checked><span>Нажал — говорю до паузы</span></label>
+          <label class="seg-opt"><input type="radio" name="mode" value="hold"><span>Держу кнопку, пока говорю</span></label>
+        </div>
+        <label class="switch-row"><span>Вибрация</span><input type="checkbox" id="vibrate" role="switch" checked></label>
+        <label class="switch-row"><span>Звуковые сигналы</span><input type="checkbox" id="earcons" role="switch" checked></label>
+        <div class="two">
+          <button id="font-down" class="btn" type="button">Шрифт меньше</button>
+          <button id="font-up" class="btn" type="button">Шрифт крупнее</button>
+        </div>
+        <button id="logout" class="btn danger-ghost" type="button">Выйти на этом устройстве</button>
+      </section>
+    </section>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <nav class="tabs" aria-label="Разделы">
+      <button class="tab" data-view="talk" aria-current="page" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 0 0-7.8 13.5L3 21l4.6-1.2A9 9 0 1 0 12 3Z"/></svg><span>Разговор</span></button>
+      <button class="tab" data-view="control" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h10v2H4zm12-2h2v6h-2V8h-0zm-12 8h4v2H4zm6-2h2v6h-2zm4 2h6v2h-6zM4 18h12v2H4zm14-2h2v6h-2z"/></svg><span>Управление</span></button>
+      <button class="tab" data-view="memory" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a7 7 0 0 0-4 12.74V18h8v-3.26A7 7 0 0 0 12 2Zm-3 18h6v2H9z"/></svg><span>Память</span></button>
+      <button class="tab" data-view="status" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4v2h-2.6L14 22 10 6l-1.6 6H3z"/></svg><span>Состояние</span></button>
+    </nav>
+  </div>
+
+  <main id="login" class="solo" hidden>
+    <div class="orb small" data-state="idle" aria-hidden="true"><div class="orb-glow"></div><div class="orb-core"><div class="orb-swirl"></div><div class="orb-shine"></div></div></div>
     <h1>Ксения</h1>
-    <p class="lead">Чтобы подключиться, введите код. Его скажет Ксения у компьютера.</p>
-    <button id="speak-pin" class="big" type="button">Произнести код на компьютере</button>
+    <p class="lead">Чтобы подключиться, введи код. Его скажет Ксения у компьютера.</p>
+    <button id="speak-pin" class="btn" type="button">Произнести код на компьютере</button>
     <label for="pin" class="pin-label">Код из шести цифр</label>
-    <input id="pin" inputmode="numeric" autocomplete="one-time-code" maxlength="12" aria-describedby="login-error">
-    <button id="login-button" class="big" type="button">Войти</button>
+    <input id="pin" class="pin" inputmode="numeric" autocomplete="one-time-code" maxlength="12" aria-describedby="login-error">
+    <button id="login-button" class="btn primary" type="button">Войти</button>
     <p id="login-error" class="error" role="alert"></p>
   </main>
 
-  <main id="nolink" hidden>
+  <main id="nolink" class="solo" hidden>
     <h1>Нет связи с компьютером</h1>
-    <p class="lead">Проверьте, что планшет в домашней сети Wi-Fi и компьютер включён. Я подключусь сама.</p>
+    <p class="lead">Проверь, что устройство в домашней сети Wi-Fi и компьютер включён. Я подключусь сама.</p>
   </main>
 
   <script src="/app.js"></script>
+  <script src="/control.js"></script>
 </body>
 </html>

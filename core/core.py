@@ -100,6 +100,8 @@ async def run_tool(name, arguments, session):
 
 
 CONFIG = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
+import control  # noqa: E402  центр управления: настройки человека поверх config.json (data/settings.json)
+control.apply_user_settings(CONFIG)
 PERSONA = open(os.path.join(ROOT, "prompts", "persona.md"), encoding="utf-8").read()
 # своя устойчивая личность Ксении (вкусы, мнения) — отдельным файлом, чтобы её было легко править
 _SELF = os.path.join(ROOT, "prompts", "self.md")
@@ -638,11 +640,24 @@ class Speaker:
             try:
                 await self._ensure_player()
                 self.player.stdin.write(chunk)
+                self._emit_level(chunk)
                 await self.player.stdin.drain()
             except (OSError, AttributeError) as e:  # pacat закрылся (наушники отключились)
                 if not self.cancelled:
                     log.error("плеер закрылся: %r", e)
                 await self._drop_player()
+
+    def _emit_level(self, chunk: bytes):
+        """Громкость голоса — сфере в приложении (она пульсирует в такт), не чаще 20 раз в секунду. Только когда
+        голос звучит у компьютера: на планшете приложение само слышит звук и меряет громкость."""
+        if isinstance(self.player, ClientPlayer) or not hub.connected() or len(chunk) < 4:
+            return
+        now = time.time()
+        if now - getattr(self, "_level_t", 0.0) < 0.05:
+            return
+        self._level_t = now
+        x = np.frombuffer(chunk[:len(chunk) - len(chunk) % 2], dtype=np.int16).astype(np.float32) / 32768.0
+        hub.emit({"type": "level", "v": round(min(1.0, float(np.sqrt(np.mean(x * x))) * 4.5), 3)})
 
     def _take_queued(self, nbytes: int) -> bytes:
         """Забрать из очереди ещё не сыгранный звук (для затухания при перебивании) и очистить её."""
@@ -1367,6 +1382,152 @@ def preferred_output():
     return "client" if recent and hub.connected() else "local"
 
 
+async def _voice_in(path, method="GET", timeout=30):
+    async with ks.session.request(method, CONFIG["voice_in_url"] + path,
+                                  timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+        return await r.json(content_type=None)
+
+
+async def handle_control_state(request):
+    """Всё для центра управления одним запросом (планшет обновляет раз в несколько секунд)."""
+    async def safe(coro, default=None):
+        try:
+            return await coro
+        except Exception:
+            return default
+    headset, vp, services = await asyncio.gather(
+        safe(_voice_in("/headset", timeout=8), {}), safe(_voice_in("/voiceprint/status", "POST", 8), {}),
+        control.services_view())
+    vol = await safe(settings.call("setting", {"action": "volume_get"}, None), {})
+    sp = ks.speaker
+    return web.json_response({
+        "ksenia": {"busy": ks.lock.locked(), "conversation": conv.active(),
+                   "speaking": bool(sp is not None and sp.recorded and not sp.cancelled and
+                                    getattr(sp, "_play_end", 0) > time.time()),
+                   "live": conv.task is not None and not conv.task.done() and isinstance(getattr(conv, "_runner", None), LiveConversation)},
+        "settings": control.settings_view(CONFIG),
+        "voice_mode": voicectl.STATE["mode"], "voice_enrolled": bool(vp.get("enrolled")),
+        "voice_enrolling": voicectl.STATE["enrolling"],
+        "headset": {k: headset.get(k) for k in ("connected", "mode", "profile", "last_recovery")},
+        "volume": vol.get("volume_percent"), "muted": vol.get("muted"),
+        "music": {"playing": music.playing(), "station": music._state.get("station"),
+                  "paused": bool(music._state.get("paused")), "volume": music._state.get("volume")},
+        "services": services,
+        "memory": [f["fact"] for f in memory._load()],
+        "rules": [{"who": r["who"], "source": r["source"], "remind": r.get("remind", True)} for r in watch.rules()],
+        "reminders": control.reminders_view(daily._load()),
+        "diary": diary.load()["entries"][-10:][::-1],
+        "notes": control.notes_view(NOTES_FILE),
+        "report": control.latest_report(),
+    })
+
+
+async def handle_control_act(request):
+    """Действие из центра управления: {"action": ..., ...}. Ответ — {"ok", "say"} (что сказать человеку)."""
+    try:
+        d = await request.json()
+        if not isinstance(d, dict):
+            raise ValueError
+    except ValueError:
+        return web.json_response({"ok": False, "say": "Непонятный запрос."}, status=400)
+    a = d.get("action")
+    try:
+        if a == "set":
+            v = control.set_setting(CONFIG, d.get("key"), d.get("value"))
+            spec = control.KEYS[d["key"]]
+            word = ("включено" if v else "выключено") if spec["type"] == "bool" else \
+                next(o[1] for o in spec["options"] if o[0] == v)
+            return web.json_response({"ok": True, "say": f"{spec['label']}: {word}."})
+        if a == "headset_mode":
+            res = await _voice_in(f"/headset/mode/{'talk' if d.get('mode') == 'talk' else 'music'}", "POST", 90)
+            return web.json_response({"ok": bool(res.get("ok")), "say": "Наушники переключила." if res.get("ok")
+                                      else "Наушники не переключились — выключи и включи их."})
+        if a == "headset_fix":
+            res = await _voice_in("/headset/check", "POST", 90)
+            return web.json_response({"ok": bool(res.get("ok")), "say": "Со звуком всё в порядке." if res.get("ok")
+                                      else res.get("error", "Не получилось — выключи и включи наушники.")})
+        if a == "voice_mode":
+            mode = "owner_only" if d.get("mode") == "owner_only" else "guest"
+            await voicectl.call("voice_mode", {"mode": mode}, ks.session)
+            return web.json_response({"ok": True, "say": "Слушаю только тебя." if mode == "owner_only"
+                                      else "С гостями говорю, но действия — только для тебя."})
+        if a == "voice_enroll":
+            voicectl.STATE["enrolling"] = voicectl.ENROLL_PHRASES
+            await say_notice("Запишу твой голос. Нажми «Говорить» и расскажи мне что-нибудь — пять фраз.")
+            return web.json_response({"ok": True, "say": "Запись образца начата: скажи пять обычных фраз."})
+        if a == "voice_clear":
+            await _voice_in("/voiceprint/clear", "POST", 10)
+            return web.json_response({"ok": True, "say": "Образец голоса удалён."})
+        if a == "volume":
+            step = d.get("step")
+            act = {"up": "volume_up", "down": "volume_down", "mute": "mute", "unmute": "unmute"}.get(step)
+            if not act:
+                raise ValueError("громче/тише")
+            res = await settings.call("setting", {"action": act}, None)
+            return web.json_response({"ok": True, "say": f"Громкость {res.get('volume_percent', '')}".strip() + "."})
+        if a == "music":
+            act = d.get("do")
+            if act not in ("pause", "resume", "stop", "volume_up", "volume_down"):
+                raise ValueError("музыка")
+            await music.call("music_control", {"action": act}, ks.session)
+            return web.json_response({"ok": True, "say": {"pause": "Пауза.", "resume": "Играет.", "stop": "Музыка выключена.",
+                                                          "volume_up": "Музыка громче.", "volume_down": "Музыка тише."}[act]})
+        if a == "memory_forget":
+            fact = str(d.get("fact") or "")
+            facts = memory._load()
+            keep = [f for f in facts if f["fact"] != fact]
+            if len(keep) == len(facts):
+                raise ValueError("такого факта нет")
+            memory._save(keep)
+            memory.changed["flag"] = True
+            return web.json_response({"ok": True, "say": "Забыла."})
+        if a == "memory_add":
+            fact = " ".join(str(d.get("fact") or "").split())[:300]
+            if not fact:
+                raise ValueError("пустой факт")
+            await memory._remember(fact)
+            return web.json_response({"ok": True, "say": "Запомнила."})
+        if a in ("rule_add", "rule_remove"):
+            res = await watch.call("watch_rule", {"action": "add" if a == "rule_add" else "remove",
+                                                  "who": d.get("who"), "remind": bool(d.get("remind", True))}, None)
+            return web.json_response({"ok": bool(res.get("ok")), "say": "Правило добавлено." if a == "rule_add"
+                                      else "Правило убрано." if res.get("ok") else res.get("error", "Не получилось.")})
+        if a == "reminder_cancel":
+            items = daily._load()
+            keep = [r for r in items if r.get("id") != d.get("id")]
+            daily._save(keep)
+            return web.json_response({"ok": len(keep) != len(items), "say": "Напоминание отменено."})
+        if a == "diary_clear":
+            diary.save({"entries": [], "upto": len(ks.history)})
+            diary.changed["flag"] = True
+            return web.json_response({"ok": True, "say": "Дневник очищен."})
+        if a == "notes_clear":
+            if os.path.exists(NOTES_FILE):
+                os.replace(NOTES_FILE, NOTES_FILE + time.strftime(".old-%Y%m%d-%H%M%S"))
+            return web.json_response({"ok": True, "say": "Заметки убраны в архив."})
+        if a == "restart":
+            ok = await control.restart_service(d.get("unit"))
+            return web.json_response({"ok": ok, "say": "Перезапускаю." if ok else "Не получилось перезапустить."})
+        if a == "selfcheck":
+            res = await selfcheck.call("self_check", {}, ks.session)
+            probs = res.get("problems") or []
+            return web.json_response({"ok": True, "problems": probs, "fine": res.get("fine") or [],
+                                      "say": "Всё в порядке." if not probs else "Есть проблемы: " + "; ".join(probs[:3]) + "."})
+        if a == "talk":
+            await handle_talk(request)
+            return web.json_response({"ok": True, "say": "Слушаю."})
+        if a == "stop":
+            async with talk_lock:
+                await stop_conversation()
+            return web.json_response({"ok": True, "say": "Замолчала."})
+    except ValueError as e:
+        return web.json_response({"ok": False, "say": f"Не получилось: {e}."}, status=400)
+    except Exception as e:
+        log.exception("центр управления: %s", a)
+        return web.json_response({"ok": False, "say": "Что-то пошло не так, подробности — в журнале."}, status=500)
+    return web.json_response({"ok": False, "say": "Неизвестное действие."}, status=400)
+
+
 async def handle_notice(request):
     """Служебная фраза голосом у компьютера, мимо истории (код для входа с планшета)."""
     try:
@@ -2079,6 +2240,7 @@ async def start_talk():
         # наушники в LE Audio — живой режим (слушает всегда, можно перебивать); иначе — обычный разговор
         runner = live if CONFIG.get("live_mode", True) and await live_possible() else conv
         conv.task = asyncio.create_task(runner.run())
+        conv._runner = runner
     return runner
 
 
@@ -2350,7 +2512,8 @@ async def diary_loop():
         await asyncio.sleep(60)
         try:
             idle = time.time() - getattr(ks, "last_turn_t", 0.0)
-            if idle < CONFIG.get("diary_idle_s", 600) or conv.active() or ks.lock.locked():
+            if not CONFIG.get("diary_enabled", True) or idle < CONFIG.get("diary_idle_s", 600) or \
+                    conv.active() or ks.lock.locked():
                 continue
             entry = await diary.summarize(ks.session, ks.history, CONFIG["brain_url"], BRAIN_KEY,
                                           slot=CONFIG.get("diary_slot", 1))
@@ -2422,6 +2585,7 @@ def main():
     app.add_routes([web.post("/say", handle_say), web.post("/talk", handle_talk),
                     web.post("/stop", handle_stop), web.get("/status", handle_status),
                     web.get("/client", handle_client), web.post("/notice", handle_notice),
+                    web.get("/control/state", handle_control_state), web.post("/control/act", handle_control_act),
                     web.post("/duck", handle_duck)])
     web.run_app(app, host="127.0.0.1", port=CONFIG.get("port", 18130), print=None)
 

@@ -55,23 +55,54 @@
 
   // ---------- состояние ----------
   const LABEL = { idle: 'Готова', listening: 'Слушаю', thinking: 'Думаю', speaking: 'Говорю', offline: 'Нет связи с компьютером',
-    pc_listening: 'Слушаю наушники у компьютера', pc_speaking: 'Говорю у компьютера', unheard: 'Не расслышала. Нажмите ещё раз' };
-  const MARK = { pc_listening: 'listening', pc_speaking: 'speaking', unheard: 'idle' };
+    pc_listening: 'Слушаю в наушниках', pc_speaking: 'Говорю в наушниках', unheard: 'Не расслышала' };
+  const SUB = { idle: 'Нажми «Говорить» или скажи «Ксения» в наушники', listening: 'Говори, я слушаю',
+    thinking: 'Секунду…', speaking: 'Можно перебить — просто начни говорить', offline: 'Подключусь сама, как только компьютер ответит',
+    pc_listening: 'Разговор идёт через наушники у компьютера', pc_speaking: 'Разговор идёт через наушники у компьютера',
+    unheard: 'Нажми ещё раз и скажи погромче' };
+  const ORB = { pc_listening: 'listening', pc_speaking: 'speaking', unheard: 'idle' };
   let state = 'idle';
   function setState(st) {
     if (st === state) return;
     state = st;
-    $('state-box').dataset.state = MARK[st] || st;
+    $('orb').dataset.state = ORB[st] || st;
     $('state').textContent = LABEL[st];
+    $('state-sub').textContent = SUB[st] || '';
     const busy = st === 'thinking' || st === 'speaking';
     $('stop').hidden = !busy && st !== 'listening';
     $('talk').setAttribute('aria-pressed', st === 'listening' ? 'true' : 'false');
-    $('talk').textContent = st === 'listening' ? (settings.mode === 'hold' ? 'Отпустите, когда закончите' : 'Слушаю… нажмите, чтобы закончить')
+    $('talk-label').textContent = st === 'listening' ? (settings.mode === 'hold' ? 'Отпусти, когда закончишь' : 'Слушаю… нажми, чтобы закончить')
       : (busy ? 'Перебить и говорить' : 'Говорить');
     $('talk').disabled = st === 'offline';
     if (st === 'thinking') signal('think');
     if (st === 'speaking') signal('speak');
     if (st === 'idle' && confirmFocusPending) focusConfirm();
+  }
+
+  // ---------- сфера дышит в такт голосу: громкость 0…1 -> CSS --level ----------
+  // источники: голос Ксении на этом устройстве (анализатор), с компьютера (событие level от ядра), свой микрофон
+  const level = { target: 0, cur: 0, pcUntil: 0, analyser: null, buf: null,
+    set(v) { this.target = Math.max(this.target, Math.min(1, v)); } };
+  function levelLoop() {
+    if (level.analyser && player.active()) {
+      level.analyser.getFloatTimeDomainData(level.buf);
+      let sum = 0;
+      for (let i = 0; i < level.buf.length; i++) sum += level.buf[i] * level.buf[i];
+      level.set(Math.sqrt(sum / level.buf.length) * 4.5);
+    }
+    level.cur += (level.target - level.cur) * (level.target > level.cur ? 0.55 : 0.18);
+    level.target *= 0.82;
+    document.documentElement.style.setProperty('--level', level.cur.toFixed(3));
+    requestAnimationFrame(levelLoop);
+  }
+  function analyserNode() {
+    if (!level.analyser && actx) {
+      level.analyser = actx.createAnalyser();
+      level.analyser.fftSize = 1024;
+      level.buf = new Float32Array(level.analyser.fftSize);
+      level.analyser.connect(actx.destination);
+    }
+    return level.analyser || (actx && actx.destination);
   }
 
   // ---------- сервер ----------
@@ -104,7 +135,7 @@
       ab.copyToChannel(f, 0);
       const src = actx.createBufferSource();
       src.buffer = ab;
-      src.connect(actx.destination);
+      src.connect(analyserNode());
       const t = Math.max(actx.currentTime + 0.15, this.next); // небольшой запас против рывков Wi-Fi
       src.start(t);
       this.next = t + ab.duration;
@@ -157,6 +188,7 @@
       let sum = 0;
       for (let i = 0; i < pcm.length; i++) { const v = pcm[i] / 32768; sum += v * v; }
       const rms = Math.sqrt(sum / pcm.length);
+      level.set(rms * 6);
       const elapsed = this.frames.length * 20;
       if (this.mode === 'hold') { if (elapsed > 60000) this.finish(); return; }
       if (elapsed < 300) return; // хвост сигнала «слушаю» ещё звучит
@@ -242,6 +274,7 @@
   function addUser(text) {
     if (text === lastUser.text && Date.now() - lastUser.t < 8000) return; // «услышала» от шлюза и «реплика» от ядра
     lastUser = { text, t: Date.now() };
+    $('last').classList.remove('empty');
     $('last-user').textContent = text;
     $('last-ksenia').textContent = '…';
     addLine('Вы', text);
@@ -298,7 +331,7 @@
     }
   }
   function connect() {
-    ws = new WebSocket(`wss://${location.host}/api/ws`);
+    ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws`);
     ws.binaryType = 'arraybuffer';
     let ping = null;
     ws.onopen = () => { wsUp = true; wsFails = 0; linkChanged(); ping = setInterval(() => { try { ws.send('ping'); } catch (e) { /* закрыт */ } }, 20000); };
@@ -325,6 +358,7 @@
       case 'audio_start': player.start(ev.turn, ev.rate); break;
       case 'audio_end': player.end(ev.turn); break;
       case 'audio_stop': player.stop(); if (!coreBusy) setState('idle'); break;
+      case 'level': level.set(ev.v || 0); break;
       case 'confirm': showConfirm(ev.question); break;
       case 'confirm_clear': hideConfirm(); break;
       case 'error': $('state').textContent = ev.text; signal('error'); announce(ev.text, true); break;
@@ -348,7 +382,8 @@
     $('login').hidden = true; $('app').hidden = false;
     keepAwake();
     if (!ws) connect();
-    setTimeout(() => $('talk').focus(), 100);
+    const start = location.hash.slice(1);
+    if (views.includes(start)) showView(start); else setTimeout(() => $('talk').focus(), 100);
   }
   async function login() {
     audio();
@@ -384,7 +419,7 @@
       r.checked = r.value === settings.mode;
       r.addEventListener('change', () => {
         settings.mode = r.value; save('mode', r.value);
-        $('talk-hint').textContent = r.value === 'hold' ? 'Держите кнопку, пока говорите, и отпустите.' : 'Нажмите и говорите после сигнала. Я сама пойму, когда вы закончили.';
+        $('talk-hint').textContent = r.value === 'hold' ? 'Держи кнопку, пока говоришь, и отпусти.' : 'Нажми и говори после сигнала — я сама пойму, когда ты закончишь.';
       });
     }
     $('vibrate').checked = settings.vibrate;
@@ -398,13 +433,32 @@
     document.addEventListener('pointerdown', audio, { once: true }); // звук на Android — только после касания
   }
 
+  // ---------- вкладки ----------
+  const views = ['talk', 'control', 'memory', 'status'];
+  function showView(name) {
+    for (const v of views) $('view-' + v).hidden = v !== name;
+    for (const t of document.querySelectorAll('.tab')) {
+      if (t.dataset.view === name) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current');
+    }
+    save('view', name);
+    if (window.KSControl) window.KSControl.onView(name);
+    const h = name === 'talk' ? $('state') : $('h-' + name);
+    if (h) h.focus({ preventScroll: true });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+  for (const t of document.querySelectorAll('.tab')) t.addEventListener('click', () => { audio(); showView(t.dataset.view); });
+  window.addEventListener('hashchange', () => { const v = location.hash.slice(1); if (views.includes(v)) showView(v); });
+  window.KS = { api, announce, signal, showView, audio, get state() { return state; } };
+
   async function check() {
     const s = await api('/api/session');
     if (s.status === 0) { $('nolink').hidden = false; setTimeout(check, 5000); return; }
     $('nolink').hidden = true;
+    if (s.data.local) $('logout').hidden = true; // на этом компьютере входа нет — и выходить не из чего
     if (s.data.authorized) showApp(); else showLogin();
   }
   bind();
+  requestAnimationFrame(levelLoop);
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
   check();
 })();

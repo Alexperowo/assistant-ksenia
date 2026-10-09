@@ -16,6 +16,12 @@ API (HTTPS; всё, кроме входа, — только с сессией):
   POST /api/text {"text"}       — реплика текстом (кнопки «Да»/«Нет»)
   POST /api/stop                — замолчать
   POST /api/listening {"on"}    — планшет слушает: приглушить музыку у компьютера
+  GET  /api/control/state       — центр управления: всё состояние Ксении (ядро /control/state)
+  POST /api/control/act         — действие центра управления (ядро /control/act)
+
+Компьютер: http://127.0.0.1:18142/ — то же приложение для этого же компьютера (ярлык «Ксения — управление»):
+только с 127.0.0.1, без кода входа (программы этого компьютера и так могут обратиться к ядру напрямую);
+localhost — безопасный источник для браузера, микрофон работает и без сертификата.
 """
 import asyncio
 import hashlib
@@ -41,6 +47,7 @@ STATIC = {"/": ("index.html", "text/html"), "/app.js": ("app.js", "text/javascri
           "/styles.css": ("styles.css", "text/css"), "/sw.js": ("sw.js", "text/javascript"),
           "/recorder-worklet.js": ("recorder-worklet.js", "text/javascript"),
           "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
+          "/control.js": ("control.js", "text/javascript"),
           "/icon-192x192.png": ("icon-192x192.png", "image/png"), "/icon-512x512.png": ("icon-512x512.png", "image/png"),
           "/icon.svg": ("icon.svg", "image/svg+xml")}
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
@@ -241,6 +248,15 @@ class Gateway:
 
     # ----- защита -----
 
+    def is_local_site(self, request):
+        """Запрос к сайту для этого компьютера (127.0.0.1:local_port) и с этого же компьютера."""
+        sock = request.transport.get_extra_info("sockname") if request.transport else None
+        try:
+            loop = ipaddress.ip_address(client_ip(request)).is_loopback
+        except ValueError:
+            loop = False
+        return bool(sock) and sock[1] == self.cfg.get("local_port", 18142) and loop
+
     def host_ok(self, request):
         h = hostname(request.host)
         return bool(h) and h.lower() in self.hosts
@@ -254,11 +270,12 @@ class Gateway:
         if not self.host_ok(request):
             # чужое имя в Host — признак DNS rebinding (сертификат на такое имя не выдан)
             return web.json_response({"error": "неизвестный адрес"}, status=421)
+        local = self.is_local_site(request)
         unsafe = request.method not in ("GET", "HEAD") or request.headers.get("Upgrade", "").lower() == "websocket"
-        if unsafe and request.headers.get("Origin") != f"https://{request.host}":
+        if unsafe and request.headers.get("Origin") != f"{'http' if local else 'https'}://{request.host}":
             log.warning("Отклонён запрос с чужим Origin: %s %s", request.headers.get("Origin"), request.path)
             return web.json_response({"error": "чужой источник"}, status=403)
-        if request.path.startswith("/api/") and request.path not in PUBLIC_API and \
+        if request.path.startswith("/api/") and request.path not in PUBLIC_API and not local and \
                 not self.sessions.valid(request.cookies.get(COOKIE)):
             return web.json_response({"error": "нужен вход"}, status=401)
         resp = await handler(request)
@@ -344,8 +361,30 @@ class Gateway:
         return resp
 
     async def h_session(self, request):
-        return web.json_response({"authorized": self.sessions.valid(request.cookies.get(COOKIE)),
-                                  "core": self.core_up})
+        return web.json_response({"authorized": self.is_local_site(request) or
+                                  self.sessions.valid(request.cookies.get(COOKIE)),
+                                  "core": self.core_up, "local": self.is_local_site(request)})
+
+    async def h_control_state(self, request):
+        try:
+            async with self.session.get(self.cfg["core_url"] + "/control/state",
+                                        timeout=aiohttp.ClientTimeout(total=30)) as r:
+                return web.json_response(await r.json(content_type=None), status=r.status)
+        except Exception:
+            return web.json_response({"error": "Компьютер не ответил."}, status=502)
+
+    async def h_control_act(self, request):
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError
+        except ValueError:
+            return web.json_response({"ok": False, "say": "Непонятный запрос."}, status=400)
+        try:
+            status, res = await self.core_post("/control/act", body, timeout=120)
+            return web.json_response(res, status=status)
+        except Exception:
+            return web.json_response({"ok": False, "say": "Компьютер не ответил."}, status=502)
 
     async def h_login(self, request):
         try:
@@ -453,7 +492,8 @@ class Gateway:
             web.post("/api/pin/speak", self.h_pin_speak), web.post("/api/logout", self.h_logout),
             web.get("/api/ws", self.h_ws), web.post("/api/utterance", self.h_utterance),
             web.post("/api/text", self.h_text), web.post("/api/stop", self.h_stop),
-            web.post("/api/listening", self.h_listening)])
+            web.post("/api/listening", self.h_listening),
+            web.get("/api/control/state", self.h_control_state), web.post("/api/control/act", self.h_control_act)])
         app.on_startup.append(self._start)
         app.on_cleanup.append(self._stop)
         return app
@@ -515,6 +555,9 @@ async def serve(cfg):
         runner = web.AppRunner(app)
         await runner.setup()
         await web.TCPSite(runner, cfg.get("host", "0.0.0.0"), port, ssl_context=tls).start()
+        if tls is not None:
+            # то же приложение для этого компьютера: только 127.0.0.1, без TLS (localhost — безопасный источник)
+            await web.TCPSite(runner, "127.0.0.1", cfg.get("local_port", 18142)).start()
         runners.append(runner)
     log.info("Шлюз планшета: https://…:%s (приложение), http://…:%s (сертификат)",
              cfg.get("https_port", 18140), cfg.get("http_port", 18141))
