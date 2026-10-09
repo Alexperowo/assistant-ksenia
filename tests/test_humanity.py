@@ -27,8 +27,10 @@ def test_feminine_leaves_others(text):
 
 def test_verbatim_text_is_not_changed():
     # чужое сообщение ВК читается дословно: «Я понял» в нём — слова другого человека
-    assert core.clean_for_speech("Дима: Я понял, приду.", verbatim=True) == "Дима: Я понял, приду."
-    assert core.clean_for_speech("Я понял.") == "Я поняла."
+    # знак ударения (U+0301) слов не меняет — его ставит словарь ударений для голоса
+    plain = lambda t: t.replace("\u0301", "")
+    assert plain(core.clean_for_speech("Дима: Я понял, приду.", verbatim=True)) == "Дима: Я понял, приду."
+    assert plain(core.clean_for_speech("Я понял.")) == "Я поняла."
 
 
 @pytest.mark.parametrize("text,offer", [
