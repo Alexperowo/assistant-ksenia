@@ -99,6 +99,10 @@ async def run_tool(name, arguments, session):
 
 CONFIG = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
 PERSONA = open(os.path.join(ROOT, "prompts", "persona.md"), encoding="utf-8").read()
+# своя устойчивая личность Ксении (вкусы, мнения) — отдельным файлом, чтобы её было легко править
+_SELF = os.path.join(ROOT, "prompts", "self.md")
+if os.path.exists(_SELF):
+    PERSONA += "\n" + open(_SELF, encoding="utf-8").read()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("core")
