@@ -19,5 +19,6 @@
   "ignore_start_s": 0.35,
   "min_voiced_ms": 120,
   "barge_ms": 1500,
-  "turn_dither": false
+  "turn_dither": false,
+  "asr_device": "cuda"
 }

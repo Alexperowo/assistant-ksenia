@@ -188,8 +188,11 @@ class Ear:
         self.engine = CONFIG.get("engine", "gigaam")
         if self.engine == "gigaam":
             import onnx_asr
-            self.model = onnx_asr.load_model(CONFIG.get("gigaam_model", "gigaam-v3-e2e-ctc"),
-                                             providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+            # asr_device: "cuda" (по умолчанию) или "cpu" — GigaAM лёгкая, на процессоре реплика ~0,1 с;
+            # процессор — запасной путь, если видеокарта голоса и слуха недоступна (зависший процесс держит её)
+            providers = ["CPUExecutionProvider"] if CONFIG.get("asr_device") == "cpu" else \
+                ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            self.model = onnx_asr.load_model(CONFIG.get("gigaam_model", "gigaam-v3-e2e-ctc"), providers=providers)
             self.model.recognize(np.zeros(RATE, dtype=np.float32), sample_rate=RATE)  # прогрев
             self.model_ts = self.model.with_timestamps()  # та же модель, плюс уверенность по слогам
         else:
@@ -640,26 +643,95 @@ async def handle_vp(request):
     return web.json_response({"ok": True, "enrolled": ear.vp.centroid is not None, "collected": len(ear.vp.pending)})
 
 
+class PushPipe:
+    """Звук с планшета (живой разговор через шлюз pwa/): кадры PCM 16 кГц приходят по WebSocket /push,
+    живой режим читает их так же, как вывод parec с микрофона наушников (readexactly)."""
+
+    def __init__(self):
+        self.q = asyncio.Queue(maxsize=1000)
+        self.buf = b""
+        self.closed = False
+
+    def put(self, data: bytes):
+        if not self.closed:
+            try:
+                self.q.put_nowait(data)
+            except asyncio.QueueFull:
+                pass  # слух не успевает — лучше потерять кадр, чем копить задержку
+
+    def close(self):
+        self.closed = True
+        try:
+            self.q.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
+
+    async def readexactly(self, n):
+        while len(self.buf) < n:
+            chunk = await self.q.get()
+            if chunk is None:
+                raise asyncio.IncompleteReadError(self.buf, n)
+            self.buf += chunk
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+
+PUSH = {"pipe": None}
+
+
+async def handle_push(request):
+    """Шлюз планшета присылает сюда звук микрофона (PCM s16le, 16 кГц, моно) для живого разговора."""
+    ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1 << 20)
+    await ws.prepare(request)
+    if PUSH["pipe"] is not None:
+        PUSH["pipe"].close()
+    pipe = PUSH["pipe"] = PushPipe()
+    log.info("Живой разговор с планшета: звук пошёл")
+    try:
+        async for msg in ws:
+            if msg.type == web.WSMsgType.BINARY:
+                pipe.put(msg.data)
+    finally:
+        pipe.close()
+        if PUSH["pipe"] is pipe:
+            PUSH["pipe"] = None
+        log.info("Живой разговор с планшета: звук закончился")
+    return ws
+
+
 async def handle_stream(request):
     """Живой режим: WebSocket с событиями слуха, пока ядро держит соединение. Только LE Audio
     (звук и микрофон сразу): в обычном Bluetooth пришлось бы держать наушники в режиме гарнитуры.
     События: ready, speech_start, speech_long, utterance {text, speaker, timings}, error {reason}."""
     ws = web.WebSocketResponse(heartbeat=20)
     await ws.prepare(request)
-    card = await asyncio.to_thread(find_bt_card) if CONFIG.get("bluetooth", True) else None
-    if not card or "bap-duplex" not in await asyncio.to_thread(card_profiles, card):
-        await ws.send_json({"type": "error", "reason": "not_duplex"})
-        await ws.close()
-        return ws
+    push = request.query.get("source") == "push"
     if ear.lock.locked() or ear.streaming:
         await ws.send_json({"type": "error", "reason": "busy"})
         await ws.close()
         return ws
-    if await asyncio.to_thread(card_profile, card) != "bap-duplex":
-        await set_profile(card, "bap-duplex")
-        await asyncio.sleep(CONFIG.get("le_settle_s", 0.5))
-    source = await asyncio.to_thread(find_source, card)
-    sink = await asyncio.to_thread(bt_node, card, "sinks")
+    if push:
+        # звук с планшета: эхо гасит его браузер, сигнал «слушаю» звучит на самом планшете
+        for _ in range(50):
+            if PUSH["pipe"] is not None:
+                break
+            await asyncio.sleep(0.2)
+        if PUSH["pipe"] is None:
+            await ws.send_json({"type": "error", "reason": "no_push_audio"})
+            await ws.close()
+            return ws
+        source, sink = "планшет", None
+    else:
+        card = await asyncio.to_thread(find_bt_card) if CONFIG.get("bluetooth", True) else None
+        if not card or "bap-duplex" not in await asyncio.to_thread(card_profiles, card):
+            await ws.send_json({"type": "error", "reason": "not_duplex"})
+            await ws.close()
+            return ws
+        if await asyncio.to_thread(card_profile, card) != "bap-duplex":
+            await set_profile(card, "bap-duplex")
+            await asyncio.sleep(CONFIG.get("le_settle_s", 0.5))
+        source = await asyncio.to_thread(find_source, card)
+        sink = await asyncio.to_thread(bt_node, card, "sinks")
     ear.streaming = True
     rec = None
     try:
@@ -672,9 +744,13 @@ async def handle_stream(request):
             await p.stdin.drain()
             p.stdin.close()
             await p.wait()
-        rec = await asyncio.create_subprocess_exec(
-            "parec", "-d", source, "--raw", f"--rate={RATE}", "--channels=1", "--format=s16le",
-            "--latency-msec=20", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        if push:
+            mic = PUSH["pipe"]
+        else:
+            rec = await asyncio.create_subprocess_exec(
+                "parec", "-d", source, "--raw", f"--rate={RATE}", "--channels=1", "--format=s16le",
+                "--latency-msec=20", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            mic = rec.stdout
         seg = LiveSegmenter()
 
         async def reader():
@@ -714,11 +790,11 @@ async def handle_stream(request):
         log.info("Живой режим: микрофон открыт (%s)", source)
         while not ws.closed:
             try:
-                buf = await asyncio.wait_for(rec.stdout.readexactly(FRAME * 2), timeout=3)
+                buf = await asyncio.wait_for(mic.readexactly(FRAME * 2), timeout=3)
             except (asyncio.IncompleteReadError, asyncio.TimeoutError) as e:
                 log.warning("Живой режим: микрофон оборвался: %r", e)
                 await ws.send_json({"type": "error", "reason": "mic_lost"})
-                if headset:  # канал LE Audio мог не подняться — проверить и починить в фоне
+                if headset and not push:  # канал LE Audio мог не подняться — проверить и починить в фоне
                     asyncio.create_task(headset.check_and_recover("микрофон оборвался"))
                 break
             ev = seg.push(np.frombuffer(buf, dtype=np.int16))
@@ -833,21 +909,31 @@ async def _headset_stop(app):
         t.cancel()
 
 
+def _exit_now(*_):
+    """Остановка службы: выйти сразу, без разбора моделей. Выгрузка onnxruntime (CUDA) при выходе однажды
+    зависла внутри библиотеки (поток в состоянии R не убивался даже SIGKILL — 2026-10-09), и systemd
+    не мог перезапустить слух; GPU-память освобождает драйвер при завершении процесса."""
+    logging.shutdown()
+    os._exit(0)
+
+
 def main():
     global ear, headset
+    import signal
+    signal.signal(signal.SIGTERM, _exit_now)
     ear = Ear()
     import headset as headset_mod
     headset = headset_mod.Headset(CONFIG, say=announce)
     app = web.Application(client_max_size=50 * 1024 * 1024, middlewares=[local_only])
     app.add_routes([web.post("/listen", handle_listen), web.post("/transcribe", handle_transcribe),
                     web.post("/voiceprint/{action}", handle_vp),
-                    web.get("/status", handle_status), web.get("/stream", handle_stream),
+                    web.get("/status", handle_status), web.get("/stream", handle_stream), web.get("/push", handle_push),
                     web.get("/headset", handle_headset), web.post("/headset/{action}", handle_headset),
                     web.post("/headset/{action}/{mode}", handle_headset)])
     if CONFIG.get("headset_guard", True):
         app.on_startup.append(_headset_start)
         app.on_cleanup.append(_headset_stop)
-    web.run_app(app, host="127.0.0.1", port=CONFIG.get("port", 18120), print=None)
+    web.run_app(app, host="127.0.0.1", port=CONFIG.get("port", 18120), print=None, handle_signals=False)
 
 
 if __name__ == "__main__":

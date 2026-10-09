@@ -206,3 +206,6 @@ input[type="checkbox"][role="switch"]:checked::after { transform: translateX(40p
 .hint.left { text-align: left; margin: .3em 0 .6em; }
 .last:has(#last-user:empty), .last.empty { display: none; }
 #view-status > .card { margin-top: .9em; }
+.btn.live { min-height: 92px; font-size: 1.15em; }
+.btn.live[aria-pressed="true"] { background: linear-gradient(135deg, #047857, #0891b2); border-color: rgba(255,255,255,.45);
+  box-shadow: 0 0 0 6px rgba(52,211,153,.22), 0 10px 50px -12px #10b981; }

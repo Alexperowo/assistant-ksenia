@@ -54,15 +54,17 @@
   }
 
   // ---------- состояние ----------
-  const LABEL = { idle: 'Готова', listening: 'Слушаю', thinking: 'Думаю', speaking: 'Говорю', offline: 'Нет связи с компьютером',
+  const LABEL = { idle: 'Готова', live: 'Слушаю', listening: 'Слушаю', thinking: 'Думаю', speaking: 'Говорю', offline: 'Нет связи с компьютером',
     pc_listening: 'Слушаю в наушниках', pc_speaking: 'Говорю в наушниках', unheard: 'Не расслышала' };
-  const SUB = { idle: 'Нажми «Говорить» или скажи «Ксения» в наушники', listening: 'Говори, я слушаю',
+  const SUB = { idle: 'Нажми «Говорить» или скажи «Ксения» в наушники', live: 'Живой разговор: говори как с человеком, можно перебивать',
+    listening: 'Говори, я слушаю',
     thinking: 'Секунду…', speaking: 'Можно перебить — просто начни говорить', offline: 'Подключусь сама, как только компьютер ответит',
     pc_listening: 'Разговор идёт через наушники у компьютера', pc_speaking: 'Разговор идёт через наушники у компьютера',
     unheard: 'Нажми ещё раз и скажи погромче' };
-  const ORB = { pc_listening: 'listening', pc_speaking: 'speaking', unheard: 'idle' };
+  const ORB = { pc_listening: 'listening', pc_speaking: 'speaking', unheard: 'idle', live: 'listening' };
   let state = 'idle';
   function setState(st) {
+    if (liveMode.on && st === 'idle') st = 'live';
     if (st === state) return;
     state = st;
     $('orb').dataset.state = ORB[st] || st;
@@ -245,6 +247,54 @@
     return new Blob([buf], { type: 'audio/wav' });
   }
 
+  // ---------- живой разговор: микрофон открыт всё время, звук потоком на компьютер ----------
+  const liveMode = {
+    on: false, ws: null, stream: null, src: null, node: null,
+    async start() {
+      const ctx = audio();
+      try {
+        this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+      } catch (e) { signal('error'); announce('Нет доступа к микрофону', true); return; }
+      if (!rec.workletReady) { await ctx.audioWorklet.addModule('/recorder-worklet.js'); rec.workletReady = true; }
+      this.src = ctx.createMediaStreamSource(this.stream);
+      this.node = new AudioWorkletNode(ctx, 'recorder');
+      const mute = ctx.createGain(); mute.gain.value = 0;
+      this.src.connect(this.node).connect(mute).connect(ctx.destination);
+      this.ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/live`);
+      this.ws.binaryType = 'arraybuffer';
+      this.node.port.onmessage = (e) => {
+        const pcm = e.data;
+        let sum = 0;
+        for (let i = 0; i < pcm.length; i += 4) { const v = pcm[i] / 32768; sum += v * v; }
+        if (!player.active()) level.set(Math.sqrt(sum / (pcm.length / 4)) * 6);
+        if (this.ws && this.ws.readyState === 1) this.ws.send(pcm.buffer);
+      };
+      this.ws.onmessage = (e) => { try { const m = JSON.parse(e.data); if (m.on === false && m.error) { announce(m.error, true); this.stop(); } } catch (err) { /* */ } };
+      this.ws.onclose = () => { if (this.on) this.stop(); };
+      this.on = true;
+      $('live').setAttribute('aria-pressed', 'true');
+      $('live-label').textContent = 'Закончить живой разговор';
+      $('talk').hidden = true; $('talk-hint').hidden = true;
+      signal('listen');
+      setState('idle');
+      keepAwake();
+    },
+    stop() {
+      if (!this.on) return;
+      this.on = false;
+      try { this.ws && this.ws.send('stop'); this.ws && this.ws.close(); } catch (e) { /* */ }
+      this.ws = null;
+      try { this.src && this.src.disconnect(); this.node && this.node.disconnect(); } catch (e) { /* */ }
+      if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
+      this.stream = null;
+      $('live').setAttribute('aria-pressed', 'false');
+      $('live-label').textContent = 'Живой разговор';
+      $('talk').hidden = false; $('talk-hint').hidden = false;
+      signal('done');
+      state = 'live'; setState('idle');
+    },
+  };
+
   async function startTalking() {
     audio();
     if (player.active() || state === 'thinking' || state === 'speaking') { // перебить Ксению
@@ -406,6 +456,7 @@
     talk.addEventListener('pointercancel', up);
     talk.addEventListener('contextmenu', (e) => e.preventDefault());
     $('stop').addEventListener('click', () => { rec.cancel(); player.stop(); api('/api/stop', {}); setState('idle'); });
+    $('live').addEventListener('click', () => { audio(); if (liveMode.on) liveMode.stop(); else { player.stop(); liveMode.start(); } });
     $('yes').addEventListener('click', () => answer('да'));
     $('no').addEventListener('click', () => answer('нет'));
     $('login-button').addEventListener('click', login);

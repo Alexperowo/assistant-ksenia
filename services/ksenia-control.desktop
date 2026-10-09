@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Ксения — управление
+Comment=Центр управления Ксенией: режимы, память, состояние
+Exec=google-chrome --app=http://127.0.0.1:18142/#control --class=KseniaControl
+Icon=/home/user/Agents/Ksenia/pwa/web/icon-192x192.png
+Terminal=false
+Categories=Utility;

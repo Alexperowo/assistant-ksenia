@@ -1587,9 +1587,12 @@ async def handle_client(request):
     return ws
 
 
-async def say_notice(text: str):
-    """Служебная фраза голосом, мимо истории и мозга. Александр не видит экран: молчание ему ничего не объяснит."""
-    sp = Speaker(ks.session)
+async def say_notice(text: str, output: str = None):
+    """Служебная фраза голосом, мимо истории и мозга. Александр не видит экран: молчание ему ничего не объяснит.
+    Идёт живой разговор с планшета — туда же, на планшет."""
+    if output is None:
+        output = live.output if conv.active() and getattr(conv, "_runner", None) is live else "local"
+    sp = Speaker(ks.session, output=output)
     ks.speaker = sp  # «стоп» прерывает и её
     try:
         await sp.warm()
@@ -1841,6 +1844,8 @@ class LiveConversation(Conversation):
     def __init__(self):
         super().__init__()
         self.cur = None
+        # откуда звук и куда ответ: наушники у компьютера (LE Audio) или планшет (звук идёт через шлюз pwa/)
+        self.source, self.output = "headset", "local"
         self.ducked = None  # озвучка, приглушённая на время его речи (по умолчанию выключено)
         self.judge = None
         self.ws = None
@@ -1898,7 +1903,8 @@ class LiveConversation(Conversation):
     async def live_turn(self, text, listen_info, speaker, resume=False):
         await music.duck(True)
         try:
-            await turn(text, {"_t0": time.time(), "listen": listen_info}, speaker=speaker, resume=resume)
+            await turn(text, {"_t0": time.time(), "listen": listen_info}, speaker=speaker, resume=resume,
+                       output=self.output)
             self.turns += 1
             await deliver_waiting()
         finally:
@@ -1940,7 +1946,7 @@ class LiveConversation(Conversation):
     async def backchannel(self):
         """Своё «угу», когда Александр долго рассказывает и задумался (по умолчанию выключено: live_backchannels)."""
         self.last_bc = time.time()
-        sp = Speaker(ks.session)
+        sp = Speaker(ks.session, output=self.output)
         sp.set_volume(CONFIG.get("live_backchannel_volume", 60))
         try:
             await sp.speak(random.choice(CONFIG.get("live_backchannel_words", ["Угу.", "Ага.", "Мм."])), {"_t0": time.time()})
@@ -2043,7 +2049,7 @@ class LiveConversation(Conversation):
     async def run(self):
         self.turns, self.cur, self.early, self.last_utt, self.ctx_sent = 0, None, None, None, None
         self.judge = live_intent.Judge(CONFIG, BRAIN_KEY)
-        url = CONFIG["voice_in_url"].replace("http", "ws", 1) + "/stream"
+        url = CONFIG["voice_in_url"].replace("http", "ws", 1) + "/stream" + ("?source=push" if self.source == "push" else "")
         try:
             async with ks.session.ws_connect(url, heartbeat=20) as ws:
                 first = await ws.receive_json(timeout=15)
@@ -2231,21 +2237,34 @@ async def stop_conversation():
     return old is not None
 
 
-async def start_talk():
+async def start_talk(source=None):
     # Нажатие во время разговора: прервать речь Ксении и сразу слушать заново.
     # Замок — чтобы два быстрых нажатия не запустили два разговора сразу.
     async with talk_lock:
         if await stop_conversation():
             await asyncio.sleep(0.2)
-        # наушники в LE Audio — живой режим (слушает всегда, можно перебивать); иначе — обычный разговор
-        runner = live if CONFIG.get("live_mode", True) and await live_possible() else conv
+        if source == "push":
+            # живой разговор с планшета: звук приходит через шлюз, ответ звучит на планшете
+            live.source, live.output = "push", "client"
+            runner = live
+        else:
+            # наушники в LE Audio — живой режим (слушает всегда, можно перебивать); иначе — обычный разговор
+            live.source, live.output = "headset", "local"
+            runner = live if CONFIG.get("live_mode", True) and await live_possible() else conv
         conv.task = asyncio.create_task(runner.run())
         conv._runner = runner
     return runner
 
 
 async def handle_talk(request):
-    runner = await start_talk()
+    source = None
+    if request is not None and request.can_read_body:
+        try:
+            body = await request.json()
+            source = body.get("source") if isinstance(body, dict) else None
+        except ValueError:
+            pass
+    runner = await start_talk(source if source == "push" else None)
     return web.json_response({"ok": True, "mode": "live" if runner is live else "conversation"})
 
 

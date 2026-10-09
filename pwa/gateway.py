@@ -12,6 +12,7 @@ API (HTTPS; всё, кроме входа, — только с сессией):
   POST /api/pin/speak           — Ксения произносит код у компьютера (не чаще раза в 30 с)
   POST /api/logout
   GET  /api/ws                  — события разговора и звук ответов (PCM 44,1 кГц)
+  GET  /api/live                — живой разговор: звук микрофона планшета потоком, ответы — на планшет
   POST /api/utterance           — WAV 16 кГц моно → voice-in /transcribe → реплика в ядро, ответ — на планшет
   POST /api/text {"text"}       — реплика текстом (кнопки «Да»/«Нет»)
   POST /api/stop                — замолчать
@@ -438,6 +439,36 @@ class Gateway:
             self.fanout.queues.pop(ws, None)
         return ws
 
+    async def h_live(self, request):
+        """Живой разговор с планшета: звук микрофона (PCM s16le 16 кГц) — слуху (/push), ядро ведёт живой разговор
+        и отвечает на планшет. Эхо собственного голоса Ксении гасит браузер планшета (echoCancellation)."""
+        ws = web.WebSocketResponse(heartbeat=20, max_msg_size=1 << 20)
+        await ws.prepare(request)
+        push = None
+        try:
+            push = await self.session.ws_connect(self.cfg["voice_in_url"].replace("http", "ws", 1) + "/push", heartbeat=20)
+            self.spawn(self.core_post("/talk", {"source": "push"}, timeout=30))
+            await ws.send_json({"type": "live", "on": True})
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.BINARY:
+                    await push.send_bytes(msg.data)
+                elif msg.type == aiohttp.WSMsgType.TEXT and msg.data == "stop":
+                    break
+        except Exception as e:
+            log.warning("живой разговор с планшета: %r", e)
+            if not ws.closed:
+                await ws.send_json({"type": "live", "on": False, "error": "Слух не отвечает."})
+        finally:
+            if push is not None:
+                await push.close()
+            try:
+                await self.core_post("/stop", {}, timeout=10)
+            except Exception:
+                pass
+            if not ws.closed:
+                await ws.close()
+        return ws
+
     async def h_utterance(self, request):
         data = await request.read()
         if len(data) < 44 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
@@ -490,7 +521,7 @@ class Gateway:
         app.add_routes([web.get(p, self.h_static) for p in STATIC] + [
             web.get("/api/session", self.h_session), web.post("/api/login", self.h_login),
             web.post("/api/pin/speak", self.h_pin_speak), web.post("/api/logout", self.h_logout),
-            web.get("/api/ws", self.h_ws), web.post("/api/utterance", self.h_utterance),
+            web.get("/api/ws", self.h_ws), web.get("/api/live", self.h_live), web.post("/api/utterance", self.h_utterance),
             web.post("/api/text", self.h_text), web.post("/api/stop", self.h_stop),
             web.post("/api/listening", self.h_listening),
             web.get("/api/control/state", self.h_control_state), web.post("/api/control/act", self.h_control_act)])
