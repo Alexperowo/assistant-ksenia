@@ -2163,6 +2163,38 @@ async def local_only(request, handler):
 BACKGROUND = []
 
 
+async def startup_check():
+    """Раз за загрузку компьютера: дождаться, пока всё поднимется, и проверить себя. Всё в порядке — молчать;
+    проблема — сказать о ней сама (Александр не видит экран) и показать уведомление. Перезапуск ядра
+    в течение той же загрузки не повторяет проверку (метка в /run/user)."""
+    try:
+        boot = open("/proc/sys/kernel/random/boot_id").read().strip()
+    except OSError:
+        boot = "unknown"
+    mark = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"ksenia-startcheck-{boot}")
+    if os.path.exists(mark):
+        return
+    open(mark, "w").close()
+    deadline = time.time() + CONFIG.get("startup_check_wait_s", 240)
+    res = {}
+    while time.time() < deadline:
+        await asyncio.sleep(20)
+        res = await selfcheck.call("self_check", {}, ks.session)
+        # выключенные наушники при включении компьютера — обычное дело, не проблема
+        res["problems"] = [p for p in res.get("problems") or [] if not p.startswith("наушники не подключены")]
+        if not res["problems"]:
+            log.info("Самопроверка при запуске: всё в порядке")
+            return
+    problems = res.get("problems") or []
+    log.warning("Самопроверка при запуске: %s", problems)
+    text = "Я включилась, но не всё в порядке: " + "; ".join(problems[:2]) + "."
+    daily.notify(text)
+    try:
+        await say_notice(text)
+    except Exception:
+        log.exception("не смогла сказать о проблеме при запуске")
+
+
 async def on_start(app):
     # force_close: llama-server закрывает простаивающие соединения, а переиспользование закрытого
     # давало ServerDisconnected на шаге после инструмента (локальные соединения дёшевы)
@@ -2170,7 +2202,8 @@ async def on_start(app):
     research.CTX.update({"brain_url": CONFIG["brain_url"], "brain_key": BRAIN_KEY})
     # ссылки на фоновые задачи храним: цикл событий держит задачи только слабыми ссылками
     BACKGROUND.extend([asyncio.create_task(findings_loop()), asyncio.create_task(reminders_loop()),
-                       asyncio.create_task(music.book_autosave_loop()), asyncio.create_task(warmup())])
+                       asyncio.create_task(music.book_autosave_loop()), asyncio.create_task(warmup()),
+                       asyncio.create_task(startup_check())])
     if CONFIG.get("headset_buttons", True):
         BACKGROUND.append(asyncio.create_task(buttons.run()))
 

@@ -55,3 +55,27 @@ def test_agent_notes(tmp_path, monkeypatch):
     monkeypatch.setattr(core, "NOTES_FILE", str(f))
     core.save_agent_note("тест", "Привет!")
     assert "тест" in f.read_text(encoding="utf-8") and "Привет!" in f.read_text(encoding="utf-8")
+
+
+def test_startup_check_once_per_boot_and_silent_when_fine(tmp_path, monkeypatch):
+    import asyncio
+    said = []
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setitem(core.CONFIG, "startup_check_wait_s", 1)
+
+    async def fast_sleep(s):
+        return None
+
+    async def fake_check(name, args, session):
+        return {"problems": ["наушники не подключены — включи"], "fine": []}
+
+    async def fake_notice(t):
+        said.append(t)
+    monkeypatch.setattr(core.asyncio, "sleep", fast_sleep)
+    monkeypatch.setattr(core.selfcheck, "call", fake_check)
+    monkeypatch.setattr(core, "say_notice", fake_notice)
+    asyncio.run(core.startup_check())
+    assert said == []  # выключенные наушники — не проблема
+    monkeypatch.setattr(core.selfcheck, "call", lambda *a: asyncio.sleep(0, {"problems": ["мозг не работает"]}))
+    asyncio.run(core.startup_check())
+    assert said == []  # второй раз за ту же загрузку — не проверяет
