@@ -14,6 +14,7 @@ HTTP на 127.0.0.1:18130 (только для программ этого ко�
 """
 import asyncio
 import datetime
+import hashlib
 import json
 import logging
 import os
@@ -42,7 +43,6 @@ TOOL_INDEX = {sch["function"]["name"]: m for m in TOOL_MODULES for sch in m.SCHE
 
 def _tools_changed():
     """Набор инструментов изменился с прошлого запуска? Тогда старые «не умею» в истории могли устареть."""
-    import hashlib
     names = sorted(TOOL_INDEX)
     h = hashlib.sha1(json.dumps(names).encode()).hexdigest()
     f = os.path.join(ROOT, "..", "data", "tools_hash.json")
@@ -795,6 +795,16 @@ ACTION_PATTERNS = [r"\bвключ", r"\bвыключ", r"\bпостав", r"\bп
 
 HISTORY_FILE = os.path.join(ROOT, "..", "data", "history.json")
 
+
+def prefix_file() -> str:
+    """С чего начинается запрос к мозгу (подсказка и начало окна истории) — рядом с историей, переживает
+    перезапуск ядра."""
+    return os.path.join(os.path.dirname(HISTORY_FILE), "brain_prefix.json")
+
+
+def _digest(obj) -> str:
+    return hashlib.sha1(json.dumps(obj, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
 # Хвост-предложение «Хочешь ещё?», «Рассказать ещё?», «Продолжить?» — живой тест: почти каждый ответ кончался им.
 OFFER_RE = re.compile(r"(?:^|[\s,])(?:хочешь|хотите|рассказать|продолжить|продолжать|интересно|ещё что-нибудь|еще что-нибудь|"
                       r"что-нибудь ещё|что-нибудь еще|может,? ещё|может,? еще|давай ещё|давай еще|что скажешь|"
@@ -856,7 +866,9 @@ class Ksenia:
     def __init__(self):
         self.history = self._load_history()
         self.window_start = 0
-        self.system = PERSONA + memory.prompt_block() + diary.prompt_block()
+        self.build_system()
+        if self._restore_prefix():
+            log.info("Начало разговора для мозга то же, что до перезапуска: первый ответ без пересчёта истории")
         # время последней реплики переживает перезапуск ядра (иначе «Доброе утро» после каждого перезапуска)
         self.last_turn_t = os.path.getmtime(HISTORY_FILE) if os.path.exists(HISTORY_FILE) and self.history else 0.0
         self.lock = asyncio.Lock()
@@ -892,6 +904,67 @@ class Ksenia:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(self.history[-CONFIG.get("history_keep", 200):], f, ensure_ascii=False, indent=1)
         os.replace(tmp, HISTORY_FILE)
+        self._save_prefix()
+
+    def build_system(self):
+        """Системная подсказка: личность + память + дневник. Меняется только вместе с началом окна истории
+        (прыжок окна — и так полный пересчёт). Раньше она обновлялась после каждой паузы в 5 минут, если дневник
+        или память изменились, — а дневник пишется после каждых 10 минут тишины, и почти каждый разговор после
+        перерыва начинался с пересчёта всей истории (~13 с тишины). Новое в памяти и дневнике теперь приходит
+        служебной пометкой в реплике (news_note) — история только дописывается."""
+        self.system = PERSONA + memory.prompt_block() + diary.prompt_block()
+        self.facts_seen = [f["fact"] for f in memory._load()]
+        memory.changed["flag"] = diary.changed["flag"] = False
+
+    def news_note(self, first_today: bool) -> str:
+        """Что изменилось в памяти с последней сборки подсказки (например, факт добавили на планшете), а в первом
+        разговоре дня — последние записи дневника («вчера ты рассказывал…»)."""
+        note = ""
+        facts = [f["fact"] for f in memory._load()]
+        seen = getattr(self, "facts_seen", None)
+        if seen is not None:
+            new = [f for f in facts if f not in seen]
+            gone = [f for f in seen if f not in facts]
+            if new:
+                note += "; в памяти новое: " + "; ".join(new[-5:])
+            if gone:
+                note += "; из памяти убрано (больше на это не опирайся): " + "; ".join(gone[-5:])
+        self.facts_seen = facts
+        if first_today:
+            block = " ".join(diary.prompt_block(n=3).split())
+            if block:
+                note += "; " + block
+        return note
+
+    def _save_prefix(self):
+        if not self.history or not 0 <= self.window_start < len(self.history):
+            return
+        d = {"persona": _digest(PERSONA), "system": getattr(self, "system", PERSONA),
+             "window_from_end": len(self.history) - self.window_start,
+             "first": _digest(self.history[self.window_start]), "facts": getattr(self, "facts_seen", None)}
+        tmp = prefix_file() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+        os.replace(tmp, prefix_file())
+
+    def _restore_prefix(self) -> bool:
+        """После перезапуска ядра мозг (если он не перезапускался) помнит разговор с той же подсказкой и того же
+        начала окна. Собрать запрос заново «с нуля» — другая подсказка (свежий дневник) и другое начало окна,
+        то есть пересчёт всей истории (~13 с). Поэтому — тот же снимок, если личность не менялась и история
+        совпадает с тем местом, откуда начиналось окно."""
+        try:
+            with open(prefix_file(), encoding="utf-8") as f:
+                d = json.load(f)
+            start = len(self.history) - int(d["window_from_end"])
+            if d.get("persona") != _digest(PERSONA) or not isinstance(d.get("system"), str) \
+                    or not 0 <= start < len(self.history) or d.get("first") != _digest(self.history[start]):
+                return False
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+        self.system, self.window_start = d["system"], start
+        if isinstance(d.get("facts"), list):
+            self.facts_seen = d["facts"]
+        return True
 
     def recent_user_text(self, n: int = 2) -> str:
         """Последние n реплик Александра без служебных пометок: «напомни…» — «через пять минут»."""
@@ -943,6 +1016,8 @@ class Ksenia:
                 start -= 1
                 acc += len(str(self.history[start].get("content") or ""))
             self.window_start = start
+            if not getattr(self, "_sandbox", False):
+                self.build_system()  # начало запроса и так меняется — заодно свежие память и дневник
         # начало окна — на реплике пользователя (нельзя начинать с ответа инструмента)
         start = self.window_start
         while start < len(self.history) and self.history[start]["role"] != "user":
@@ -966,14 +1041,9 @@ class Ksenia:
                       speaker: dict = None):
         """internal — служебная реплика ядра (напоминание, находка помощника), а не слова Александра:
         она не решает ожидающее подтверждение и не запускает инструменты (в ней чужой текст из интернета)."""
-        # Nex — гибридная модель: её рекуррентное состояние нельзя откатить, поэтому запрос обязан
-        # в точности продолжать прошлый. Время пишем в реплику и сохраняем её в истории как есть.
-        # новые факты памяти попадают в системную подсказку не сразу (это полный пересчёт кэша гибридного мозга),
-        # а когда разговор затих (> 5 мин) — в текущем разговоре факт и так виден в истории
-        if (memory.changed["flag"] or diary.changed["flag"]) and \
-                time.time() - getattr(self, "last_turn_t", 0.0) > CONFIG.get("memory_refresh_idle_s", 300):
-            self.system = PERSONA + memory.prompt_block() + diary.prompt_block()
-            memory.changed["flag"] = diary.changed["flag"] = False
+        # Гибридная модель: её рекуррентное состояние нельзя откатить, поэтому запрос обязан в точности продолжать
+        # прошлый. Время пишем в реплику и сохраняем её в истории как есть; системная подсказка между прыжками окна
+        # не меняется (build_system), новое в памяти и дневнике — пометкой в реплике (news_note).
         first_today = datetime.date.fromtimestamp(getattr(self, "last_turn_t", 0.0) or 0) != datetime.date.today()
         note = ""
         # что сказал Александр — для инструментов, которым нужно его явное слово (память), а не решение модели
@@ -1023,6 +1093,8 @@ class Ksenia:
             note += ("; это первый разговор за сегодня — тепло поздоровайся по времени суток; можешь коротко "
                      "предложить погоду и напомнить, что стоит на сегодня (remind_list), если это к месту; "
                      "иногда (не каждый день) можешь сама предложить свежую новость про нейросети — твою любимую тему")
+        if not internal and not guest and not getattr(self, "_sandbox", False):
+            note += self.news_note(first_today and not user_text.startswith("(служебно"))
         self.history.append({"role": "user", "content": f"{user_text}\n\n(служебно: {now_context()}{note})"})
         if not internal:
             hub.emit({"type": "user", "text": user_text})
