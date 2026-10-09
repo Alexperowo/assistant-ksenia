@@ -40,7 +40,7 @@ def test_remember_when_asked(mem):
 def test_remember_after_yes(mem):
     f, said = mem
     said("да", affirmative=True)
-    assert call("memory_remember", fact="сестру зовут Таня")["remembered"]
+    assert call("memory_remember", fact="сестру зовут Оля")["remembered"]
 
 
 def test_remember_on_its_own_initiative_asks_first(mem):
@@ -68,7 +68,7 @@ def test_forget_one_fact_directly(mem):
 
 def test_forget_many_asks_first(mem):
     f, said = mem
-    f.write_text(json.dumps([{"fact": "любит чай"}, {"fact": "живёт в городе Казань"}, {"fact": "сестра Таня"}],
+    f.write_text(json.dumps([{"fact": "любит чай"}, {"fact": "живёт в городе Казань"}, {"fact": "сестра Оля"}],
                             ensure_ascii=False), encoding="utf-8")
     r = call("memory_forget", query="а")  # одна буква совпадает почти со всем
     assert r["prepared"] and len(facts(f)) == 3
