@@ -456,6 +456,24 @@
     talk.addEventListener('pointercancel', up);
     talk.addEventListener('contextmenu', (e) => e.preventDefault());
     $('stop').addEventListener('click', () => { rec.cancel(); player.stop(); api('/api/stop', {}); setState('idle'); });
+    // камера планшета как глаза: снимок -> уменьшить -> компьютеру; ответ Ксения скажет здесь же
+    $('look').addEventListener('click', () => { audio(); $('look-file').click(); });
+    $('look-file').addEventListener('change', async (e) => {
+      const f = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if (!f) return;
+      setState('thinking'); signal('think');
+      try {
+        const bmp = await createImageBitmap(f);
+        const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+        const c = document.createElement('canvas');
+        c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+        c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+        const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.85));
+        const r = await fetch('/api/look', { method: 'POST', body: blob, credentials: 'same-origin', headers: { 'Content-Type': 'image/jpeg' } });
+        if (!r.ok) throw new Error('look');
+      } catch (err) { setState('idle'); signal('error'); announce('Не получилось посмотреть', true); }
+    });
     $('live').addEventListener('click', () => { audio(); if (liveMode.on) liveMode.stop(); else { player.stop(); liveMode.start(); } });
     $('yes').addEventListener('click', () => answer('да'));
     $('no').addEventListener('click', () => answer('нет'));

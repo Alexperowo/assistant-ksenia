@@ -13,6 +13,7 @@ API (HTTPS; всё, кроме входа, — только с сессией):
   POST /api/logout
   GET  /api/ws                  — события разговора и звук ответов (PCM 44,1 кГц)
   GET  /api/live                — живой разговор: звук микрофона планшета потоком, ответы — на планшет
+  POST /api/look                — фото с камеры планшета: «что передо мной?» (ответ — голосом на планшете)
   POST /api/utterance           — WAV 16 кГц моно → voice-in /transcribe → реплика в ядро, ответ — на планшет
   POST /api/text {"text"}       — реплика текстом (кнопки «Да»/«Нет»)
   POST /api/stop                — замолчать
@@ -469,6 +470,19 @@ class Gateway:
                 await ws.close()
         return ws
 
+    async def h_look(self, request):
+        """Фото с камеры планшета (JPEG) -> ядро /look; ответ Ксения скажет на планшете."""
+        data = await request.read()
+        if len(data) < 1000 or not (data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n"):
+            return web.json_response({"error": "нужно фото"}, status=415)
+        q = (request.query.get("q") or "")[:200]
+        try:
+            async with self.session.post(self.cfg["core_url"] + "/look", data=data, params={"q": q} if q else None,
+                                         timeout=aiohttp.ClientTimeout(total=120)) as r:
+                return web.json_response(await r.json(content_type=None), status=r.status)
+        except Exception:
+            return web.json_response({"error": "Компьютер не ответил."}, status=502)
+
     async def h_utterance(self, request):
         data = await request.read()
         if len(data) < 44 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
@@ -521,7 +535,8 @@ class Gateway:
         app.add_routes([web.get(p, self.h_static) for p in STATIC] + [
             web.get("/api/session", self.h_session), web.post("/api/login", self.h_login),
             web.post("/api/pin/speak", self.h_pin_speak), web.post("/api/logout", self.h_logout),
-            web.get("/api/ws", self.h_ws), web.get("/api/live", self.h_live), web.post("/api/utterance", self.h_utterance),
+            web.get("/api/ws", self.h_ws), web.get("/api/live", self.h_live), web.post("/api/look", self.h_look),
+            web.post("/api/utterance", self.h_utterance),
             web.post("/api/text", self.h_text), web.post("/api/stop", self.h_stop),
             web.post("/api/listening", self.h_listening),
             web.get("/api/control/state", self.h_control_state), web.post("/api/control/act", self.h_control_act)])
