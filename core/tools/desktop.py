@@ -47,6 +47,13 @@ SCHEMAS = [
         "parameters": {"type": "object", "properties": {
             "action": {"type": "string", "enum": ["close", "minimize", "maximize"]}}, "required": ["action"]}}},
     {"type": "function", "function": {
+        "name": "dictate",
+        "description": ("Диктовка: напечатать текст туда, где сейчас курсор (поле, документ, чат). text — дословно, "
+                        "как сказал Александр, с нормальной пунктуацией. enter=true — нажать Enter после "
+                        "(в чате это отправка — спросит «да»)."),
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string"}, "enter": {"type": "boolean"}}, "required": ["text"]}}},
+    {"type": "function", "function": {
         "name": "app_menu",
         "description": ("Открыть или закрыть меню приложений внизу экрана (как «Пуск» в Windows). Чтобы запустить "
                         "конкретную программу, меню не нужно — сразу app_open."),
@@ -57,7 +64,7 @@ SCHEMAS = [
         "parameters": {"type": "object", "properties": {}}}},
 ]
 
-TIMEOUTS = {"app_menu": 10, "window_action": 15, "app_open": 20, "ui_elements": 25, "ui_click": 25, "ui_type": 25, "window_read": 60}
+TIMEOUTS = {"dictate": 20, "app_menu": 10, "window_action": 15, "app_open": 20, "ui_elements": 25, "ui_click": 25, "ui_type": 25, "window_read": 60}
 
 
 HELPER_TIMEOUT_S = 20
@@ -150,6 +157,44 @@ def _find_app(query):
     return best
 
 
+# коды клавиш Linux для ydotool: Ctrl, Shift, V, Enter
+KEY_CTRL, KEY_SHIFT, KEY_V, KEY_ENTER = 29, 42, 47, 28
+
+
+async def _sh(*argv, input_bytes=None, timeout=5):
+    p = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.PIPE if input_bytes is not None else None,
+                                             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    try:
+        out, _ = await asyncio.wait_for(p.communicate(input_bytes), timeout)
+    except asyncio.TimeoutError:
+        p.kill()
+        return -1, b""
+    return p.returncode, out
+
+
+async def _dictate(text: str, enter: bool):
+    """Вставка через буфер обмена (русские буквы и знаки ydotool «печатать» не умеет — раскладка) и Ctrl+V;
+    в терминале — Ctrl+Shift+V. Прежний буфер возвращается."""
+    focused = await _helper("focused")
+    window = focused.get("window", "") if isinstance(focused, dict) else ""
+    rc, old = await _sh("wl-paste", "--no-newline")
+    await _sh("wl-copy", input_bytes=text.encode("utf-8"))
+    await asyncio.sleep(0.15)
+    terminal = bool(re.search(r"konsole|terminal|терминал|yakuake", window, re.I))
+    keys = [f"{KEY_CTRL}:1"] + ([f"{KEY_SHIFT}:1"] if terminal else []) + [f"{KEY_V}:1", f"{KEY_V}:0"] + \
+        ([f"{KEY_SHIFT}:0"] if terminal else []) + [f"{KEY_CTRL}:0"]
+    rc, _ = await _sh("ydotool", "key", *keys)
+    if enter and rc == 0:
+        await asyncio.sleep(0.2)
+        await _sh("ydotool", "key", f"{KEY_ENTER}:1", f"{KEY_ENTER}:0")
+    await asyncio.sleep(0.4)
+    if old:
+        await _sh("wl-copy", input_bytes=old)
+    if rc != 0:
+        return {"ok": False, "error": "не получилось нажать клавиши (ydotool)"}
+    return {"ok": True, "typed": len(text), "window": window, **({"sent": True} if enter else {})}
+
+
 async def call(name, args, session):
     if name == "app_open":
         found = await asyncio.to_thread(_find_app, args.get("name", ""))
@@ -186,6 +231,14 @@ async def call(name, args, session):
         await p.wait()
         await asyncio.sleep(0.6)
         return {"ok": p.returncode == 0, "action": args.get("action"), "window": before}
+    if name == "dictate":
+        text = (args.get("text") or "").strip()
+        if not text:
+            return {"ok": False, "error": "нечего печатать"}
+        if args.get("enter"):
+            return confirm.ask("напечатать и нажать Enter", lambda: _dictate(text, True),
+                               question=f"Печатаю «{text[:80]}» и нажимаю Enter. Отправить?")
+        return await _dictate(text, False)
     if name == "app_menu":
         # при спящем мониторе Plasma ждёт видеокарту и не отвечает на D-Bus (живой тест 2026-10-08) — будим;
         # меню открывают, чтобы им пользоваться, поэтому монитор обратно не усыпляем
