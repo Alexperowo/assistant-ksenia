@@ -31,6 +31,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 
 from tools import confirm, daily, desktop, memory, music, research, screen, selfcheck, settings, system, vk, voicectl  # noqa: E402  (инструменты — отдельные модули в core/tools)
 from tools import web as webtool  # noqa: E402  (не путать с aiohttp.web)
+import speech_norm  # noqa: E402
 import live_intent  # noqa: E402  (что значит реплика во время речи Ксении)
 
 TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research, daily, voicectl, system, settings, selfcheck]
@@ -251,6 +252,7 @@ def clean_for_speech(text: str, verbatim: bool = False) -> str:
         return f"[{t}]" if t in ALLOWED_TAGS else ""
     if not verbatim:
         text = feminine(fix_english_numbers(strip_thinking(text)))
+    text = speech_norm.normalize(text)  # «до н. э.», «°C», «м/с», «мм» — словами (голос читает их неправильно)
     if verbatim:
         text = re.sub(r"[\[\]]", " ", text)
         text = re.sub(r"https?://\S+", " ссылка ", text)
