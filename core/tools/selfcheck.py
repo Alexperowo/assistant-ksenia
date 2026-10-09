@@ -11,7 +11,8 @@ import shutil
 import aiohttp
 
 CFG = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config.json"), encoding="utf-8"))
-SERVICES = {"ksenia-brain": "мозг", "ksenia-voice-out": "голос", "ksenia-voice-in": "слух", "ksenia-core": "ядро"}
+SERVICES = {"ksenia-brain": "мозг", "ksenia-voice-out": "голос", "ksenia-voice-in": "слух", "ksenia-judge": "судья реплик",
+            "ksenia-core": "ядро"}
 
 SCHEMAS = [
     {"type": "function", "function": {
@@ -58,6 +59,13 @@ async def call(name, args, session):
         fine.append("наушники подключены")
     else:
         problems.append("наушники не подключены — голос пойдёт в монитор или в никуда; включи наушники")
+    rc, hs = await _run("curl", "-s", "-m", "5", "http://127.0.0.1:18120/headset")
+    if '"mode": "talk"' in hs:
+        fine.append("наушники в режиме разговора — можно перебивать")
+    elif '"mode": "music"' in hs:
+        fine.append("наушники в режиме музыки — слушаю после сигнала")
+    if '"не удалось' in hs:
+        problems.append("канал звука наушников недавно не поднялся — если звука нет, выключи и включи наушники")
     rc, st = await _run("curl", "-s", "-m", "3", "http://127.0.0.1:18120/status")
     if '"busy": true' in st:
         fine.append("слух сейчас занят записью")

@@ -632,6 +632,8 @@ async def handle_stream(request):
             except (asyncio.IncompleteReadError, asyncio.TimeoutError) as e:
                 log.warning("Живой режим: микрофон оборвался: %r", e)
                 await ws.send_json({"type": "error", "reason": "mic_lost"})
+                if headset:  # канал LE Audio мог не подняться — проверить и починить в фоне
+                    asyncio.create_task(headset.check_and_recover("микрофон оборвался"))
                 break
             ev = seg.push(np.frombuffer(buf, dtype=np.int16))
             if ev == "partial":
@@ -705,13 +707,55 @@ async def local_only(request, handler):
     return await handler(request)
 
 
+headset = None
+
+
+async def announce(text):
+    """Служебная фраза голосом Ксении (мимо мозга): «Наушники переподключила…»."""
+    p = await asyncio.create_subprocess_exec(os.path.join(ROOT, "..", "scripts", "ksenia-announce"), text,
+                                             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    await p.wait()
+
+
+async def handle_headset(request):
+    """GET /headset — состояние; POST /headset/check — проверить и починить канал; POST /headset/mode/{music|talk}."""
+    action = request.match_info.get("action", "status")
+    if request.method == "GET" or action == "status":
+        return web.json_response(await headset.status())
+    if action == "check":
+        return web.json_response(await headset.check_and_recover("просьба ядра"))
+    if action == "mode":
+        return web.json_response(await headset.set_mode(request.match_info.get("mode", "")))
+    return web.json_response({"ok": False, "error": "неизвестное действие"}, status=404)
+
+
+async def _headset_start(app):
+    async def first_check():
+        await asyncio.sleep(CONFIG.get("headset_check_delay_s", 8))  # наушники могут подключаться после слуха
+        res = await headset.check_and_recover("запуск слуха")
+        log.info("Наушники при запуске: %s", res)
+    app["headset_tasks"] = [asyncio.create_task(first_check()), asyncio.create_task(headset.watch())]
+
+
+async def _headset_stop(app):
+    for t in app.get("headset_tasks", []):
+        t.cancel()
+
+
 def main():
-    global ear
+    global ear, headset
     ear = Ear()
+    import headset as headset_mod
+    headset = headset_mod.Headset(CONFIG, say=announce)
     app = web.Application(client_max_size=50 * 1024 * 1024, middlewares=[local_only])
     app.add_routes([web.post("/listen", handle_listen), web.post("/transcribe", handle_transcribe),
                     web.post("/voiceprint/{action}", handle_vp),
-                    web.get("/status", handle_status), web.get("/stream", handle_stream)])
+                    web.get("/status", handle_status), web.get("/stream", handle_stream),
+                    web.get("/headset", handle_headset), web.post("/headset/{action}", handle_headset),
+                    web.post("/headset/{action}/{mode}", handle_headset)])
+    if CONFIG.get("headset_guard", True):
+        app.on_startup.append(_headset_start)
+        app.on_cleanup.append(_headset_stop)
     web.run_app(app, host="127.0.0.1", port=CONFIG.get("port", 18120), print=None)
 
 
