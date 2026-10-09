@@ -32,6 +32,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 from tools import confirm, daily, desktop, headphones, memory, music, research, screen, selfcheck, settings, system, vk, voicectl  # noqa: E402  (инструменты — отдельные модули в core/tools)
 from tools import web as webtool  # noqa: E402  (не путать с aiohttp.web)
 import speech_norm  # noqa: E402
+import diary  # noqa: E402
 import live_intent  # noqa: E402  (что значит реплика во время речи Ксении)
 
 TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research, daily, voicectl, system, settings, selfcheck, headphones]
@@ -831,7 +832,7 @@ class Ksenia:
     def __init__(self):
         self.history = self._load_history()
         self.window_start = 0
-        self.system = PERSONA + memory.prompt_block()
+        self.system = PERSONA + memory.prompt_block() + diary.prompt_block()
         # время последней реплики переживает перезапуск ядра (иначе «Доброе утро» после каждого перезапуска)
         self.last_turn_t = os.path.getmtime(HISTORY_FILE) if os.path.exists(HISTORY_FILE) and self.history else 0.0
         self.lock = asyncio.Lock()
@@ -943,9 +944,10 @@ class Ksenia:
         # в точности продолжать прошлый. Время пишем в реплику и сохраняем её в истории как есть.
         # новые факты памяти попадают в системную подсказку не сразу (это полный пересчёт кэша гибридного мозга),
         # а когда разговор затих (> 5 мин) — в текущем разговоре факт и так виден в истории
-        if memory.changed["flag"] and time.time() - getattr(self, "last_turn_t", 0.0) > CONFIG.get("memory_refresh_idle_s", 300):
-            self.system = PERSONA + memory.prompt_block()
-            memory.changed["flag"] = False
+        if (memory.changed["flag"] or diary.changed["flag"]) and \
+                time.time() - getattr(self, "last_turn_t", 0.0) > CONFIG.get("memory_refresh_idle_s", 300):
+            self.system = PERSONA + memory.prompt_block() + diary.prompt_block()
+            memory.changed["flag"] = diary.changed["flag"] = False
         first_today = datetime.date.fromtimestamp(getattr(self, "last_turn_t", 0.0) or 0) != datetime.date.today()
         note = ""
         # что сказал Александр — для инструментов, которым нужно его явное слово (память), а не решение модели
@@ -2264,6 +2266,24 @@ async def local_only(request, handler):
 BACKGROUND = []
 
 
+async def diary_loop():
+    """Разговор затих на diary_idle_s — записать его в дневник (мозг свободен, ячейка 1)."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            idle = time.time() - getattr(ks, "last_turn_t", 0.0)
+            if idle < CONFIG.get("diary_idle_s", 600) or conv.active() or ks.lock.locked():
+                continue
+            entry = await diary.summarize(ks.session, ks.history, CONFIG["brain_url"], BRAIN_KEY,
+                                          slot=CONFIG.get("diary_slot", 1))
+            if entry:
+                log.info("Дневник: %s", entry)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("дневник: %r", e)
+
+
 async def startup_check():
     """Раз за загрузку компьютера: дождаться, пока всё поднимется, и проверить себя. Всё в порядке — молчать;
     проблема — сказать о ней сама (Александр не видит экран) и показать уведомление. Перезапуск ядра
@@ -2304,7 +2324,7 @@ async def on_start(app):
     # ссылки на фоновые задачи храним: цикл событий держит задачи только слабыми ссылками
     BACKGROUND.extend([asyncio.create_task(findings_loop()), asyncio.create_task(reminders_loop()),
                        asyncio.create_task(music.book_autosave_loop()), asyncio.create_task(warmup()),
-                       asyncio.create_task(startup_check())])
+                       asyncio.create_task(startup_check()), asyncio.create_task(diary_loop())])
     if CONFIG.get("headset_buttons", True):
         BACKGROUND.append(asyncio.create_task(buttons.run()))
 
