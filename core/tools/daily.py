@@ -127,13 +127,26 @@ def _symbol(code):
     return SYMBOLS.get(base, base)
 
 
+def _nominative_guesses(city):
+    """«в Москве», «в Гусь-Хрустальном» (так город лежит в памяти) -> «Москва», «Гусь-Хрустальный»."""
+    out = []
+    for end, rep in (("ском", "ск"), ("ом", "ый"), ("ем", "ий"), ("е", "а"), ("и", "ь"), ("е", "")):
+        if city.endswith(end) and len(city) > len(end) + 2:
+            out.append(city[: -len(end)] + rep)
+    return out
+
+
 async def _weather(city, day, session):
     """Город → координаты (open-meteo geocoding) → прогноз (api.met.no; оба доступны из сети Александра)."""
-    geo_url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode(
-        {"name": city, "count": 1, "language": "ru"})
-    async with session.get(geo_url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-        g = await r.json(content_type=None)
-    res = (g.get("results") or [None])[0]
+    res = None
+    for name in [city] + _nominative_guesses(city):
+        geo_url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode(
+            {"name": name, "count": 1, "language": "ru"})
+        async with session.get(geo_url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            g = await r.json(content_type=None)
+        res = (g.get("results") or [None])[0]
+        if res:
+            break
     if not res:
         return {"ok": False, "error": f"не нашла город «{city}»",
                 "note": "название могло быть искажено распознаванием речи: подумай, какой настоящий город похож "
@@ -193,7 +206,9 @@ def _day_summary(steps, target):
 
 
 def _city_from_memory():
-    for f in memory._load():
+    # последний записанный город — самый свежий (раньше брался первый: «живёт в Москве» из старого теста
+    # перебивал позже записанный настоящий город)
+    for f in reversed(memory._load()):
         fact = f["fact"].lower()
         for key in ("живёт в ", "живет в ", "город ", "из города "):
             if key in fact:
