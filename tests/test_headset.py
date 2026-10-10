@@ -83,3 +83,31 @@ def test_self_repair_failure_is_said_once_and_backs_off(monkeypatch):
     asyncio.run(h.check_and_recover("сбой транспорта в журнале"))
     asyncio.run(h.check_and_recover("сбой транспорта в журнале"))
     assert len(said) == 1 and "Выключи их и включи" in said[0] and h._backoff_until > 0
+
+
+def test_connect_powers_adapter_and_falls_back_to_le(monkeypatch):
+    calls = []
+    state = {"connected": False}
+
+    async def fake_run(*argv, input_text=None, timeout=20):
+        calls.append(argv if not input_text else ("stdin", input_text.strip().split("\n")[0]))
+        if argv[:2] == ("bluetoothctl", "show"):
+            return 0, "Powered: no"
+        if argv[:2] == ("bluetoothctl", "connect"):
+            if any(c[0] == "stdin" and "bearer" in c[1] for c in calls):
+                state["connected"] = True
+                return 0, "Connection successful"
+            return 1, "Failed to connect: org.bluez.Error.Failed br-connection-key-missing"
+        return 0, ""
+
+    async def fake_wait(mac, want_profile=None, timeout=15):
+        return state["connected"]
+
+    async def no_sleep(s):
+        pass
+
+    monkeypatch.setattr(headset, "run", fake_run)
+    monkeypatch.setattr(headset, "_wait_connected", fake_wait)
+    monkeypatch.setattr(hs.asyncio, "sleep", no_sleep)
+    assert asyncio.run(hs.try_connect("AA")) is True
+    assert ("bluetoothctl", "power", "on") in calls and ("stdin", "bearer AA le") in calls

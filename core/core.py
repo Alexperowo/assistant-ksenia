@@ -601,7 +601,46 @@ def pick_output_sink():
     for n in names:
         if "hdmi" in n:
             return n
+    # ни наушников, ни HDMI: скорее всего, экран спит — тогда монитор отключает и звук по HDMI, и Ксения говорила
+    # бы в пустоту (2026-10-10: «Dummy Output»). Будим экран — выход появляется за ~0,3 с; погасим после речи.
+    if want == "auto" and wake_monitor_for_sound():
+        out = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, timeout=3).stdout
+        for n in [s.split("\t")[1] for s in out.split("\n") if "\t" in s]:
+            if "hdmi" in n:
+                return n
     return None
+
+
+_WOKE = {"by_us": False}
+
+
+def wake_monitor_for_sound() -> bool:
+    """Разбудить спящий монитор ради звука. True — проснулся и HDMI-выход появился (до 3 с)."""
+    try:
+        from tools import screen
+        if not screen._dpms_is_off():
+            return False
+        subprocess.run(["kscreen-doctor", "--dpms", "on"], capture_output=True, timeout=5)
+        for _ in range(30):
+            out = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, timeout=3).stdout
+            if "hdmi" in out:
+                _WOKE["by_us"] = True
+                log.info("Экран спал — разбудила ради звука")
+                time.sleep(CONFIG.get("monitor_audio_settle_s", 0.8))  # динамикам монитора нужно мгновение
+                return True
+            time.sleep(0.1)
+    except Exception as e:
+        log.warning("не получилось разбудить монитор ради звука: %r", e)
+    return False
+
+
+async def sleep_monitor_if_woken():
+    """Ксения будила экран только ради голоса — после речи снова погасить (ночью свет экрана мешает)."""
+    if not _WOKE["by_us"]:
+        return
+    _WOKE["by_us"] = False
+    await asyncio.sleep(CONFIG.get("monitor_sleep_after_s", 3))
+    await asyncio.to_thread(subprocess.run, ["kscreen-doctor", "--dpms", "off"], capture_output=True, timeout=5)
 
 
 class ClientHub:
@@ -1038,6 +1077,8 @@ class Speaker:
                 await self._drop_player()
             except Exception:
                 pass
+        if _WOKE["by_us"]:
+            spawn(sleep_monitor_if_woken())
 
     def set_volume(self, percent: int):
         """Громкость своей озвучки (живой режим: тише, пока Александр говорит). Меняется в самих данных,

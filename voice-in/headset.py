@@ -156,6 +156,25 @@ async def restart_bluetooth(mac):
     return await _wait_connected(mac)
 
 
+async def try_connect(mac):
+    """Подключить наушники: включить адаптер, если выключен (2026-10-10 после аварийной перезагрузки KDE запомнил
+    «Bluetooth выключен»), и подключить; классический канал без ключа (br-connection-key-missing) — через LE Audio,
+    ради которого наушники и заведены. True — подключены."""
+    rc, show = await run("bluetoothctl", "show", timeout=5)
+    if "Powered: no" in show:
+        log.warning("Bluetooth был выключен — включаю")
+        await run("bluetoothctl", "power", "on", timeout=10)
+        await asyncio.sleep(2)
+    rc, out = await run("bluetoothctl", "connect", mac, timeout=30)
+    if "key-missing" in out or "Failed" in out:
+        log.warning("Наушники: обычное подключение не прошло (%s) — пробую LE Audio", out.strip()[-80:])
+        await set_bearer(mac, "le")
+        rc, out = await run("bluetoothctl", "connect", mac, timeout=30)
+    ok = await _wait_connected(mac, timeout=10)
+    log.info("Наушники: подключение %s", "удалось" if ok else "не удалось")
+    return ok
+
+
 async def set_bearer(mac, bearer):
     """Предпочтительный канал устройства: le | bredr | last-used."""
     return await run("bluetoothctl", input_text=f"bearer {mac} {bearer}\nquit\n", timeout=10)
@@ -192,6 +211,8 @@ class Headset:
             return {"ok": False, "busy": True}
         async with self.lock:
             mac = await self.ensure_mac()
+            if mac and not (await info(mac))["connected"] and reason in ("запуск слуха", "просьба ядра"):
+                await try_connect(mac)  # при запуске и по «почини звук» — подключить самим, а не только сообщить
             if not mac or not (await info(mac))["connected"]:
                 return {"ok": False, "error": "наушники не подключены"}
             prof = await card_profile(mac)
