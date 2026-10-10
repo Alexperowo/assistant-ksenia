@@ -135,9 +135,29 @@ def read_key(path):
 
 BRAIN_KEY = read_key(CONFIG["brain_key_file"])
 
-# инструменты с последствиями после хода — в песочнице автопроверки не исполняются
-SANDBOX_STUB = {"research_background", "remind_set", "remind_cancel", "memory_remember", "memory_forget", "vk_send",
-                "watch_rule", "voice_enroll", "voice_mode", "dictate", "setting", "system"}
+# Автопроверка в песочнице исполняет только то, что ничего не меняет у Александра (список разрешённого, а не
+# запрещённого: новый инструмент по умолчанию не исполняется). Остальное — «принято, но не выполнено».
+SANDBOX_READONLY = {"weather", "remind_list", "ui_elements", "cursor_look", "window_read", "help_guide", "memory_list",
+                    "music_status", "screen_describe", "screen_read", "clipboard_read", "read_more", "self_check",
+                    "vk_unread", "web_search", "web_open", "web_outline"}
+SANDBOX_READONLY_ACTIONS = {"files": ("action", {"find", "recent", "read"}), "headphones": ("action", {"status"}),
+                            "system": ("command", set(system.INFO)),
+                            "setting": ("action", {"volume_get", "brightness_get", "wifi_status", "wifi_list"}),
+                            "watch_rule": ("action", {"list"}), "voice_enroll": ("action", {"status"}),
+                            "audiobook": ("action", {"search"})}
+
+
+def sandbox_allows(name: str, arguments: str) -> bool:
+    if name in SANDBOX_READONLY:
+        return True
+    rule = SANDBOX_READONLY_ACTIONS.get(name)
+    if not rule:
+        return False
+    try:
+        args = json.loads(arguments or "{}")
+    except ValueError:
+        return False
+    return isinstance(args, dict) and args.get(rule[0]) in rule[1]
 ALLOWED_TAGS = {"laughing", "sigh", "teasing", "excited", "surprised", "whisper", "annoyed", "warm"}
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа",
           "сентября", "октября", "ноября", "декабря"]
@@ -471,6 +491,8 @@ class Speaker:
         # предложениями (раньше синтез ждал, пока проиграется предыдущая фраза)
         self._q: asyncio.Queue = asyncio.Queue()
         self._play_task = None
+        self.failed = False  # хоть одна фраза не прозвучала из-за голоса — вопрос «Отправить?» мог не дойти
+        self.down = False    # голос недоступен совсем — остальные фразы не ждать по 15 с каждую
 
     BYTES_PER_S = 44100 * 2
 
@@ -553,6 +575,9 @@ class Speaker:
         text = clean_for_speech(text, verbatim=verbatim)
         if not text or self.cancelled:
             return
+        if self.down:
+            self.failed = True
+            return
         self.started = True  # речь уже пошла в озвучку — «Хм, секунду» не нужно
         shown = re.sub(r"\[\w+\]\s*", "", text)
         hub.emit({"type": "say", "text": shown})  # текст реплики — на экран планшета
@@ -571,14 +596,17 @@ class Speaker:
         written = 0
         try:
             while not self.cancelled:
+                # sock_read: зависший голос держал бы ход (и ks.lock) до 2 минут на каждую фразу
                 async with self.session.post(CONFIG["voice_out_url"] + "/generate", data=form,
-                                             timeout=aiohttp.ClientTimeout(total=120)) as r:
+                                             timeout=aiohttp.ClientTimeout(total=120, sock_connect=3,
+                                                                           sock_read=CONFIG.get("tts_read_s", 15))) as r:
                     if r.status == 503 and time.time() < deadline:
                         await asyncio.sleep(0.15)
                         form = make_form()
                         continue
                     if r.status != 200:
                         log.error("voice-out %s: %s", r.status, (await r.text())[:200])
+                        self.failed = True
                         return
                     await self._ensure_player()
                     if not written and not isinstance(self.player, ClientPlayer):
@@ -601,14 +629,20 @@ class Speaker:
                         self.recorded.extend(chunk)
                         await asyncio.sleep(0)
                     return
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            log.error("voice-out недоступен или оборвал поток: %r", e)
+        except (aiohttp.ClientConnectorError, asyncio.TimeoutError) as e:
+            log.error("voice-out недоступен: %r", e)
+            self.failed = self.down = True
+        except aiohttp.ClientError as e:
+            log.error("voice-out оборвал поток: %r", e)
+            self.failed = True
         except OSError as e:  # pacat закрылся (наушники отключились) — BrokenPipe/ConnectionReset при drain
             if not self.cancelled:  # после «замолчи» плеер закрыт нарочно
                 log.error("плеер закрылся: %r", e)
+                self.failed = True
             await self._drop_player()
         except Exception:
             log.exception("сбой озвучки")
+            self.failed = True
             await self._drop_player()
         finally:
             self._streaming = False
@@ -984,28 +1018,45 @@ class Ksenia:
                     break
         return " ".join(reversed(out))
 
-    async def _resolve_confirmation(self, user_text: str) -> str:
-        """Подтверждение рискованного действия решает ЯДРО, не модель: если действие ждёт и Александр
-        ответил ясным согласием — ядро выполняет его само; любой другой ответ отменяет."""
-        p = confirm.current()
+    async def _resolve_confirmation(self, user_text: str, turn_no: int, output: str = "local") -> str:
+        """Подтверждение рискованного действия решает ЯДРО, не модель: если действие ждёт, вопрос о нём — последнее,
+        что сказала Ксения, и Александр ответил ясным согласием — ядро выполняет его само; любой другой ответ
+        отменяет. Выполнение — отдельной задачей: «стоп» посреди отправки не обрывает её на полпути, а долгое
+        (установка, обновление) идёт в фоне — об итоге Ксения скажет, когда он будет."""
+        p = confirm.peek()
         if not p:
-            return ""
-        if p.get("expired"):
-            return f"; действие «{p['label']}» устарело и НЕ выполнено"
+            gone = confirm.current()  # просроченное убирается здесь и сообщается модели
+            return f"; действие «{gone['label']}» устарело и НЕ выполнено" if gone and gone.get("expired") else ""
+        if p["turn"] != turn_no - 1:
+            # после вопроса прозвучало другое (напоминание, новость, ответ гостю): «да» могло относиться к нему
+            confirm.cancel("stale")
+            return (f"; действие «{p['label']}» НЕ выполнено: после вопроса о нём прозвучало другое — "
+                    f"если оно ещё нужно, спроси заново")
         if not is_affirmative(user_text):
             confirm.cancel()
             return f"; действие «{p['label']}» НЕ выполнено (Александр не сказал «да»)"
         item = confirm.take()
         if not item:  # истекло между проверкой и выполнением
             return f"; действие «{p['label']}» устарело и НЕ выполнено"
+        task = spawn(run_confirmed(item))
+        if item.get("background"):
+            task.add_done_callback(lambda t: report_confirmed_later(item, t))
+            return (f"; Александр подтвердил, ядро НАЧАЛО: {item['label']}. Это долго — коротко скажи, что начала "
+                    f"и скажешь, когда закончится")
+        done, _ = await asyncio.wait({task}, timeout=CONFIG.get("confirm_ack_s", 1.5))
+        if not done:
+            # дольше полутора секунд — сказать, что делается, а не молчать
+            await say_notice(random.choice(("Секунду, выполняю.", "Делаю.", "Сейчас.")), output=output)
         try:
-            res = await asyncio.wait_for(item["run"](), timeout=60)
-        except Exception as e:
-            log.exception("подтверждённое действие")
-            res = {"ok": False, "error": f"сбой: {e!r}"[:200]}
-        if not isinstance(res, dict):
-            res = {"ok": False, "error": "действие не вернуло результат"}
-        log.info("Подтверждено Александром: %s -> %s", item["label"], res)
+            res = await asyncio.wait_for(asyncio.shield(task), timeout=CONFIG.get("confirm_wait_s", 25))
+        except asyncio.TimeoutError:
+            task.add_done_callback(lambda t: report_confirmed_later(item, t))
+            return (f"; Александр подтвердил, ядро выполняет «{item['label']}», но это дольше обычного — "
+                    f"скажи коротко, что ещё делается и ты скажешь, когда закончится")
+        except asyncio.CancelledError:
+            # ход оборвали (касание, «стоп»): действие доделывается, итог Ксения скажет отдельно
+            task.add_done_callback(lambda t: report_confirmed_later(item, t))
+            raise
         if res.get("ok"):
             return f"; Александр подтвердил, ядро ВЫПОЛНИЛО: {item['label']}. Коротко скажи итог"
         return f"; Александр подтвердил, но «{item['label']}» НЕ удалось: {res.get('error')}. Скажи честно"
@@ -1058,23 +1109,35 @@ class Ksenia:
         # разговор вежливый, но без действий; ожидающее подтверждение он решить не может.
         speaker = speaker or {}
         guest = speaker.get("owner") is False
-        weak_voice = speaker.get("enrolled") and speaker.get("owner") and not speaker.get("confirm_ok")
+        # образец голоса записан, а уверенного совпадения нет (в том числе «не узнан»: фраза короче 0,6 с) —
+        # такое «да» рискованное действие не решает
+        weak_voice = bool(speaker.get("enrolled")) and not speaker.get("confirm_ok")
         self._guest = guest
+        if not getattr(self, "_sandbox", False):
+            confirm.TURN["n"] += 1
+        turn_no = confirm.TURN["n"]
+        last_said = next((m.get("content") or "" for m in reversed(self.history)
+                          if m.get("role") == "assistant" and m.get("content")), "")
         confirm.CONTEXT.update({"user_text": "" if (internal or guest) else user_text, "internal": internal or guest,
-                                "affirmative": (not internal) and (not guest) and is_affirmative(user_text)})
+                                "affirmative": (not internal) and (not guest) and is_affirmative(user_text),
+                                "last_said": last_said})
         if guest:
             note = ("; говорит НЕ Александр (чужой голос, гость) — поговори вежливо, но никаких действий и "
                     "инструментов, подтверждения не принимай; если просят что-то сделать — «это может только Александр»")
         elif not internal:
             self.last_turn_t = time.time()
+            pending_item = confirm.peek()
             if getattr(self, "_sandbox", False):
                 pass  # автопроверка не отвечает «да/нет» на настоящий вопрос Александра («Отправить?»)
-            elif weak_voice and is_affirmative(user_text) and confirm.current() and not confirm.current().get("expired"):
-                # «да» на рискованное действие — только уверенно узнанным голосом Александра
-                note = "; голос не совпал уверенно — действие НЕ выполнено, попроси Александра повторить «да»"
+            elif weak_voice and is_affirmative(user_text) and pending_item and pending_item["turn"] == turn_no - 1:
+                # «да» на рискованное действие — только уверенно узнанным голосом Александра. Вопрос остаётся
+                # последним сказанным: следующее «да, отправляй» (длиннее — голос узнаётся надёжнее) его решит
+                pending_item["turn"] = turn_no
+                confirm.CONTEXT["affirmative"] = False
+                note = ("; голос не узнан уверенно — действие НЕ выполнено; попроси Александра сказать чуть длиннее, "
+                        "например «да, отправляй»")
             else:
-                # служебная реплика между «Отправить?» и ответом Александра раньше отменяла действие как «не да»
-                note = await self._resolve_confirmation(user_text)
+                note = await self._resolve_confirmation(user_text, turn_no, output=output)
         # не расслышала: человек переспросит, а не угадает (совет Fable, REVIEW-3 п. 10.2)
         asr = ((timings or {}).get("listen") or {}).get("asr") or {}
         if not internal and asr.get("mean", 0) < CONFIG.get("asr_unsure_mean", -0.2):
@@ -1087,12 +1150,13 @@ class Ksenia:
         if mood and not internal:
             note += f"; по голосу: {mood} — будь мягче и короче, не комментируй это вслух"
         global NEW_TOOLS
-        if NEW_TOOLS is not None and not internal and not guest:
+        sandbox = getattr(self, "_sandbox", False)
+        if NEW_TOOLS is not None and not internal and not guest and not sandbox:
             note += ("; у тебя обновились умения" + (f" (новые: {', '.join(NEW_TOOLS)})" if NEW_TOOLS else "")
                      + " — если раньше ты говорила «не могу», это могло устареть: проверь инструментом")
             NEW_TOOLS = None
         it = self.fresh_interruption()
-        if it and not internal and not guest and not it.get("noted"):
+        if it and not internal and not guest and not sandbox and not it.get("noted"):
             # история только дописывается: в ней весь сгенерированный ответ, а прозвучала лишь часть — говорим мозгу правду
             it["noted"] = True
             note += (f"; тебя перебили, ты не договорила прошлый ответ: остановилась на «…{it['said'][-120:]}», "
@@ -1162,7 +1226,8 @@ class Ksenia:
                         result = {"ok": False, "error": "говорит не Александр — действия выполняет только он"}
                     elif not asked_for(c["function"]["name"], self.recent_user_text()):
                         result = UNASKED_RESULT
-                    elif getattr(self, "_sandbox", False) and c["function"]["name"] in SANDBOX_STUB:
+                    elif getattr(self, "_sandbox", False) and \
+                            not sandbox_allows(c["function"]["name"], c["function"].get("arguments") or "{}"):
                         # автопроверка: фоновый поиск, напоминание или подтверждение потом пришли бы в настоящий разговор
                         result = {"ok": True, "sandbox": True, "note": "песочница: принято, но не выполнено"}
                     else:
@@ -1197,6 +1262,11 @@ class Ksenia:
             if not worker.done():  # озвучка не должна жить дольше хода (и держать pacat)
                 await speaker.cancel()
                 worker.cancel()
+            asked = confirm.peek()
+            if asked and asked["turn"] == turn_no and (speaker.cancelled or getattr(speaker, "failed", False)):
+                # вопрос «Отправить?» не прозвучал целиком (перебили, голос не работал): подтверждать нечего
+                confirm.cancel("unheard")
+                log.info("Вопрос «%s» не прозвучал — действие отменено", asked["question"])
             if speaker.cancelled and not internal:
                 self.remember_interruption(speaker, queue)
             try:
@@ -1324,6 +1394,7 @@ class Ksenia:
         tail = think.flush()
         full, buf = full + tail, buf + tail
         if failed:
+            self._brain_failed = True
             buf = (buf.strip() + " " + BRAIN_FAIL_PHRASE).strip()
         # Промежуточный шаг (после первого и с вызовом инструмента) — это «рассуждения вслух»: не озвучиваем.
         narration = (not first_step) and bool(calls) and not failed
@@ -1395,6 +1466,7 @@ class Ksenia:
         it, self.interrupted = self.interrupted, None
         rest = it["rest"]
         self.last_turn_t = time.time()
+        confirm.TURN["n"] += 1  # Ксения заговорила о другом: прежний вопрос «Отправить?» больше не последний
         self.history.append({"role": "user", "content": f"{user_text}\n\n(служебно: {now_context()}; ядро продолжило "
                                                         f"твой недосказанный ответ с места, где тебя перебили)"})
         self.history.append({"role": "assistant", "content": rest})
@@ -1467,6 +1539,14 @@ async def handle_say(request):
     if output not in ("local", "client"):
         return web.json_response({"error": "output: local или client"}, status=400)
     timings = {"_t0": time.time()}
+    sandbox = bool(data.get("sandbox"))
+    sink = data.get("sink")
+    if sink is not None and not (isinstance(sink, str) and re.fullmatch(r"[\w.\-]{1,80}", sink)):
+        return web.json_response({"error": "sink: имя выхода PipeWire"}, status=400)
+    if sandbox:
+        # автопроверка: тихо, в свой выход — настоящую речь Ксении не обрывает и музыку не приглушает
+        reply = await turn(text, timings, output="local", sandbox=True, sink=sink)
+        return web.json_response({"reply": reply, "timings": timings})
     if output == "client":
         # реплика с планшета: разговор через гарнитуру у ПК прерываем (иначе он слушал бы параллельно)
         ks.last_client_t = time.time()
@@ -1474,21 +1554,19 @@ async def handle_say(request):
             await stop_conversation()
     else:
         await ks.stop()
-    sink = data.get("sink")
-    if sink is not None and not (isinstance(sink, str) and re.fullmatch(r"[\w.\-]{1,80}", sink)):
-        return web.json_response({"error": "sink: имя выхода PipeWire"}, status=400)
     await music.duck(True)
     try:
-        # автопроверки: голос в виртуальный выход (sink), а не в колонки комнаты
-        reply = await turn(text, timings, output=output, speaker=(data.get('speaker') if isinstance(data.get('speaker'), dict) else None),
-                           sandbox=bool(data.get("sandbox")), sink=sink)
+        reply = await turn(text, timings, output=output, speaker=(data.get('speaker') if isinstance(data.get('speaker'), dict) else None))
     finally:
         await music.duck(False)
     return web.json_response({"reply": reply, "timings": timings})
 
 
 def preferred_output():
-    """Куда говорить служебные реплики: на планшет, если Александр недавно говорил оттуда и шлюз на связи."""
+    """Куда говорить служебные реплики: идёт разговор — туда же, где он (наушники или планшет); иначе на планшет,
+    если Александр недавно говорил оттуда и шлюз на связи."""
+    if conv.active():
+        return live.output if getattr(conv, "_runner", None) is live else "local"
     recent = time.time() - getattr(ks, "last_client_t", 0.0) < CONFIG.get("client_recent_s", 600)
     return "client" if recent and hub.connected() else "local"
 
@@ -1761,28 +1839,26 @@ def save_agent_note(note: str, last_reply: str = ""):
 BYE_WORDS = ("пока", "хватит", "стоп", "ксения стоп", "ксения, стоп", "до свидания", "отбой", "спокойной ночи", "всё, спасибо", "стоп разговор")
 
 
-AFFIRM = {"да", "ага", "угу", "отправляй", "отправь", "отправить", "подтверждаю", "давай", "конечно", "верно",
-          "ок", "окей", "можно", "отправляем", "yes"}
-NEGATE = {"нет", "не", "отмена", "отмени", "стоп", "погоди", "подожди", "измени", "исправь", "только", "но", "поправь",
-          "замени", "поменяй", "перепиши", "добавь", "убери", "кроме", "лучше", "сначала",
-          # отложить или сделать самому — не согласие: «давай потом», «давай я сам», «окей, отбой», «ага, щас»
-          "потом", "позже", "попозже", "завтра", "сам", "сама", "подумаю", "подумаем", "подумать", "отбой",
-          "отставить", "передумал", "передумала", "щас", "или",
-          # вопрос в ответ — не согласие: «Да? А кому?», «угу, а что там ещё»
-          "а", "что", "кто", "кому", "куда", "где", "когда", "какой", "какая", "какое", "как", "зачем", "почему",
-          "сколько"}
+AFFIRM = {"да", "ага", "угу", "отправляй", "отправь", "отправить", "отправляем", "подтверждаю", "давай", "конечно",
+          "верно", "ок", "окей", "можно", "yes", "хорошо", "согласен", "нажимай", "нажми", "удаляй", "удали",
+          "устанавливай", "ставь", "переключай", "запоминай", "запомни", "делай", "выполняй", "переноси", "перенеси"}
+# слова, которые не меняют смысла согласия: «ну да», «да, пожалуйста», «Ксения, давай»
+AFFIRM_FILLER = {"ну", "так", "ксения", "пожалуйста", "же", "уж"}
 
 
 def is_affirmative(text: str) -> bool:
-    """Ясное согласие: короткая реплика, начинается со «да/отправляй/…», без отрицаний, без вопроса и не «да ну»."""
+    """Ясное согласие на рискованное действие: короткая реплика ТОЛЬКО из слов согласия («да», «да, отправляй»,
+    «ну давай», «конечно, пожалуйста»). Всё остальное — не «да»: «давай заново», «отправь Маше» (это другое
+    действие), «да, включи музыку», «давай потом», «да ну его», «Да? А кому?». Ошибка в эту сторону стоит
+    одного переспроса; в другую — отправленного не тому сообщения."""
     if "?" in text:
         return False
     words = _words(text).split()
-    if not words or len(words) > 6 or any(w in NEGATE for w in words):
+    if not words or len(words) > 5:
         return False
-    if words[:2] in (["да", "ну"], ["да", "ладно"]):  # «да ну его», «да ладно» — отмахнулся или не поверил
+    if words[:2] in (["да", "ну"], ["да", "ладно"]):  # отмахнулся или не поверил
         return False
-    return words[0] in AFFIRM or (len(words) > 1 and words[0] in ("ну", "так") and words[1] in AFFIRM)
+    return all(w in AFFIRM or w in AFFIRM_FILLER for w in words) and any(w in AFFIRM for w in words)
 
 
 def _words(text: str) -> str:
@@ -2316,23 +2392,86 @@ async def replay_on_speakers(pcm: bytes):
     return True
 
 
+async def run_confirmed(item):
+    """Действие, подтверждённое Александром: в своих пределах времени, без технических подробностей в речи."""
+    try:
+        res = await asyncio.wait_for(item["run"](), timeout=item.get("limit", 60))
+    except asyncio.TimeoutError:
+        res = {"ok": False, "error": "не уложилось во время"}
+    except Exception as e:
+        log.exception("подтверждённое действие %s", item.get("label"))
+        res = {"ok": False, "error": "сбой при выполнении", "detail": repr(e)[:200]}
+    if not isinstance(res, dict):
+        res = {"ok": False, "error": "действие не вернуло результат"}
+    log.info("Подтверждено Александром: %s -> %s", item["label"], res)
+    return res
+
+
+def confirmed_prompt(item, res):
+    what = "выполнено" if res.get("ok") else f"НЕ удалось ({res.get('error') or 'без подробностей'})"
+    return (f"(служебно: подтверждённое Александром действие «{item['label']}» закончилось: {what}. "
+            f"Скажи ему об этом коротко. Это не его реплика.)")
+
+
+def report_confirmed_later(item, task):
+    """Долгое действие закончилось после хода (или ход оборвали) — сказать итог отдельной служебной репликой."""
+    if task.cancelled():
+        return
+    try:
+        res = task.result()
+    except Exception as e:
+        res = {"ok": False, "error": "сбой при выполнении", "detail": repr(e)[:200]}
+    waiting.append(confirmed_prompt(item, res))
+    waiting_event.set()
+
+
+WAITING_FALLBACK = {}  # служебная реплика -> что сказать без мозга (текст напоминания), если мозг не ответил
+_waiting_tries = {}
+
+
 async def deliver_waiting():
     """Сказать накопившиеся служебные реплики. В разговоре — между репликами Александра (не пока слушаем:
-    иначе голос Ксении в гарнитуре HFP попадёт в микрофон), без разговора — сразу."""
+    иначе голос Ксении в гарнитуре HFP попадёт в микрофон), без разговора — сразу.
+
+    Пока ждёт ответа вопрос «Отправить?», служебные реплики ждут: напоминание с вопросом («Выпил таблетки?»)
+    сделало бы «да» Александра двусмысленным. Реплика уходит из очереди, только когда она прозвучала: перебили
+    на первом слове, голос или мозг не работали — она ещё раз (до трёх попыток). Мозг не ответил на напоминание —
+    ядро говорит его текст само."""
     while waiting:
-        prompt = waiting.pop(0)
+        if confirm.peek():
+            return
+        prompt = waiting[0]
+        delivered = False
         try:
+            ks._brain_failed = False
             await turn(prompt, {"_t0": time.time(), "internal": True}, internal=True, output=preferred_output())
-            if prompt.startswith("(служебно: пришло время напоминания") and CONFIG.get("reminders_both", True) \
-                    and ks.speaker is not None and not ks.speaker.cancelled:
-                if await replay_on_speakers(bytes(ks.speaker.recorded)):
+            if getattr(ks, "_brain_failed", False) and WAITING_FALLBACK.get(prompt):
+                await say_notice(WAITING_FALLBACK[prompt])
+            sp = ks.speaker
+            delivered = sp is not None and bool(sp.recorded)
+            if delivered and prompt.startswith("(служебно: пришло время напоминания") and \
+                    CONFIG.get("reminders_both", True) and not sp.cancelled:
+                if await replay_on_speakers(bytes(sp.recorded)):
                     log.info("Напоминание повторено в колонки")
+        except asyncio.CancelledError:
+            raise
         except Exception:
             log.exception("служебная реплика не сказана: %s", prompt[:120])
+        finally:
+            tries = _waiting_tries[prompt] = _waiting_tries.get(prompt, 0) + 1
+            if delivered or tries >= 3:
+                if prompt in waiting:
+                    waiting.remove(prompt)
+                _waiting_tries.pop(prompt, None)
+                WAITING_FALLBACK.pop(prompt, None)
+                if not delivered:
+                    log.error("служебная реплика так и не прозвучала: %s", prompt[:120])
+        if not delivered:
+            return  # следующая попытка — в следующей паузе, а не по кругу прямо сейчас
 
 
 async def deliver_when_idle():
-    if not waiting or conv.active() or ks.lock.locked():
+    if not waiting or conv.active() or ks.lock.locked() or confirm.peek():
         return
     await music.duck(True)
     try:
@@ -2354,7 +2493,9 @@ async def reminders_loop():
             for r in daily.due():
                 daily.notify(r["text"])
                 log.info("Напоминание: %s", r["text"])
-                waiting.append(reminder_prompt(r))
+                prompt = reminder_prompt(r)
+                WAITING_FALLBACK[prompt] = f"Напоминание: {r['text']}"
+                waiting.append(prompt)
             await deliver_when_idle()
         except asyncio.CancelledError:
             raise
@@ -2397,6 +2538,7 @@ async def start_talk(source=None):
         else:
             # наушники в LE Audio — живой режим (слушает всегда, можно перебивать); иначе — обычный разговор
             live.source, live.output = "headset", "local"
+            ks.last_client_t = 0.0  # говорит у компьютера: напоминания — сюда, а не на планшет
             runner = live if CONFIG.get("live_mode", True) and await live_possible() else conv
         conv.task = asyncio.create_task(runner.run())
         conv._runner = runner

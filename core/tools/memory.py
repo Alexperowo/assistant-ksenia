@@ -74,7 +74,14 @@ changed = {"flag": False}  # ядро смотрит: если память из
 def _asked_to_remember():
     """Александр сам сказал «запомни…» или ответил «да» на «Запомнить?» — решает ядро по его словам, не модель."""
     ctx = confirm.CONTEXT
-    return not ctx.get("internal") and (ctx.get("affirmative") or re.search(r"запомн", ctx.get("user_text", "").lower()))
+    if ctx.get("internal"):
+        return False
+    said = ctx.get("user_text", "").lower()
+    # «да» — только на вопрос «Запомнить?»: иначе «да» на что угодно («Включить музыку?») давало модели запомнить
+    if ctx.get("affirmative") and re.search(r"запомн\w*[^.!?]*\?\s*$", ctx.get("last_said", "").lower()):
+        return True
+    # прямая просьба: «запомни…», «можешь запомнить…»; вопрос «ты запомнила?» — не просьба
+    return bool(re.search(r"\bзапомни(?:те|ть)?\b|\bзапиши себе\b", said)) and not said.rstrip().endswith("?")
 
 
 async def _remember(fact):

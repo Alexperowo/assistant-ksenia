@@ -91,5 +91,6 @@ def test_turn_context_for_tools(ks):
     ks._step = step
     asyncio.run(ks.respond("Да, запомни", {"_t0": 0}))
     asyncio.run(ks.respond("(служебно: …)", {"_t0": 0}, internal=True))
-    assert seen[0] == {"user_text": "Да, запомни", "internal": False, "affirmative": True}
+    assert {k: seen[0][k] for k in ("user_text", "internal", "affirmative")} == \
+        {"user_text": "Да, запомни", "internal": False, "affirmative": True}
     assert seen[1]["internal"] is True and seen[1]["user_text"] == "" and seen[1]["affirmative"] is False
