@@ -135,7 +135,8 @@ async def _send(peer, name, text):
     last = await _last_messages(pg, 3)
     sent = any(text.strip()[:40] in (m["text"] or "") for m in last)
     return {"ok": sent, "to": name, "sent_text": text,
-            **({} if sent else {"error": "не увидела своё сообщение в переписке — проверь"})}
+            **({} if sent else {"error": "не увидела своё сообщение в переписке — не отправляй снова, сначала "
+                                         "прочитай переписку (vk_read)"})}
 
 
 LINK_OR_EMOJI = re.compile(r"https?://|www\.|\b[\w-]+\.(?:ru|com|ly|me|io|net|org|su|рф)\b|"
@@ -187,6 +188,9 @@ async def call(name, args, session):
                                           "напиши словами, как сказал Александр"}
         peer, who = found[0]["peer"], found[0]["name"]
         # вопрос говорит ядро дословно: Александр слышит настоящего получателя и текст, а не пересказ модели
+        # долгая отправка могла уже уйти — «НЕ удалось» привело бы к повторной отправке (аудит Fable, B25)
         return confirm.ask(f"сообщение ВКонтакте для {who}", lambda: _send(peer, who, text),
-                           question=f"Пишу {who}: {text}. Отправить?", to=who, text=text)
+                           question=f"Пишу {who}: {text}. Отправить?", to=who, text=text, limit=90,
+                           timeout_error="отправка затянулась — я не уверена, ушло ли сообщение; НЕ отправляй его "
+                                         "снова, сначала прочитай переписку (vk_read) и скажи Александру, что там")
     return {"ok": False, "error": f"неизвестный инструмент {name}"}

@@ -165,9 +165,11 @@ def extract_text(path):
 
 async def _move(src, dst_dir):
     dst = os.path.join(dst_dir, os.path.basename(src))
-    if os.path.exists(dst):
-        base, ext = os.path.splitext(dst)
-        dst = f"{base} ({time.strftime('%d.%m %H-%M')}){ext}"
+    base, ext = os.path.splitext(dst)
+    n = 2
+    while os.path.exists(dst):  # «(2)», «(3)»…: имя с минутами совпадало при двух переносах за минуту (аудит Fable)
+        dst = f"{base} ({n}){ext}"
+        n += 1
     await asyncio.to_thread(shutil.move, src, dst)
     return {"ok": True, "moved_to": os.path.basename(dst_dir), "name": os.path.basename(dst)}
 
@@ -177,7 +179,8 @@ async def _trash(path):
                                              stderr=asyncio.subprocess.PIPE)
     _, err = await p.communicate()
     return {"ok": p.returncode == 0, "trashed": os.path.basename(path),
-            **({} if p.returncode == 0 else {"error": err.decode("utf-8", "replace")[:200]})}
+            **({} if p.returncode == 0 else {"error": "в корзину убрать не получилось",
+                                             "detail": err.decode("utf-8", "replace")[:200]})}
 
 
 PROGRAM_EXT = {".exe", ".msi", ".bat", ".cmd", ".com", ".scr", ".jar", ".appimage", ".desktop", ".deb", ".rpm",

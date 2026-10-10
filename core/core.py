@@ -82,7 +82,8 @@ def spawn(coro):
 # монитор железа, поставила напоминание). Ядро пропускает их, только если о них есть слово в последних репликах.
 ASK_GATES = {"remind_set": r"напомн|таймер|будильник|разбуд|засек",
              "watch_rule": r"сразу|уведом|сообща|говори|напоминай|правил|следи|не надо",
-             "window_action": r"окн|сверн|разверн|закр|убер"}
+             # «что в окне?» — не просьба что-то сделать с окном (аудит Fable): одно «окн» не разрешает
+             "window_action": r"сверн|разверн|закр|убер|окно (?:на весь|побольше|поменьше)"}
 UNASKED_RESULT = {"ok": False, "error": "Александр об этом не просил — сама такое не делай; если это нужно, предложи словами"}
 
 
@@ -1886,6 +1887,9 @@ async def turn(text: str, timings: dict, internal: bool = False, output: str = "
                 ks._sandbox, ks._test_sink = False, None
                 confirm._pending.clear()
                 confirm._pending.update(pending)
+                if pending.get("item"):  # планшет показывал вопрос автопроверки — вернуть настоящий (аудит Fable)
+                    p = pending["item"]
+                    confirm._notify({"type": "confirm", "id": p["id"], "label": p["label"], "question": p["question"]})
             timings.pop("_t0", None)
             log.info("Песочница: %s | Ксения: %s | %s", text, reply, timings)
             return reply
@@ -2809,7 +2813,7 @@ async def run_confirmed(item):
     try:
         res = await asyncio.wait_for(item["run"](), timeout=item.get("limit", 60))
     except asyncio.TimeoutError:
-        res = {"ok": False, "error": "не уложилось во время"}
+        res = {"ok": False, "error": item.get("timeout_error") or "не уложилось во время"}
     except Exception as e:
         log.exception("подтверждённое действие %s", item.get("label"))
         res = {"ok": False, "error": "сбой при выполнении", "detail": repr(e)[:200]}

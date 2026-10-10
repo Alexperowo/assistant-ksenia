@@ -49,8 +49,10 @@ SCHEMAS = [
 
 def _save_mode(mode):
     os.makedirs(os.path.dirname(FILE), exist_ok=True)
-    with open(FILE, "w", encoding="utf-8") as f:
+    tmp = FILE + ".tmp"  # атомарно: оборванная запись не должна сбросить режим «только я» (аудит Fable)
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"mode": mode}, f)
+    os.replace(tmp, FILE)
 
 
 async def _vp(session, action):

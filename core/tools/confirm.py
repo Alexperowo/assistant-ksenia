@@ -52,7 +52,7 @@ def _notify(event):
 
 
 def prepare(label: str, run, ttl: float = 180, question: str = None, limit: float = 60,
-            background: bool = False) -> str:
+            background: bool = False, timeout_error: str = None) -> str:
     """run — функция без аргументов, возвращающая корутину с результатом-словарём.
     limit — сколько секунд ядро даёт действию; background — долгое (установка, обновление): ядро не ждёт его
     в ходе, а скажет о результате, когда закончится."""
@@ -60,12 +60,13 @@ def prepare(label: str, run, ttl: float = 180, question: str = None, limit: floa
     _pending.clear()
     question = question or f"{label[:1].upper()}{label[1:]}?"
     _pending["item"] = {"id": cid, "label": label, "run": run, "expires": time.time() + ttl, "question": question,
-                        "turn": TURN["n"], "limit": limit, "background": background}
+                        "turn": TURN["n"], "limit": limit, "background": background, "timeout_error": timeout_error}
     _notify({"type": "confirm", "id": cid, "label": label, "question": question})
     return cid
 
 
-def ask(label: str, run, question: str, *, limit: float = 60, background: bool = False, **extra) -> dict:
+def ask(label: str, run, question: str, *, limit: float = 60, background: bool = False, timeout_error: str = None,
+        **extra) -> dict:
     """Зарегистрировать действие и вернуть результат инструмента с вопросом, который ядро скажет дословно."""
     cur = _pending.get("item")
     if cur and cur["turn"] == TURN["n"] and time.time() < cur["expires"]:
@@ -76,7 +77,7 @@ def ask(label: str, run, question: str, *, limit: float = 60, background: bool =
         # другой вопрос в том же ходе: одно «да» решило бы только последний, а прозвучали бы оба
         return {"ok": False, "error": "сначала дождись ответа Александра на прошлый вопрос — одно действие за раз",
                 "pending_question": cur["question"]}
-    cid = prepare(label, run, question=question, limit=limit, background=background)
+    cid = prepare(label, run, question=question, limit=limit, background=background, timeout_error=timeout_error)
     return {"ok": True, "prepared": True, "confirm_id": cid, "speak_verbatim": question, **extra,
             "note": ("НЕ выполнено. Вопрос уже прозвучал дословно — не повторяй его и не пересказывай, просто жди "
                      "ответа Александра. Выполнит ядро после его «да».")}

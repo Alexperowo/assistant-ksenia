@@ -43,6 +43,8 @@ def _load():
         return []
     # файл правят руками: неверная структура не должна ронять ядро при старте (prompt_block в __init__)
     if not isinstance(data, list):
+        # не список — убрать в сторону, а не затереть следующей записью (аудит Fable)
+        os.replace(FILE, FILE + time.strftime(".bad-%Y%m%d-%H%M%S"))
         return []
     return [f for f in data if isinstance(f, dict) and isinstance(f.get("fact"), str) and f["fact"].strip()]
 
