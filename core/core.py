@@ -430,30 +430,82 @@ def split_for_reading(text: str, max_len: int = 220):
     return parts
 
 
-FALLBACK_VOICE = "/usr/bin/RHVoice-test"
+FALLBACK_VOICE = "/usr/bin/RHVoice-test"  # последний рубеж: робот, но без зависимостей
+SILERO_MODEL = os.path.expanduser(CONFIG.get("fallback_silero", "~/Models/Speech/silero/v5_5_ru.pt"))
+_SILERO = {"model": None, "failed": False}
+
+
+def silero_model():
+    """Запасной голос Silero v5.5 (русский, процессор, ударения ставит сам) — загружается один раз, заранее
+    (on_start), чтобы в момент поломки основного голоса не ждать загрузку. Выбран Александром 2026-10-10:
+    Supertonic 3 приятнее, но ошибается в ударениях."""
+    if _SILERO["model"] is None and not _SILERO["failed"]:
+        try:
+            import torch
+            torch.set_num_threads(CONFIG.get("fallback_threads", 4))
+            m = torch.package.PackageImporter(SILERO_MODEL).load_pickle("tts_models", "model")
+            m.to("cpu")
+            _SILERO["model"] = m
+            log.info("Запасной голос Silero загружен")
+        except Exception as e:
+            _SILERO["failed"] = True
+            log.error("Запасной голос Silero не загрузился: %r — будет RHVoice", e)
+    return _SILERO["model"]
+
+
+def numbers_to_words(text: str) -> str:
+    """Silero и RHVoice читают цифры ненадёжно: «+11» -> «плюс одиннадцать», «10:30» -> «десять тридцать»."""
+    from num2words import num2words
+    t = re.sub(r"(?<![\w.])\+(?=\d)", "плюс ", text)
+    t = re.sub(r"(?<![\w.])[−\-–](?=\d)", "минус ", t)
+    t = re.sub(r"\b(\d{1,2}):(\d{2})\b", lambda m: f"{num2words(int(m[1]), lang='ru')} "
+               + ("ровно" if m[2] == "00" else num2words(int(m[2]), lang="ru")), t)
+    def num(m):
+        v = m[0].replace(",", ".")
+        try:
+            return num2words(float(v) if "." in v else int(v), lang="ru")
+        except Exception:
+            return m[0]
+    return re.sub(r"\d+(?:[.,]\d+)?", num, t)
+
+
+def _to_pcm44(wav, rate: int) -> bytes:
+    import numpy as np
+    a = np.asarray(wav, dtype=np.float32).reshape(-1)
+    if a.size and np.abs(a).max() <= 1.5:  # Silero отдаёт -1..1
+        a = a * 32767
+    n = int(len(a) * 44100 / rate)
+    a = np.interp(np.linspace(0, len(a) - 1, n), np.arange(len(a)), a)
+    return np.clip(a, -32768, 32767).astype(np.int16).tobytes()
 
 
 def fallback_pcm(text: str) -> bytes:
-    """Запасной голос: RHVoice (русский, на процессоре, ~0,3 с на фразу) -> PCM 44,1 кГц моно, как у основного."""
+    """Запасной голос -> PCM 44,1 кГц моно, как у основного: Silero, а если и он не работает — RHVoice."""
     import wave
-    import numpy as np
+    said = numbers_to_words(text.replace("\u0301", ""))  # знак ударения — для Маши; Silero ставит ударения сам
+    m = silero_model()
+    if m is not None:
+        try:
+            wav = m.apply_tts(text=said, speaker=CONFIG.get("fallback_voice", "kseniya"), sample_rate=48000,
+                              put_accent=True, put_yo=True)
+            return _to_pcm44(wav.numpy(), 48000)
+        except Exception as e:
+            log.error("запасной голос Silero не сработал: %r", e)
     if not os.path.exists(FALLBACK_VOICE):
         return b""
     out = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"ksenia-fallback-{os.getpid()}.wav")
     try:
-        subprocess.run([FALLBACK_VOICE, "-p", CONFIG.get("fallback_voice", "anna"), "-o", out],
-                       input=text.encode(), capture_output=True, timeout=20, check=True)
+        subprocess.run([FALLBACK_VOICE, "-p", "anna", "-o", out], input=said.encode(), capture_output=True,
+                       timeout=20, check=True)
+        import numpy as np
         with wave.open(out, "rb") as w:
-            rate, raw = w.getframerate(), w.readframes(w.getnframes())
-            ch = w.getnchannels()
-        a = np.frombuffer(raw, dtype=np.int16)
+            rate, raw, ch = w.getframerate(), w.readframes(w.getnframes()), w.getnchannels()
+        a = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
         if ch > 1:
             a = a.reshape(-1, ch).mean(axis=1)
-        n = int(len(a) * 44100 / rate)
-        a = np.interp(np.linspace(0, len(a) - 1, n), np.arange(len(a)), a)
-        return a.astype(np.int16).tobytes()
+        return _to_pcm44(a, rate)
     except Exception as e:
-        log.error("запасной голос не сработал: %r", e)
+        log.error("запасной голос RHVoice не сработал: %r", e)
         return b""
     finally:
         try:
@@ -3291,6 +3343,7 @@ async def on_start(app):
     # force_close: llama-server закрывает простаивающие соединения, а переиспользование закрытого
     # давало ServerDisconnected на шаге после инструмента (локальные соединения дёшевы)
     ks.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True))
+    spawn(asyncio.to_thread(silero_model))  # запасной голос — заранее, а не в момент поломки основного
     research.CTX.update({"brain_url": CONFIG["brain_url"], "brain_key": BRAIN_KEY})
     # ссылки на фоновые задачи храним: цикл событий держит задачи только слабыми ссылками
     BACKGROUND.extend([asyncio.create_task(findings_loop()), asyncio.create_task(reminders_loop()),

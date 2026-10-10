@@ -19,5 +19,6 @@
   "budget_task": 0,
   "budget_hard": 1024,
   "filler_s": 2.0,
-  "live_judge_url": "http://127.0.0.1:18150"
+  "live_judge_url": "http://127.0.0.1:18150",
+  "fallback_voice": "kseniya"
 }

@@ -45,3 +45,9 @@ def test_speech_norm_fixes(src, out):
 ])
 def test_grammar_obo_sam(src, out):
     assert core.fix_grammar(src) == out
+
+
+def test_numbers_to_words_for_fallback_voice():
+    assert core.numbers_to_words("Сейчас +11, в 10:30, ветер 7 м/с") == \
+        "Сейчас плюс одиннадцать, в десять тридцать, ветер семь м/с"
+    assert core.numbers_to_words("в 9:00 и -5") == "в девять ровно и минус пять"
