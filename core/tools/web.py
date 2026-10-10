@@ -28,8 +28,9 @@ FINANCE_URL = re.compile(r"pay|checkout|oplata|bank|card|wallet|cart|korzina|bas
 _state = {"results": [], "url": None, "typed": None}
 # Сообщения во ВКонтакте — только через vk_send: там ядро зачитывает, кому и что уйдёт. Через браузер вопрос был
 # бы только «Нажать „Отправить“?» — без адресата и текста (аудит Fable, B6)
-VK_HOSTS = re.compile(r"(^|\.)(vk\.com|vk\.ru|vkontakte\.ru|vk\.me)$", re.I)
-VK_REFUSAL = {"ok": False, "error": "во ВКонтакте пишу только через vk_send — там я зачитываю, кому и что уйдёт"}
+VK_HOSTS = re.compile(r"(^|\.)(vk\.com|vk\.ru|vkontakte\.ru|vk\.me|web\.telegram\.org|t\.me)$", re.I)  # и Telegram — через tg_send
+VK_REFUSAL = {"ok": False, "error": "во ВКонтакте и Telegram пишу только через vk_send / tg_send — там я зачитываю, "
+                                    "кому и что уйдёт"}
 
 SCHEMAS = [
     {"type": "function", "function": {

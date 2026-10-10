@@ -31,13 +31,13 @@ from aiohttp import web
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-from tools import confirm, daily, desktop, files, guide, headphones, watch, memory, music, research, screen, selfcheck, settings, system, vk, voicectl  # noqa: E402  (инструменты — отдельные модули в core/tools)
+from tools import confirm, daily, desktop, files, guide, headphones, tg, watch, memory, music, research, screen, selfcheck, settings, system, vk, voicectl  # noqa: E402  (инструменты — отдельные модули в core/tools)
 from tools import web as webtool  # noqa: E402  (не путать с aiohttp.web)
 import speech_norm  # noqa: E402
 import diary  # noqa: E402
 import live_intent  # noqa: E402  (что значит реплика во время речи Ксении)
 
-TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research, daily, voicectl, system, settings, selfcheck, headphones, files, watch, guide]
+TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research, daily, voicectl, system, settings, selfcheck, headphones, files, watch, guide, tg]
 TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
 TOOL_INDEX = {sch["function"]["name"]: m for m in TOOL_MODULES for sch in m.SCHEMAS}
 
@@ -89,7 +89,8 @@ UNASKED_RESULT = {"ok": False, "error": "Александр об этом не �
 
 # Инструменты, которые приносят чужой текст (страницы, экран, письма, файлы): в нём могут быть «команды».
 UNTRUSTED_TOOLS = {"web_open", "web_outline", "web_search", "screen_read", "screen_describe", "window_read",
-                   "clipboard_read", "read_more", "vk_read", "vk_unread", "ui_elements", "cursor_look", "files"}
+                   "clipboard_read", "read_more", "vk_read", "vk_unread", "tg_read", "tg_unread", "ui_elements",
+                   "cursor_look", "files"}
 # После них в том же ходе не выполняются: ввод текста, напоминания, настройки, перенос и удаление файлов.
 TAINT_BLOCKED = {"dictate", "ui_type", "web_type", "remind_set", "remind_cancel", "setting", "memory_remember",
                  "memory_forget", "watch_rule", "voice_mode", "voice_enroll", "system"}
@@ -207,7 +208,7 @@ BRAIN_KEY = read_key(CONFIG["brain_key_file"])
 # запрещённого: новый инструмент по умолчанию не исполняется). Остальное — «принято, но не выполнено».
 SANDBOX_READONLY = {"weather", "remind_list", "ui_elements", "cursor_look", "window_read", "help_guide", "memory_list",
                     "music_status", "screen_describe", "screen_read", "clipboard_read", "read_more", "self_check",
-                    "vk_unread", "web_search", "web_open", "web_outline"}
+                    "vk_unread", "tg_unread", "web_search", "web_open", "web_outline"}
 SANDBOX_READONLY_ACTIONS = {"files": ("action", {"find", "recent", "read"}), "headphones": ("action", {"status"}),
                             "system": ("command", set(system.INFO)),
                             "setting": ("action", {"volume_get", "brightness_get", "wifi_status", "wifi_list"}),
@@ -595,6 +596,16 @@ def pick_output_sink():
     names = [s.split("\t")[1] for s in out.split("\n") if "\t" in s]
     if want != "auto" and want in names:
         return want
+    if CONFIG.get("voice_output", "auto") == "monitor":
+        # «голос в колонки, микрофон в наушниках»: HDMI, даже если наушники подключены (спит — разбудить)
+        hdmi = [n for n in names if "hdmi" in n]
+        if hdmi:
+            return hdmi[0]
+        if wake_monitor_for_sound():
+            out = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, timeout=3).stdout
+            hdmi = [s.split("\t")[1] for s in out.split("\n") if "\t" in s and "hdmi" in s]
+            if hdmi:
+                return hdmi[0]
     for n in names:
         if n.startswith("bluez_output."):
             return n
@@ -1156,7 +1167,7 @@ TOOL_ACKS = {
     "music_play": ("Включаю.", "Сейчас включу."), "music_song": ("Ищу песню.", "Сейчас найду."),
     "music_wave": ("Включаю волну.",), "audiobook": ("Сейчас найду книгу.", "Ищу книгу."),
     "weather": ("Смотрю погоду.", "Сейчас гляну погоду."), "web_search": ("Сейчас поищу.", "Ищу."),
-    "web_open": ("Открываю.",), "web_outline": ("Смотрю страницу.",), "vk_unread": ("Смотрю ВКонтакте.",),
+    "web_open": ("Открываю.",), "web_outline": ("Смотрю страницу.",), "vk_unread": ("Смотрю ВКонтакте.",), "tg_unread": ("Смотрю Телеграм.",), "tg_read": ("Открываю чат.",),
     "vk_read": ("Открываю переписку.",), "screen_describe": ("Смотрю на экран.", "Сейчас гляну."),
     "screen_read": ("Читаю с экрана.",), "window_read": ("Читаю окно.",), "app_open": ("Открываю.",),
     "self_check": ("Сейчас проверю себя.",), "system": ("Сейчас проверю.",),
@@ -3492,6 +3503,8 @@ async def on_start(app):
     # force_close: llama-server закрывает простаивающие соединения, а переиспользование закрытого
     # давало ServerDisconnected на шаге после инструмента (локальные соединения дёшевы)
     ks.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True))
+    # «звук в колонки/в наушники» голосом — это и голос Ксении, а не только системный выход по умолчанию
+    settings.VOICE_OUTPUT_HOOK["set"] = lambda v: control.set_setting(CONFIG, "voice_output", v)
     spawn(asyncio.to_thread(silero_model))  # запасной голос — заранее, а не в момент поломки основного
     research.CTX.update({"brain_url": CONFIG["brain_url"], "brain_key": BRAIN_KEY})
     # ссылки на фоновые задачи храним: цикл событий держит задачи только слабыми ссылками

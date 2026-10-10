@@ -22,6 +22,9 @@ REPORTS = os.path.normpath(os.path.join(ROOT, "..", "logs", "reports"))
 SETTINGS = [
     {"key": "live_mode", "group": "talk", "type": "bool", "default": True,
      "label": "Живой разговор", "hint": "В режиме разговора наушников слушаю всегда, можно перебивать"},
+    {"key": "voice_output", "group": "talk", "type": "choice", "default": "auto",
+     "label": "Голос Ксении", "hint": "Микрофон всё равно в наушниках",
+     "options": [["auto", "В наушники, если подключены"], ["monitor", "В колонки монитора"]]},
     {"key": "live_backchannels", "group": "talk", "type": "bool", "default": False,
      "label": "Поддакивать «угу»", "hint": "Когда ты долго рассказываешь и делаешь паузу"},
     {"key": "filler_s", "group": "talk", "type": "choice", "default": 2.0,

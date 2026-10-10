@@ -91,6 +91,9 @@ async def _list_items(pg):
 async def _find(pg, who):
     items = await _list_items(pg)
     found = [i for i in items if _match(who, i["name"])]
+    exact = [i for i in found if i["name"].strip().lower() == (who or "").strip().lower()]
+    if exact:  # «Telegram» — это чат «Telegram», а не «Telegram News» и «Telegram Premium»
+        return exact
     if found:
         return found
     # нет в видимом списке — поиск по диалогам

@@ -52,6 +52,7 @@ async def _run(*argv, timeout=15):
 
 
 MIN_VOLUME = 10
+VOICE_OUTPUT_HOOK = {"set": None}  # ядро подключает при запуске (core.on_start)
 
 
 async def _volume():
@@ -213,7 +214,11 @@ async def call(name, args, session):
             return {"ok": False, "error": "такого выхода сейчас нет (наушники не подключены или монитор спит)",
                     "available": sinks}
         rc, out = await _run("pactl", "set-default-sink", want[0])
-        return {"ok": rc == 0, "audio_to": want[0]}
+        if VOICE_OUTPUT_HOOK["set"]:
+            # раньше менялся только выход по умолчанию, а голос Ксении всё равно шёл в наушники
+            VOICE_OUTPUT_HOOK["set"]("monitor" if "hdmi" in want[0] else "auto")
+        return {"ok": rc == 0, "audio_to": want[0],
+                **({"note": "мой голос тоже теперь в колонках, микрофон — в наушниках"} if "hdmi" in want[0] else {})}
     if a == "theme":
         scheme = {"dark": "BreezeDark", "тёмная": "BreezeDark", "light": "BreezeLight", "светлая": "BreezeLight"}.get(v)
         if not scheme:
