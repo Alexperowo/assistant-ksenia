@@ -201,6 +201,7 @@ input[type="checkbox"][role="switch"]:checked::after { transform: translateX(40p
 
 @media (prefers-reduced-motion: reduce) {
   .aurora, .orb-swirl, .orb-core, .orb-ring, .view, .toast { animation: none !important; }
+  .orb-core, .orb-glow { transform: none !important; transition: none !important; }  /* без пульсации по громкости */
   .orb[data-state="listening"] .orb-ring { opacity: .5; }
 }
 .hint.left { text-align: left; margin: .3em 0 .6em; }

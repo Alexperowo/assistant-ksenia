@@ -1,7 +1,7 @@
 // Ксения: офлайн-оболочка приложения. Сначала сеть (всегда свежая версия), из кэша — только если сети нет.
 // API, WebSocket и звук никогда не кэшируются.
-const CACHE = 'ksenia-pwa-v2';  // v2: контраст кнопок для слабого зрения
-const SHELL = ['/', '/app.js', '/styles.css', '/recorder-worklet.js', '/manifest.webmanifest',
+const CACHE = 'ksenia-pwa-v3';  // v2: контраст кнопок для слабого зрения
+const SHELL = ['/', '/app.js', '/control.js', '/styles.css', '/recorder-worklet.js', '/manifest.webmanifest',
   '/icon-192x192.png', '/icon-512x512.png', '/icon.svg'];
 
 self.addEventListener('install', (e) => {

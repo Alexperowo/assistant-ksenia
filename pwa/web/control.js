@@ -31,7 +31,11 @@
   }
 
   async function act(body, opts) {
-    if (busy && !(opts && opts.parallel)) return null;
+    if (busy && !(opts && opts.parallel)) {
+      // раньше нажатие молча терялось (проверка Fable, b2) — сказать, что прошлое ещё делается
+      toast('Подожди, ещё выполняю прошлое.');
+      return null;
+    }
     busy = true;
     try {
       const r = await KS().api('/api/control/act', body);
@@ -92,7 +96,7 @@
       card('Музыка',
         el('p', {}, m.station ? `${m.paused ? 'На паузе' : 'Играет'}: ${m.station}` : 'Сейчас ничего не играет'),
         m.station ? el('div', { class: 'two' },
-          el('button', { class: 'btn', type: 'button', onclick: () => act({ action: 'music', do: m.paused ? 'resume' : 'pause' }) }, m.paused ? 'Продолжить' : 'Пауза'),
+          el('button', { class: 'btn', type: 'button', 'data-key': 'music-toggle', onclick: () => act({ action: 'music', do: m.paused ? 'resume' : 'pause' }) }, m.paused ? 'Продолжить' : 'Пауза'),
           el('button', { class: 'btn', type: 'button', onclick: () => act({ action: 'music', do: 'stop' }) }, 'Выключить')) : null,
         m.station ? el('div', { class: 'two' },
           el('button', { class: 'btn', type: 'button', onclick: () => act({ action: 'music', do: 'volume_down' }) }, 'Музыку тише'),
@@ -168,6 +172,18 @@
       data.report ? el('details', { class: 'card' }, el('summary', { text: 'Сводка за неделю' }), el('pre', { class: 'report', text: data.report.text })) : null);
   }
 
+  // «имя» элемента для возврата фокуса: у переключателей и вариантов нет своей подписи — она в label вокруг
+  // (раньше фокус после переключателя уходил в начало страницы — проверка Fable, b6)
+  function keyOf(e) {
+    if (!e || !e.getAttribute) return '';
+    if (e.getAttribute('data-key')) return 'key:' + e.getAttribute('data-key');  // надпись меняется: «Пауза» ↔ «Продолжить»
+    const own = e.getAttribute('aria-label') || '';
+    if (own) return own;
+    const lab = e.closest && e.closest('label');
+    if (lab) return lab.textContent.trim() + (e.type === 'radio' ? '|' + e.value : '');
+    return (e.textContent || '').trim();
+  }
+
   function render() {
     if (!data) return;
     if (view === 'control') renderControl();
@@ -182,11 +198,11 @@
     const typing = focused && focused.tagName === 'INPUT' && focused.type === 'text';
     data = r.data;
     if (!typing) {
-      const label = focused && focused.getAttribute && (focused.getAttribute('aria-label') || focused.textContent);
+      const label = keyOf(focused);
       render();
-      if (label && view !== 'talk') { // вернуть фокус на ту же кнопку после перерисовки (TalkBack не теряет место)
+      if (label && view !== 'talk') { // вернуть фокус на тот же элемент после перерисовки (TalkBack не теряет место)
         const same = [...document.querySelectorAll('#view-' + view + ' button, #view-' + view + ' input')]
-          .find((b) => (b.getAttribute('aria-label') || b.textContent) === label);
+          .find((b) => keyOf(b) === label);
         if (same) same.focus({ preventScroll: true });
       }
     }

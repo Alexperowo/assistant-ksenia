@@ -269,7 +269,9 @@
         if (!player.active()) level.set(Math.sqrt(sum / (pcm.length / 4)) * 6);
         if (this.ws && this.ws.readyState === 1) this.ws.send(pcm.buffer);
       };
-      this.ws.onmessage = (e) => { try { const m = JSON.parse(e.data); if (m.on === false && m.error) { announce(m.error, true); this.stop(); } } catch (err) { /* */ } };
+      // живой разговор закончил компьютер (тишина, «пока», слух перезапустился) — кнопку погасить и микрофон
+      // выключить; раньше это делалось только при ошибке, и звук шёл в пустоту (проверка Fable, b4)
+      this.ws.onmessage = (e) => { try { const m = JSON.parse(e.data); if (m.on === false) { if (m.error) announce(m.error, true); this.stop(); } } catch (err) { /* */ } };
       this.ws.onclose = () => { if (this.on) this.stop(); };
       this.on = true;
       $('live').setAttribute('aria-pressed', 'true');
@@ -350,7 +352,12 @@
     signal('listen');
   }
   function focusConfirm() { confirmFocusPending = false; if (!$('confirm').hidden) $('confirm-q').focus(); }
-  function hideConfirm() { $('confirm').hidden = true; confirmFocusPending = false; }
+  function hideConfirm() {
+    // фокус был на «Да»/«Нет» — не отдавать его в начало страницы: TalkBack терял место (проверка Fable, b6)
+    const had = $('confirm').contains(document.activeElement);
+    $('confirm').hidden = true; confirmFocusPending = false;
+    if (had) $('state').focus({ preventScroll: true });
+  }
   async function answer(text) {
     audio();
     hideConfirm();
@@ -370,8 +377,9 @@
       offlineTimer = setTimeout(() => { // короткие обрывы Wi-Fi не дёргают
         if (wsUp && coreUp) return;
         rec.cancel(); player.stop();
-        setState('offline'); signal('offline');
-        if (!wasOffline) sayLocally('Нет связи с компьютером');
+        setState('offline');
+        // сигнал и вибрация — один раз на обрыв, а не на каждую попытку переподключения (было каждые ~10 с)
+        if (!wasOffline) { signal('offline'); sayLocally('Нет связи с компьютером'); announce('Нет связи с компьютером', true); }
         wasOffline = true;
         $('nolink').hidden = true;
       }, 2500);
@@ -449,9 +457,20 @@
       if (settings.mode === 'hold' && holdUsed) { holdUsed = false; return; }
       if (rec.active) rec.finish(); else startTalking();
     });
-    let holdUsed = false;
-    talk.addEventListener('pointerdown', (e) => { if (settings.mode !== 'hold' || rec.active) return; holdUsed = true; talk.setPointerCapture(e.pointerId); startTalking(); });
-    const up = () => { if (settings.mode === 'hold' && rec.active) rec.finish(); };
+    let holdUsed = false, pressT = 0, released = false;
+    // «Держу кнопку»: короткое касание раньше оставляло запись висеть до минуты — микрофон ещё включался, когда
+    // палец уже отпущен (проверка Fable, b3). Теперь отпускание учитывается и до готовности микрофона.
+    const releaseHold = () => {
+      if (performance.now() - pressT < 400) { rec.cancel(); setState('idle'); announce('Держи кнопку, пока говоришь', true); }
+      else rec.finish();
+    };
+    talk.addEventListener('pointerdown', (e) => {
+      if (settings.mode !== 'hold' || rec.active) return;
+      holdUsed = true; pressT = performance.now(); released = false;
+      talk.setPointerCapture(e.pointerId);
+      Promise.resolve(startTalking()).then(() => { if (released && rec.active) releaseHold(); });
+    });
+    const up = () => { if (settings.mode !== 'hold') return; released = true; if (rec.active) releaseHold(); };
     talk.addEventListener('pointerup', up);
     talk.addEventListener('pointercancel', up);
     talk.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -521,7 +540,11 @@
 
   async function check() {
     const s = await api('/api/session');
-    if (s.status === 0) { $('nolink').hidden = false; setTimeout(check, 5000); return; }
+    if (s.status === 0) {
+      // страница открыта, а компьютер недоступен — сказать TalkBack один раз (проверка Fable, b1)
+      if ($('nolink').hidden) announce('Нет связи с компьютером. Подключусь сама.', true);
+      $('nolink').hidden = false; setTimeout(check, 5000); return;
+    }
     $('nolink').hidden = true;
     if (s.data.local) $('logout').hidden = true; // на этом компьютере входа нет — и выходить не из чего
     if (s.data.authorized) showApp(); else showLogin();
