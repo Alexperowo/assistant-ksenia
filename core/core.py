@@ -20,6 +20,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import subprocess
 import time
 import urllib.parse
@@ -352,6 +353,57 @@ def split_for_reading(text: str, max_len: int = 220):
     return parts
 
 
+FALLBACK_VOICE = "/usr/bin/RHVoice-test"
+
+
+def fallback_pcm(text: str) -> bytes:
+    """Запасной голос: RHVoice (русский, на процессоре, ~0,3 с на фразу) -> PCM 44,1 кГц моно, как у основного."""
+    import wave
+    import numpy as np
+    if not os.path.exists(FALLBACK_VOICE):
+        return b""
+    out = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"ksenia-fallback-{os.getpid()}.wav")
+    try:
+        subprocess.run([FALLBACK_VOICE, "-p", CONFIG.get("fallback_voice", "anna"), "-o", out],
+                       input=text.encode(), capture_output=True, timeout=20, check=True)
+        with wave.open(out, "rb") as w:
+            rate, raw = w.getframerate(), w.readframes(w.getnframes())
+            ch = w.getnchannels()
+        a = np.frombuffer(raw, dtype=np.int16)
+        if ch > 1:
+            a = a.reshape(-1, ch).mean(axis=1)
+        n = int(len(a) * 44100 / rate)
+        a = np.interp(np.linspace(0, len(a) - 1, n), np.arange(len(a)), a)
+        return a.astype(np.int16).tobytes()
+    except Exception as e:
+        log.error("запасной голос не сработал: %r", e)
+        return b""
+    finally:
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+
+
+_restarts = {}
+
+
+def restart_unit(unit: str, why: str, every_s: float = 180) -> bool:
+    """Перезапустить свою службу, которая зависла (не чаще раза в every_s). True — перезапуск запущен."""
+    if time.time() - _restarts.get(unit, 0.0) < every_s:
+        return False
+    _restarts[unit] = time.time()
+    log.warning("%s — перезапускаю %s", why, unit)
+    subprocess.Popen(["systemctl", "--user", "restart", unit], stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+    return True
+
+
+def voice_out_broken():
+    """Основной голос не отвечает — перезапустить его службу, пока говорим запасным."""
+    restart_unit("ksenia-voice-out", "Голос не отвечает")
+
+
 def pick_output_sink():
     """Куда говорить: настройка, иначе A2DP-выход Bluetooth-наушников, иначе HDMI, иначе по умолчанию."""
     want = CONFIG.get("output_sink", "auto")
@@ -571,16 +623,55 @@ class Speaker:
                 pass
 
     async def speak(self, text: str, timings: dict, verbatim: bool = False):
-        """Озвучить одну фразу. Никогда не бросает исключений: сбой одной фразы не должен глушить остальные."""
+        """Озвучить одну фразу. Никогда не бросает исключений: сбой одной фразы не должен глушить остальные.
+        Основной голос не ответил — та же фраза запасным (RHVoice на процессоре): Александр не видит экран,
+        молчание ему ничего не объяснит (аудит Fable, FA1)."""
         text = clean_for_speech(text, verbatim=verbatim)
         if not text or self.cancelled:
-            return
-        if self.down:
-            self.failed = True
             return
         self.started = True  # речь уже пошла в озвучку — «Хм, секунду» не нужно
         shown = re.sub(r"\[\w+\]\s*", "", text)
         hub.emit({"type": "say", "text": shown})  # текст реплики — на экран планшета
+        failed_before = self.failed
+        written = 0 if self.down else await self._speak_main(text, shown, timings)
+        if written or self.cancelled:
+            return
+        voice_out_broken()
+        if await self._speak_fallback(shown, timings):
+            self.failed = failed_before  # фраза прозвучала — запасным голосом, но Александр её услышал
+            self.fallback_used = True
+        else:
+            self.failed = True
+
+    async def _speak_fallback(self, shown: str, timings: dict) -> bool:
+        pcm = await asyncio.to_thread(fallback_pcm, shown)
+        if not pcm or self.cancelled:
+            return False
+        try:
+            await self._ensure_player()
+            if "first_audio_s" not in timings:
+                timings["first_audio_s"] = round(time.time() - timings["_t0"], 2)
+            phrase = {"text": shown, "start": self.audio_s, "end": None}
+            self.phrases.append(phrase)
+            for i in range(0, len(pcm), 8192):
+                if self.cancelled:
+                    break
+                chunk = pcm[i:i + 8192]
+                if self.gain != 1.0 or self._carry:
+                    chunk = self._apply_gain(chunk)
+                self._send(chunk)
+                self._account(len(chunk))
+                self.recorded.extend(chunk)
+                await asyncio.sleep(0)
+            phrase["end"] = self.audio_s
+            return True
+        except Exception:
+            log.exception("запасной голос")
+            await self._drop_player()
+            return False
+
+    async def _speak_main(self, text: str, shown: str, timings: dict) -> int:
+        """Основной голос (s2.cpp). Возвращает, сколько байт звука ушло в плеер (0 — фраза не прозвучала)."""
         phrase = None
         params = {"stream": True, "chunked": True, "stream_start_buffer_ms": 0,
                   "output_format": "pcm_s16le", "stream_holdback_frames": 0,
@@ -607,7 +698,7 @@ class Speaker:
                     if r.status != 200:
                         log.error("voice-out %s: %s", r.status, (await r.text())[:200])
                         self.failed = True
-                        return
+                        return 0
                     await self._ensure_player()
                     if not written and not isinstance(self.player, ClientPlayer):
                         hub.emit({"type": "state", "state": "speaking", "where": "pc"})
@@ -615,7 +706,7 @@ class Speaker:
                     async for chunk in r.content.iter_chunked(8192):
                         if self.cancelled:
                             await self._fade_out(chunk)
-                            return
+                            return written or 1
                         if "first_audio_s" not in timings:
                             timings["first_audio_s"] = round(time.time() - timings["_t0"], 2)
                         if self.gain != 1.0 or self._carry:
@@ -628,7 +719,7 @@ class Speaker:
                         self._account(len(chunk))
                         self.recorded.extend(chunk)
                         await asyncio.sleep(0)
-                    return
+                    return written
         except (aiohttp.ClientConnectorError, asyncio.TimeoutError) as e:
             log.error("voice-out недоступен: %r", e)
             self.failed = self.down = True
@@ -654,6 +745,7 @@ class Speaker:
                 # поток оборвался посреди сэмпла: без выравнивания все следующие фразы зазвучат треском
                 self._send(b"\x00")
                 self.recorded.append(0)
+        return written
 
     def save_recording(self):
         if not CONFIG.get("record_replies", True) or not self.recorded:
@@ -1896,8 +1988,11 @@ LISTEN_FAIL = {
     "no_microphone": "[sigh] Не слышу микрофон. Наушники подключены?",
     "mic_lost": "[sigh] Микрофон пропал посреди фразы. Повтори, пожалуйста.",
     "busy": "[sigh] Я ещё дослушиваю прошлую фразу. Нажми ещё раз через пару секунд.",
+    "http 409": "[sigh] Я ещё дослушиваю прошлую фразу. Нажми ещё раз через пару секунд.",
+    "restarting": "[sigh] Мой слух завис. Перезапускаю его — это секунд двадцать, потом позови меня ещё раз.",
 }
-LISTEN_DOWN = "[sigh] Я тебя не слышу: слух не отвечает. Проверь, пожалуйста, сервис."
+# Александр не видит экран и не чинит службы: «проверь сервис» ему ничего не даёт (аудит Fable, FA8)
+LISTEN_DOWN = "[sigh] Я тебя не слышу: слух не отвечает. Перезапускаю его — позови меня через полминуты."
 CONV_CRASH = "[sigh] Ой, у меня что-то сломалось. Нажми ещё раз, пожалуйста."
 
 
@@ -1942,6 +2037,11 @@ class Conversation:
                 if r.status == 409 and time.time() < deadline:
                     await asyncio.sleep(0.3)
                     continue
+                if r.status == 409:
+                    # 20 с «занят» — слух завис на прошлой записи (бывало после сна: зависшая CUDA держит замок),
+                    # сам он не освободится (аудит Fable, FA3)
+                    if restart_unit("ksenia-voice-in", "Слух занят больше 20 с"):
+                        return {"error": "restarting"}
                 try:
                     heard = await r.json(content_type=None)
                 except ValueError:
@@ -1961,11 +2061,14 @@ class Conversation:
                     heard = await self.listen()
                 except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                     log.error("voice-in недоступен: %r", e)
+                    restart_unit("ksenia-voice-in", "Слух не отвечает")
                     await say_notice(LISTEN_DOWN)
                     return
                 info = heard.get("timings") or {}
                 if heard.get("error"):
                     log.error("voice-in: %s", heard["error"])
+                    if heard["error"] not in LISTEN_FAIL:
+                        restart_unit("ksenia-voice-in", f"Слух ответил ошибкой {heard['error']}")
                     await say_notice(LISTEN_FAIL.get(heard["error"], LISTEN_DOWN))
                     return
                 text = str(heard.get("text") or "").strip()
@@ -2334,6 +2437,7 @@ class LiveConversation(Conversation):
                         return
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             log.error("Живой режим: слух недоступен: %r", e)
+            restart_unit("ksenia-voice-in", "Слух не отвечает (живой режим)")
             await say_notice(LISTEN_DOWN)
         except asyncio.CancelledError:
             pass
@@ -2872,6 +2976,63 @@ async def startup_check():
         log.exception("не смогла сказать о проблеме при запуске")
 
 
+def slept_s(prev_wall: float, prev_mono: float, wall: float, mono: float) -> float:
+    """Сколько компьютер спал между двумя замерами: во сне системные часы идут, а монотонные стоят."""
+    return (wall - prev_wall) - (mono - prev_mono)
+
+
+async def resume_watch():
+    """После сна компьютера проверить себя и починить, что можно (аудит Fable, FA2/D1; 2026-10-09 после сна
+    драйвер NVIDIA завис, и слух так и не поднялся — Александр об этом не узнал)."""
+    wall, mono = time.time(), time.monotonic()
+    while True:
+        await asyncio.sleep(10)
+        w, m = time.time(), time.monotonic()
+        slept, wall, mono = slept_s(wall, mono, w, m), w, m
+        if slept > CONFIG.get("resume_min_sleep_s", 30):
+            log.warning("Компьютер проснулся после сна (%.0f с) — проверяю себя", slept)
+            await asyncio.sleep(CONFIG.get("resume_settle_s", 20))  # Bluetooth, сеть и драйвер поднимаются
+            try:
+                await after_resume_check()
+            except Exception:
+                log.exception("проверка после сна")
+
+
+async def after_resume_check():
+    rc = await asyncio.to_thread(lambda: subprocess.run(["nvidia-smi", "-L"], capture_output=True, timeout=15).returncode
+                                 if shutil.which("nvidia-smi") else 0)
+    if rc != 0:
+        text = ("Я проснулась, но видеокарта после сна зависла. Помочь может только перезагрузка компьютера — "
+                "скажи, когда будет удобно.")
+        log.error("После сна: nvidia-smi не отвечает (код %s)", rc)
+        daily.notify(text)
+        await say_notice(text)  # запасной голос работает и без видеокарты
+        return
+    try:
+        async with ks.session.get(CONFIG["voice_in_url"] + "/status", timeout=aiohttp.ClientTimeout(total=5)) as r:
+            ok = r.status == 200
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        ok = False
+    if not ok:
+        restart_unit("ksenia-voice-in", "После сна слух не отвечает", every_s=0)
+    res = await selfcheck.call("self_check", {}, ks.session)
+    fix = list(res.get("restart") or [])
+    fix += [u for u, what in selfcheck.SERVICES.items() if u != "ksenia-core"
+            and any(p.startswith(what + " (") for p in res.get("problems") or [])]
+    for u in dict.fromkeys(fix):
+        restart_unit(u, "После сна служба не в порядке", every_s=0)
+    if fix or not ok:
+        await asyncio.sleep(60)
+        res = await selfcheck.call("self_check", {}, ks.session)
+        problems = [p for p in res.get("problems") or [] if not p.startswith("наушники не подключены")]
+        if problems:
+            text = "После сна не всё в порядке: " + "; ".join(problems[:2]) + "."
+            daily.notify(text)
+            await say_notice(text)
+            return
+    log.info("После сна всё в порядке" + (f" (перезапущены: {', '.join(fix)})" if fix else ""))
+
+
 async def on_start(app):
     # force_close: llama-server закрывает простаивающие соединения, а переиспользование закрытого
     # давало ServerDisconnected на шаге после инструмента (локальные соединения дёшевы)
@@ -2881,7 +3042,7 @@ async def on_start(app):
     BACKGROUND.extend([asyncio.create_task(findings_loop()), asyncio.create_task(reminders_loop()),
                        asyncio.create_task(music.book_autosave_loop()), asyncio.create_task(warmup()),
                        asyncio.create_task(startup_check()), asyncio.create_task(diary_loop()),
-                       asyncio.create_task(watch_loop())])
+                       asyncio.create_task(watch_loop()), asyncio.create_task(resume_watch())])
     if CONFIG.get("headset_buttons", True):
         BACKGROUND.append(asyncio.create_task(buttons.run()))
 
