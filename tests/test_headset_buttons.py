@@ -264,3 +264,62 @@ def test_real_helper_on_private_session_bus(tmp_path):
     assert res["events"] == ["PlayPause", "Next", "Previous"]
     assert "Playing" in res["status"]
     assert res["code"] == 0  # stdin закрыт (ядро ушло) — помощник выходит сам
+
+
+# --- дрёма живого разговора и разговор из режима музыки (живой тест 2026-10-10) ---
+
+def test_tap_while_dozing_wakes_not_ends():
+    # первое касание завершало «ждёт имени» и говорило «Отдыхаю» — Александр же звал её
+    dz = st(conversation=True, dozing=True)
+    assert core.button_action("PlayPause", dz) == "wake"
+    assert core.button_action("Next", dz) == "wake"
+    assert core.button_action("PlayPause", {**dz, "music": "playing"}) == "music_pause"
+    assert core.button_action("Previous", dz) == "repeat"
+    assert core.button_action("PlayPause", {**dz, "speaking": True}) == "hush"
+
+
+def test_wake_action_calls_live_wake(env, monkeypatch):
+    woke = []
+
+    async def fake_wake():
+        woke.append(1)
+    monkeypatch.setattr(core.live, "wake", fake_wake)
+    press("PlayPause", st(conversation=True, dozing=True), monkeypatch)
+    assert woke == [1]
+
+
+class FakeResp:
+    def __init__(self, body):
+        self.body = body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def json(self, content_type=None):
+        return self.body
+
+
+@pytest.mark.parametrize("status,route", [
+    ({"profile": "bap-duplex", "duplex": True}, "le"),
+    ({"profile": "a2dp-sink", "duplex": True}, "music"),
+    ({"profile": "a2dp-sink", "duplex": False}, None),
+    ({"profile": "headset-head-unit", "duplex": False}, None),
+    ({"profile": None}, None),
+])
+def test_live_route(status, route, monkeypatch):
+    class S:
+        def get(self, *a, **k):
+            return FakeResp(status)
+    monkeypatch.setattr(core.ks, "session", S())
+    assert asyncio.run(core.live_route()) == route
+
+
+def test_music_back_never_dozes(monkeypatch):
+    monkeypatch.setitem(core.CONFIG, "live_doze", True)
+    lc = core.LiveConversation()
+    assert lc.can_doze()
+    lc.music_back = True
+    assert not lc.can_doze()  # позвали из музыки — после разговора музыка, а не «жду имени»

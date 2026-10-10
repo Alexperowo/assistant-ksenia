@@ -62,15 +62,22 @@ def card_profile(card):
 
 def bt_node(card, kind):
     """Настоящее имя выхода/микрофона гарнитуры: в классическом Bluetooth — «bluez_input.88:92:…»,
-    в LE Audio — «bluez_input.88_92_….0». kind: "sinks" | "sources"."""
+    в LE Audio — «bluez_input.88_92_….0». kind: "sinks" | "sources".
+    Наушники бывают подключены сразу обоими каналами — тогда в списке оба узла, а звук идёт только через узел
+    включённого профиля; молчащий узел обычного Bluetooth стоял первым, и живой разговор слушал тишину
+    (живой тест 2026-10-10)."""
     mac = card[len("bluez_card."):]
     prefix = "bluez_output." if kind == "sinks" else "bluez_input."
+    found = []
     for line in sh("pactl", "list", kind, "short").splitlines():
         parts = line.split("\t")
         if len(parts) > 1 and parts[1].startswith(prefix) and not parts[1].endswith(".monitor") \
                 and mac.replace("_", "") in parts[1].replace("_", "").replace(":", ""):
-            return parts[1]
-    return None
+            found.append(parts[1])
+    if len(found) > 1:
+        le = (card_profile(card) or "").startswith("bap")
+        found.sort(key=lambda n: (":" in n) == le)  # LE Audio — имя с подчёркиваниями, обычный — с двоеточиями
+    return found[0] if found else None
 
 
 def card_profiles(card):
@@ -111,7 +118,8 @@ def make_beep(freq=880, ms=110, vol=0.25):
 HALLUCINATIONS = ("продолжение следует", "субтитры", "спасибо за просмотр", "подписывайтесь",
                   "редактор субтитров", "корректор", "dimatorzok", "до новых встреч")
 
-BEEP = b"\x00\x00" * int(RATE * 0.35) + make_beep(freq=880, ms=200, vol=0.3)
+# громкость 0.3 была резкой в ушах (живой тест 2026-10-10) — по умолчанию втрое тише
+BEEP = b"\x00\x00" * int(RATE * 0.35) + make_beep(freq=880, ms=200, vol=CONFIG.get("beep_volume", 0.1))
 
 
 def clean_gigaam(t: str) -> str:
@@ -618,6 +626,7 @@ async def handle_listen(request):
             if "bap-duplex" in profiles:
                 # LE Audio: звук и микрофон одновременно — ничего не переключаем, начало ответа не теряется
                 if prof != "bap-duplex":
+                    restore = prof if (prof or "").startswith("a2dp") else None  # музыка — вернуть после записи
                     await set_profile(card, "bap-duplex")
                     await asyncio.sleep(CONFIG.get("le_settle_s", 0.5))
                 timings["mode"] = "le"
@@ -657,7 +666,7 @@ async def handle_listen(request):
         timings["stt_s"] = round(time.time() - t1, 2)
         if sure and (sure["weak"] or sure["mean"] < CONFIG.get("asr_unsure_mean", -0.2)):
             timings["asr"] = sure
-        m = mood.hint(pcm, text, "hfp" if restore else "le" if timings.get("mode") == "le" else "default")
+        m = mood.hint(pcm, text, "le" if timings.get("mode") == "le" else "hfp" if restore else "default")
         if m:
             timings["mood"] = m
         speaker = await spk_task if spk_task else {"owner": None, "enrolled": False}
@@ -764,18 +773,20 @@ async def handle_stream(request):
     ws = web.WebSocketResponse(heartbeat=20)
     await ws.prepare(request)
     push = request.query.get("source") == "push"
+    back = request.query.get("restore") == "1"  # позвали касанием в режиме музыки — после разговора вернуть LDAC
     if ear.lock.locked() or ear.streaming:
         await ws.send_json({"type": "error", "reason": "busy"})
         await ws.close()
         return ws
     ear.streaming = True  # сразу: второй /stream во время подготовки запускался параллельно (аудит Fable, D16)
     try:
-        return await _stream(ws, push)
+        return await _stream(ws, push, back)
     finally:
         ear.streaming = False
 
 
-async def _stream(ws, push):
+async def _stream(ws, push, back=False):
+    card, restore = None, None
     if push:
         # звук с планшета: эхо гасит его браузер, сигнал «слушаю» звучит на самом планшете
         for _ in range(50):
@@ -793,7 +804,9 @@ async def _stream(ws, push):
             await ws.send_json({"type": "error", "reason": "not_duplex"})
             await ws.close()
             return ws
-        if await asyncio.to_thread(card_profile, card) != "bap-duplex":
+        prof = await asyncio.to_thread(card_profile, card)
+        if prof != "bap-duplex":
+            restore = prof if back and (prof or "").startswith("a2dp") else None
             await set_profile(card, "bap-duplex")
             await asyncio.sleep(CONFIG.get("le_settle_s", 0.5))
         source = await asyncio.to_thread(find_source, card)
@@ -886,6 +899,10 @@ async def _stream(ws, push):
             rec.kill()
             await rec.wait()
         log.info("Живой режим: микрофон закрыт")
+        if restore:
+            # наушники одновременно в LE Audio и обычном Bluetooth: смена профиля — доли секунды, без переподключения
+            log.info("Живой режим: возвращаю музыку (%s)", restore)
+            await restore_a2dp(card, restore)
         if not ws.closed:
             await ws.close()
     return ws
@@ -935,13 +952,15 @@ async def handle_status(request):
     # pactl — в потоке и без падения: синхронный вызов держал весь слух до 15 с (аудит Fable, D15)
     def snapshot():
         card = find_bt_card()
-        return card, (card_profile(card) if card else None), find_source(card)
+        return (card, (card_profile(card) if card else None), find_source(card),
+                card is not None and "bap-duplex" in card_profiles(card))
     try:
-        card, prof, src = await asyncio.wait_for(asyncio.to_thread(snapshot), 8)
+        card, prof, src, duplex = await asyncio.wait_for(asyncio.to_thread(snapshot), 8)
     except Exception:
-        card = prof = src = None
+        card = prof = src = duplex = None
+    # duplex: живой разговор возможен и из режима музыки — слух сам переключит профиль на время разговора
     return web.json_response({"busy": ear.lock.locked() or ear.streaming, "bt_card": card, "profile": prof,
-                              "source": src})
+                              "source": src, "duplex": bool(duplex)})
 
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -989,7 +1008,20 @@ async def handle_headset(request):
     return web.json_response({"ok": False, "error": "неизвестное действие"}, status=404)
 
 
+def no_wp_autoswitch():
+    """Профилями наушников управляет слух. Автопереключение WirePlumber не видит, что Ксения слушает микрофон
+    LE Audio, и через 2 с возвращало наушники в режим музыки — живой разговор слышал только первую фразу
+    (живой тест 2026-10-10). Выключаем при каждом запуске: настройка не должна держаться на памяти агента."""
+    try:
+        if "true" in sh("wpctl", "settings", "bluetooth.autoswitch-to-headset-profile").lower():
+            sh("wpctl", "settings", "--save", "bluetooth.autoswitch-to-headset-profile", "false")
+            log.info("WirePlumber: автопереключение профиля наушников выключено")
+    except Exception as e:
+        log.warning("WirePlumber: не удалось выключить автопереключение: %r", e)
+
+
 async def _headset_start(app):
+    await asyncio.to_thread(no_wp_autoswitch)
     async def first_check():
         await asyncio.sleep(CONFIG.get("headset_check_delay_s", 8))  # наушники могут подключаться после слуха
         res = await headset.check_and_recover("запуск слуха")

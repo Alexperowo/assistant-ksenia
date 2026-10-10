@@ -2587,6 +2587,10 @@ class LiveConversation(Conversation):
         self.prejudge = None
         self.ctx_sent = None
         self.last_bc = 0.0
+        self.music_back = False  # позвали касанием в режиме музыки: после разговора — обратно к музыке, без дрёмы
+
+    def can_doze(self):
+        return CONFIG.get("live_doze", True) and not self.music_back
 
     def busy(self):
         return self.cur is not None and not self.cur.done()
@@ -2812,7 +2816,7 @@ class LiveConversation(Conversation):
             self.cur = asyncio.create_task(self.live_turn(merged, ev.get("timings") or {}, speaker))
             if kind == "goodbye" or is_goodbye(text):
                 await asyncio.wait({self.cur})
-                if CONFIG.get("live_doze", True) and not stop_listening(text):
+                if self.can_doze() and not stop_listening(text):
                     self.doze("попрощались")  # как человек: разговор окончен, но позвать по имени можно
                     return False
                 return True
@@ -2827,17 +2831,28 @@ class LiveConversation(Conversation):
         log.info("Живой режим: %s — жду, когда позовут по имени", why)
         hub.emit({"type": "state", "state": "idle", "where": "pc"})
 
+    async def wake(self):
+        """Касание, пока она «отошла в сторону», — как окликнуть: снова в разговоре."""
+        self.dozing = False
+        log.info("Живой режим: позвали касанием — снова в разговоре")
+        hub.emit({"type": "state", "state": "listening", "where": "pc"})
+        await say_notice(random.choice(("Да?", "Слушаю.", "Да, я тут.")), output=self.output)
+
     async def run(self):
         self.turns, self.cur, self.early, self.last_utt, self.ctx_sent = 0, None, None, None, None
         self.dozing, self.start_dozing = getattr(self, "start_dozing", False), False
         self.judge = live_intent.Judge(CONFIG, BRAIN_KEY)
-        url = CONFIG["voice_in_url"].replace("http", "ws", 1) + "/stream" + ("?source=push" if self.source == "push" else "")
+        url = CONFIG["voice_in_url"].replace("http", "ws", 1) + "/stream" + \
+            ("?source=push" if self.source == "push" else "?restore=1" if self.music_back else "")
         try:
             async with ks.session.ws_connect(url, heartbeat=20) as ws:
                 first = await ws.receive_json(timeout=15)
                 if first.get("type") != "ready":
-                    log.info("Живой режим недоступен (%s) — обычный разговор", first)
                     await ws.close()
+                    if self.dozing:  # включался сам («жду имени») — обычный разговор с сигналом тут не к месту
+                        log.info("Живой режим недоступен (%s) — жду имени не получится", first)
+                        return
+                    log.info("Живой режим недоступен (%s) — обычный разговор", first)
                     return await Conversation.run(self)
                 self.ws = ws
                 log.info("Живой режим: слушаю постоянно" + (" — жду, когда позовут по имени" if self.dozing else ""))
@@ -2853,7 +2868,7 @@ class LiveConversation(Conversation):
                         elif waiting:
                             self.cur = asyncio.create_task(self.live_waiting())
                         elif not self.dozing and time.time() - last > CONFIG.get("live_idle_s", 60):
-                            if not CONFIG.get("live_doze", True):
+                            if not self.can_doze():
                                 log.info("Живой режим: долго тихо — микрофон закрываю")
                                 return
                             self.doze("долго тихо")
@@ -3114,7 +3129,7 @@ async def stop_conversation():
 async def headset_auto_live():
     """Надел наушники — сразу можно звать по имени (решение Александра 2026-10-10): наушники JBL засыпают, когда
     их сняли; проснулись и подключились по LE Audio — живой разговор включается сам, сразу в «жду имени»,
-    без касаний (касания в LE Audio до компьютера не доходят). Отключены долго — раз в 2 минуты попробовать
+    без касаний (касания доходят, только пока наушники подключены и по обычному Bluetooth). Отключены долго — раз в 2 минуты попробовать
     подключить (после сна или перезагрузки наушники не всегда подключаются сами)."""
     was, last_try = None, 0.0
     while True:
@@ -3159,7 +3174,11 @@ async def start_talk(source=None, doze=False):
             # наушники в LE Audio — живой режим (слушает всегда, можно перебивать); иначе — обычный разговор
             live.source, live.output = "headset", "local"
             ks.last_client_t = 0.0  # говорит у компьютера: напоминания — сюда, а не на планшет
-            runner = live if CONFIG.get("live_mode", True) and await live_possible() else conv
+            route = await live_route() if CONFIG.get("live_mode", True) else None
+            runner = live if route else conv
+            live.music_back = route == "music"
+        if source == "push":
+            live.music_back = False
         live.start_dozing = doze and runner is live  # включили сами (надел наушники) — сразу «жду имени»
         conv.task = asyncio.create_task(runner.run())
         conv._runner = runner
@@ -3178,12 +3197,19 @@ async def handle_talk(request):
     return web.json_response({"ok": True, "mode": "live" if runner is live else "conversation"})
 
 
-async def live_possible() -> bool:
+async def live_route():
+    """Можно ли живой разговор: "le" — наушники уже в LE Audio; "music" — сейчас музыка (LDAC), но наушники
+    подключены и по LE Audio: слух переключит профиль на время разговора и вернёт музыку; None — нельзя."""
     try:
         async with ks.session.get(CONFIG["voice_in_url"] + "/status", timeout=aiohttp.ClientTimeout(total=3)) as r:
-            return (await r.json(content_type=None)).get("profile") == "bap-duplex"
+            st = await r.json(content_type=None)
     except Exception:
-        return False
+        return None
+    if st.get("profile") == "bap-duplex":
+        return "le"
+    if str(st.get("profile") or "").startswith("a2dp") and st.get("duplex"):
+        return "music"
+    return None
 
 
 async def handle_stop(request):
@@ -3206,6 +3232,10 @@ def button_action(event: str, st: dict) -> str:
         return "stop_all"
     if st.get("speaking"):
         return "hush" if event in TAP or event in ("Next", "Previous") else "none"
+    if st.get("dozing"):
+        # живой разговор окончен, она ждёт имени — для касаний это то же, что покой, только «поговорить» = окликнуть
+        act = button_action(event, {**st, "dozing": False, "conversation": False})
+        return "wake" if act == "talk" else act
     tune = st.get("music")
     if event in TAP:
         if tune == "playing":
@@ -3223,7 +3253,8 @@ def button_action(event: str, st: dict) -> str:
 def button_state() -> dict:
     sp = ks.speaker
     sounding = sp is not None and not sp.cancelled and getattr(sp, "_play_end", 0.0) > time.time()
-    return {"speaking": ks.lock.locked() or sounding, "conversation": conv.active(), "music": music.status()}
+    return {"speaking": ks.lock.locked() or sounding, "conversation": conv.active(), "music": music.status(),
+            "dozing": conv.active() and getattr(conv, "_runner", None) is live and live.dozing}
 
 
 def last_reply() -> str:
@@ -3319,6 +3350,8 @@ class HeadsetButtons:
                 await ks.stop()
         elif action == "talk":
             await start_talk()
+        elif action == "wake":
+            await live.wake()
         elif action in ("end", "stop_all"):
             async with talk_lock:
                 ended = await stop_conversation()
