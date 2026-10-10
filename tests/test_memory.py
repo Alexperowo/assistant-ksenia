@@ -14,12 +14,13 @@ def mem(monkeypatch, tmp_path):
     confirm.cancel()
     memory.changed["flag"] = False
 
-    def said(text, internal=False, affirmative=False):
-        confirm.CONTEXT.update({"user_text": text, "internal": internal, "affirmative": affirmative})
+    def said(text, internal=False, affirmative=False, last_said=""):
+        confirm.CONTEXT.update({"user_text": text, "internal": internal, "affirmative": affirmative,
+                                "last_said": last_said})
 
     yield f, said
     confirm.cancel()
-    confirm.CONTEXT.update({"user_text": "", "internal": False, "affirmative": False})
+    confirm.CONTEXT.update({"user_text": "", "internal": False, "affirmative": False, "last_said": ""})
 
 
 def call(name, **args):
@@ -39,8 +40,16 @@ def test_remember_when_asked(mem):
 
 def test_remember_after_yes(mem):
     f, said = mem
-    said("да", affirmative=True)
+    said("да", affirmative=True, last_said="О, у тебя есть сестра Оля! Запомнить?")
     assert call("memory_remember", fact="сестру зовут Оля")["remembered"]
+
+
+@pytest.mark.parametrize("text,last", [("да", "Включить музыку?"), ("ты запомнила, как зовут сестру?", ""),
+                                        ("ага", "")])
+def test_yes_to_other_question_or_question_is_not_a_request(mem, text, last):
+    f, said = mem
+    said(text, affirmative=text in ("да", "ага"), last_said=last)
+    assert call("memory_remember", fact="сестру зовут Оля")["prepared"] and facts(f) == []
 
 
 def test_remember_on_its_own_initiative_asks_first(mem):

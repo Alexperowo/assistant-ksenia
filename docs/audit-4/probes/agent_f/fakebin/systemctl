@@ -1,0 +1,2 @@
+#!/bin/bash
+echo "systemctl $*" >> "$LOG"; exit 0

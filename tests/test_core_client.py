@@ -200,3 +200,23 @@ def test_client_websocket(monkeypatch):
     assert hello["type"] == "hello" and hello["confirm"]["question"] == "Нажать «Удалить»?"
     assert ev == {"type": "state", "state": "thinking"} and audio == b"\x01\x02"
     assert still is False  # шлюз отключился — ядро снова говорит у ПК
+
+
+def test_spawned_tasks_are_referenced_until_done():
+    """«Выстрелил и забыл» (ход с камеры планшета, служебная фраза) — со ссылкой: иначе задача может исчезнуть
+    посреди работы и оставить ks.lock занятым навсегда."""
+    import asyncio
+    import core
+
+    async def go():
+        ev = asyncio.Event()
+
+        async def job():
+            await ev.wait()
+        t = core.spawn(job())
+        assert t in core._TASKS
+        ev.set()
+        await t
+        await asyncio.sleep(0)
+        return t not in core._TASKS
+    assert asyncio.run(go())

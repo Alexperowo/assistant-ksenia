@@ -4,21 +4,33 @@
 # nexus  — Antigravity-Nexus: Ксения освобождает обе видеокарты, запускается Antigravity.
 KSENIA="ksenia-voice-out ksenia-voice-in ksenia-brain ksenia-judge ksenia-core"
 NEXUS_MODELS="nexus-llama nexus-tinfield nexus-nex nexus-ornith"
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/ksenia-mode.lock"
+flock -n 9 || { echo "ksenia-mode уже выполняется" >&2; exit 1; }  # двойной щелчок по ярлыку
 case "${1:-ksenia}" in
   nexus)
-    systemctl --user is-active --quiet ksenia-voice-out && /home/user/Agents/Ksenia/scripts/ksenia-announce "Переключаюсь на Антигравити. Позови меня ярлыком, когда понадоблюсь."
+    systemctl --user is-active --quiet ksenia-voice-out && "$(dirname "$(readlink -f "$0")")/ksenia-announce" "Переключаюсь на Антигравити. Позови меня ярлыком, когда понадоблюсь."
     systemctl --user stop ksenia-core ksenia-judge ksenia-brain ksenia-voice-in ksenia-voice-out ksenia-pwa 2>/dev/null
     notify-send -a "Ксения" -i applications-development "Antigravity-Nexus" "Ксения выключена, видеокарты свободны для Nexus."
     pgrep -f /opt/antigravity/antigravity >/dev/null || setsid /opt/antigravity/antigravity >/dev/null 2>&1 &
     ;;
   ksenia)
     systemctl --user stop $NEXUS_MODELS 2>/dev/null
-    systemctl --user start ksenia-voice-out ksenia-voice-in ksenia-brain ksenia-judge ksenia-core
+    # ksenia-pwa — связь с планшетом: без неё после режима Nexus планшет молчал (аудит Fable, FA5)
+    systemctl --user start ksenia-voice-out ksenia-voice-in ksenia-brain ksenia-judge ksenia-core ksenia-pwa
+    up=0
     for i in $(seq 1 90); do
-      curl -s -m 2 -H "Authorization: Bearer $(cat /home/user/Agents/Ksenia/brain/api_key)" http://127.0.0.1:18100/health | grep -q ok \
-        && curl -s -m 2 http://127.0.0.1:18110/ >/dev/null 2>&1; [ $? -eq 0 ] && break; sleep 2
+      # /health мозга открыт без ключа: ключ в командной строке был бы виден всем в списке процессов
+      if curl -s -m 2 http://127.0.0.1:18100/health | grep -q ok && curl -s -m 2 http://127.0.0.1:18110/ >/dev/null 2>&1; then
+        up=1; break
+      fi
+      sleep 2
     done
-    /home/user/Agents/Ksenia/scripts/ksenia-announce "Я снова с тобой."
+    if [ "$up" = 1 ]; then
+      "$(dirname "$(readlink -f "$0")")/ksenia-announce" "Я снова с тобой."
+    else
+      notify-send -a "Ксения" "Ксения" "Включилась не полностью: мозг или голос не поднялись за 3 минуты."
+      "$(dirname "$(readlink -f "$0")")/ksenia-announce" "Я включилась, но не всё поднялось. Спроси меня: ты в порядке?"
+    fi
     ;;
   *) echo "использование: ksenia-mode ksenia|nexus" >&2; exit 2 ;;
 esac

@@ -25,7 +25,29 @@ PM = "apt" if shutil.which("apt-get") else ("dnf" if shutil.which("dnf") else No
 
 
 def _apt(*a):
-    return ["sudo", "-n", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-y", "-q", *a]
+    # conffile: оставить свой файл настроек, не спрашивать (вопрос dpkg без терминала повесил бы установку)
+    return ["sudo", "-n", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "-y", "-q",
+            "-o", "Dpkg::Options::=--force-confdef", "-o", "Dpkg::Options::=--force-confold", *a]
+
+
+# Части системы, без которых нет рабочего стола, звука, сети или загрузки: их не удаляет ни одна команда
+# (ни прямо, ни как зависимость). Префиксы: «pipewire» закрывает и pipewire-pulse, и pipewire-audio.
+VITAL = ("sudo", "systemd", "plasma-", "kwin", "kubuntu-", "linux-image", "linux-generic", "network-manager",
+         "pipewire", "wireplumber", "bluez", "nvidia-", "apt", "dpkg", "python3", "openssh-server", "sddm", "libc6",
+         "ubuntu-minimal", "ubuntu-standard", "xdg-desktop-portal", "dbus", "polkit", "grub", "shim", "cuda")
+
+
+def _vital(name: str) -> bool:
+    name = name.split(":")[0]
+    return any(name == v or (v.endswith("-") and name.startswith(v)) or name.startswith(v + "-") or name == v
+               for v in VITAL)
+
+
+async def _simulate(*a):
+    """Что apt сделает на самом деле: «pipewire-» в install — это УДАЛИТЬ pipewire (и рабочий стол с ним)."""
+    rc, out = await _exec(["apt-get", "-s", "-q", *a], 60)
+    removes = [ln.split()[1] for ln in out.splitlines() if ln.startswith("Remv ")]
+    return rc, removes, out
 
 
 INFO = {
@@ -56,7 +78,7 @@ INFO = {
 
 CHANGE = {
     "install": ("Установить программу (param: имя пакета)", "установить «{p}»",
-                lambda p: _apt("install", p) if PM == "apt" else ["sudo", "-n", "dnf", "-y", "install", p], 900),
+                lambda p: _apt("install", "--no-remove", p) if PM == "apt" else ["sudo", "-n", "dnf", "-y", "install", p], 900),
     "remove": ("Удалить программу (param: имя пакета; данные пользователя не трогаются)", "удалить программу «{p}»",
                lambda p: _apt("remove", p) if PM == "apt" else ["sudo", "-n", "dnf", "-y", "remove", p], 600),
     "update_system": ("Обновить систему целиком", "обновить систему (может занять долго)",
@@ -154,8 +176,8 @@ async def _run_change(cmd, p):
             rc, out = await _exec(["sudo", "-n", "dnf", "-y", "upgrade"], 3600)
         else:
             rc, out = await _exec(_apt("update"), 600)
-            if rc == 0:
-                rc, out = await _exec(_apt("full-upgrade"), 3600)
+            if rc == 0:  # upgrade, а не full-upgrade: обновление ничего не удаляет
+                rc, out = await _exec(_apt("upgrade", "--with-new-pkgs", "--no-remove"), 3600)
     elif cmd == "clean":
         rc, out = await _exec(_apt("autoremove", "--purge") if PM == "apt" else ["sudo", "-n", "dnf", "-y", "autoremove"], 600)
         await _exec(_apt("clean") if PM == "apt" else ["sudo", "-n", "dnf", "clean", "all"], 120)
@@ -186,4 +208,24 @@ async def call(name, args, session):
                 "note": "объясни Александру простыми словами главное, без терминов и цифр-простыней"}
     label = CHANGE[cmd][1].format(p=p)
     question = f"{label[:1].upper()}{label[1:]}?"
-    return confirm.ask(label, lambda: _run_change(cmd, p), question)
+    if PM == "apt" and cmd in ("install", "remove", "clean"):
+        sim = {"install": ("install", p), "remove": ("remove", p), "clean": ("autoremove",)}[cmd]
+        rc, removes, out = await _simulate(*sim)
+        if rc != 0:
+            return {"ok": False, "error": "проверка показала, что так не получится",
+                    "detail": "\n".join(out.splitlines()[-3:])[:300]}
+        vital = [r for r in removes if _vital(r)]
+        if vital:
+            return {"ok": False, "error": "это удалило бы важные части системы — Ксения так не делает",
+                    "would_remove": vital[:5]}
+        if cmd == "install" and removes:
+            return {"ok": False, "error": "установка потребовала бы удалить другие программы — Ксения так не делает",
+                    "would_remove": removes[:5]}
+        if cmd == "remove" and len(removes) > 1:
+            question = (f"Удалить программу «{p}»? Вместе с ней удалятся ещё {len(removes) - 1}: "
+                        f"{', '.join(r for r in removes if r != p)[:120]}. Удалить?")
+        if cmd == "clean" and not removes:
+            label, question = "почистить кэш пакетов и старые журналы", "Почистить кэш пакетов и старые журналы?"
+    limit = {"install": 900, "remove": 600, "update_system": 4200, "clean": 900}.get(cmd, 60)
+    return confirm.ask(label, lambda: _run_change(cmd, p), question, limit=limit,
+                       background=cmd in ("install", "update_system", "clean"))

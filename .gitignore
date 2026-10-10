@@ -1,5 +1,6 @@
 .venv/
-logs/
+logs/*
+!logs/.gitkeep
 data/
 brain/api_key
 voice-tests/

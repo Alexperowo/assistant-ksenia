@@ -24,7 +24,25 @@ def ks(monkeypatch, tmp_path):
     confirm.cancel()
 
 
-def test_finding_between_question_and_yes_keeps_confirmation(ks):
+def test_finding_waits_while_question_pending(ks, monkeypatch):
+    """Находка помощника не звучит между «Отправить?» и ответом: иначе «да» стало бы двусмысленным."""
+    spoken = []
+
+    async def fake_turn(*a, **kw):
+        spoken.append(a[0])
+
+    monkeypatch.setattr(core, "turn", fake_turn)
+    monkeypatch.setattr(core, "waiting", [core.finding_prompt({"question": "q", "answer": "a", "sources": []})])
+    confirm.prepare("сообщение ВКонтакте для Димы", lambda: None)
+    asyncio.run(core.deliver_waiting())
+    assert spoken == [] and len(core.waiting) == 1
+    confirm.cancel()
+    asyncio.run(core.deliver_waiting())
+    assert len(spoken) == 1
+
+
+def test_yes_after_another_turn_does_not_run(ks):
+    """«Отправить?» → напоминание «Выпил таблетки?» → «ага»: «ага» было про таблетки, сообщение не уходит."""
     sent = []
 
     async def send():
@@ -32,16 +50,15 @@ def test_finding_between_question_and_yes_keeps_confirmation(ks):
         return {"ok": True}
 
     confirm.prepare("сообщение ВКонтакте для Димы", send)
-    script_steps(ks, [("О, нашла новость.", []), ("Отправила.", [])])
+    script_steps(ks, [("Пора выпить таблетки. Выпил?", []), ("Молодец.", [])])
 
     async def go():
-        await ks.respond(core.finding_prompt({"question": "q", "answer": "a", "sources": []}), {"_t0": 0}, internal=True)
-        assert confirm.current() is not None  # раньше служебная реплика отменяла «Отправить?» как «не да»
-        await ks.respond("да", {"_t0": 0})
+        await ks.respond(core.reminder_prompt({"text": "таблетки"}), {"_t0": 0}, internal=True)
+        await ks.respond("ага", {"_t0": 0})
 
     asyncio.run(go())
-    assert sent == [1]
-    assert "ядро ВЫПОЛНИЛО" in ks.history[-2]["content"]
+    assert sent == [] and confirm.peek() is None
+    assert "НЕ выполнено" in ks.history[-2]["content"]
 
 
 def test_internal_turn_does_not_run_tools(ks, monkeypatch):

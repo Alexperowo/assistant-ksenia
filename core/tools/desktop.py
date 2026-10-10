@@ -20,6 +20,8 @@ from tools import confirm, screen
 ROOT = os.path.dirname(os.path.abspath(__file__))
 HELPER = os.path.join(ROOT, "atspi_helper.py")
 RISKY = re.compile(r"удал|отправ|оплат|купить|стереть|очист|формат|выйти из|сброс|перезагруз|выключ|закрыть без|"
+                   r"установ|не сохран|отключ|забыть|выполнить|заменить|перезапис|опубликов|"
+                   r"install|don.?t save|discard|disconnect|forget|execute|replace|overwrite|publish|"
                    r"delete|remove|send|pay|erase|format|reset|shut ?down|reboot", re.I)
 APP_DIRS = ["/usr/share/applications", os.path.expanduser("~/.local/share/applications"),
             "/var/lib/flatpak/exports/share/applications", os.path.expanduser("~/.local/share/flatpak/exports/share/applications"),
@@ -295,6 +297,8 @@ async def _screen_click(text, nth):
         return {"ok": False, "error": f"не вижу на экране надписи «{text}»"}
     scale = await asyncio.to_thread(_screen_scale)
     lx, ly = round(pt[0] / scale), round(pt[1] / scale)
+    if confirm.is_financial(text):
+        return dict(confirm.MONEY_REFUSAL)
     if RISKY.search(text):
         return confirm.ask(f"нажать «{text}» на экране", lambda: _click_at(lx, ly), question=f"Нажать «{text}»?")
     return await _click_at(lx, ly)
@@ -374,9 +378,13 @@ async def call(name, args, session):
     if name == "ui_click":
         target = args.get("name", "")
         # помощник сам смотрит на НАЙДЕННУЮ кнопку: «ок» может совпасть с «Окончательно удалить»
-        res = await _helper("click", {"name": target, "risky": RISKY.pattern})
+        if confirm.is_financial(target):
+            return dict(confirm.MONEY_REFUSAL)
+        res = await _helper("click", {"name": target, "risky": RISKY.pattern + "|" + confirm.FINANCE.pattern})
         if res.get("needs_confirm"):
             matched, window = res.get("matched") or target, res.get("window") or ""
+            if confirm.is_financial(matched):
+                return dict(confirm.MONEY_REFUSAL)
             # после «да» — та же кнопка в том же окне; если Александр переключил окно, нажатия не будет
             return confirm.ask(f"нажать «{matched}» в окне «{window}»",
                                lambda: _helper("click", {"name": matched, "exact": True, "expect_window": window}),

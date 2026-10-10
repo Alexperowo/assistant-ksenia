@@ -67,3 +67,30 @@ def test_help_guide_sections():
     assert asyncio.run(guide.call("help_guide", {"topic": "нет"}, None))["ok"] is False
     assert "help_guide" in core.TOOL_INDEX
     json.dumps(guide.SCHEMAS, ensure_ascii=False)
+
+
+def test_sandbox_keeps_alexanders_pending_question(ks, monkeypatch):
+    """Автопроверка посреди «Отправить?»: её «да» не отправляет, её реплика не отменяет вопрос,
+    а то, что приготовила она сама, после неё не остаётся ждать настоящего «да»."""
+    sent = []
+
+    async def send():
+        sent.append("Диме")
+        return {"ok": True}
+
+    confirm.ask("отправить Диме: привет", send, question="Отправить Диме: привет?")
+
+    async def fake_tool(name, args, session):
+        return confirm.ask("удалить файл", lambda: None, question="Удалить?")
+    monkeypatch.setattr(core, "run_tool", fake_tool)
+    script_steps(ks, [("Готово.", [call("f1", "files", "{}")]), ("Ага.", [])])
+    asyncio.run(core.turn("Да", {"_t0": 0}, sandbox=True))
+    assert sent == []
+    assert confirm.current()["label"] == "отправить Диме: привет"
+
+
+def test_sandbox_voice_goes_only_to_its_own_sink(ks):
+    script_steps(ks, [("Проверка.", [])])
+    asyncio.run(core.turn("Который час?", {"_t0": 0}, sandbox=True, sink="ksenia_selftest"))
+    assert FakeSpeaker.instances[-1].sink == "ksenia_selftest"
+    assert core.Speaker(None).__dict__.get("sink") is None  # другие голоса (напоминание) — как обычно

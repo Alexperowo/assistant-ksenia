@@ -56,3 +56,19 @@ def _no_writes_to_real_data(monkeypatch, tmp_path):
         monkeypatch.setattr(voice_in, "mood", voice_in.Mood())
     except ImportError:
         pass
+
+
+@pytest.fixture(autouse=True)
+def _no_real_services(monkeypatch):
+    """Тесты не перезапускают настоящие службы и не зовут настоящий запасной голос (2026-10-10: тест сбоя голоса
+    перезапустил настоящий ksenia-voice-out)."""
+    try:
+        import core
+    except Exception:
+        return
+    restarted = []
+    monkeypatch.setattr(core, "voice_out_broken", lambda: restarted.append("ksenia-voice-out"), raising=False)
+    monkeypatch.setattr(core, "fallback_pcm", lambda text: b"", raising=False)
+    monkeypatch.setattr(core, "restart_unit", lambda unit, why, every_s=180: restarted.append(unit) or True,
+                        raising=False)
+    return restarted

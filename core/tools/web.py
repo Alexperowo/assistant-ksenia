@@ -20,7 +20,8 @@ import aiohttp
 from tools import browser_core, confirm, screen
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140 Safari/537.36"
-RISKY = re.compile(r"оплат|купить|заказ|оформ|отправ|удал|подтверд|подпис|перевест|перевод|списать|pay|buy|order|"
+RISKY = re.compile(r"оплат|купить|заказ|оформ|отправ|удал|подтверд|подпис|перевест|перевод|списать|опубликов|"
+                   r"разместить|выйти|сохранить|изменить пароль|pay|buy|order|publish|post\b|log ?out|"
                    r"checkout|send|delete|remove|confirm|submit", re.I)
 FINANCE_URL = re.compile(r"pay|checkout|oplata|bank|card|wallet|cart|korzina|basket", re.I)
 
@@ -162,8 +163,9 @@ async def _click(pg, text, allow_risky=False, expect_url=None):
     if el is None:
         return {"ok": False, "error": f"не нашла на странице «{text}»"}
     label = await _label(el, text)
-    if FINANCE_URL.search(pg.url or "") and re.search(r"оплат|pay|списать|перевест", f"{text} {label}", re.I):
-        return {"ok": False, "error": "оплату и переводы денег я не делаю — это может только Александр сам"}
+    if confirm.is_financial(text, label) or (FINANCE_URL.search(pg.url or "") and
+                                             re.search(r"продолж|далее|подтверд|continue|next|confirm", label, re.I)):
+        return dict(confirm.MONEY_REFUSAL)  # на странице оплаты и «Продолжить» — шаг к оплате
     if not allow_risky and (RISKY.search(text) or RISKY.search(label)):
         return {"ok": False, "needs_confirm": True, "label": label}
     try:

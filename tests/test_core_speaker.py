@@ -199,3 +199,14 @@ def test_cancel_fades_out_instead_of_cutting(players):
     tail = data[-int(44100 * 0.12):]
     assert tail[0] > 8000 and abs(int(tail[-1])) < 200  # громкость плавно уходит в ноль
     assert np.all(np.diff(tail.astype(np.int32)) <= 1)   # без скачков вверх
+
+
+def test_broken_voice_falls_back_and_restarts_service(players, monkeypatch, _no_real_services):
+    """Голос не ответил — фраза звучит запасным голосом, служба голоса перезапускается; вопрос услышан."""
+    made, _ = players
+    monkeypatch.setattr(core, "fallback_pcm", lambda text: b"\x09\x00")
+    session = FakeSession(FakeResponse(500, body="boom"), FakeResponse(200, chunks=[b"\x01\x00"]))
+    sp = speak_all(session, ["Раз.", "Два."])
+    assert bytes(made[0].stdin.data) == b"\x09\x00\x01\x00"
+    assert _no_real_services == ["ksenia-voice-out"]
+    assert sp.failed is False

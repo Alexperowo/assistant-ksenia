@@ -5,6 +5,7 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=0
 export PATH=/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+"$(dirname "$0")/../scripts/wait-gpu.sh" 0 || exit 1  # драйвер после загрузки системы ещё не готов
 M=/home/user/Models/Bonsai-2-27B
 exec /home/user/backend/llama.cpp-prism/src/build/bin/llama-server \
     -m "$M/Bonsai-2-27B-PQ2_0-MTP.gguf" \
