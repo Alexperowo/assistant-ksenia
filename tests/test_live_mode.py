@@ -254,3 +254,12 @@ def test_wake_rest():
     assert core.wake_rest("Ксения, какая погода?") == "какая погода?"
     assert core.wake_rest("Эй, Ксения") == "" and core.wake_rest("Ксюша, привет") == "привет"
     assert core.wake_rest("Я рассказывал Ксении") is None and core.wake_rest("Позвони маме") is None
+
+
+def test_started_by_headset_waits_for_name(live_env, monkeypatch):
+    """Надел наушники — живой режим сам включился и ждёт имени: чужая фраза не трогает, «Ксения, …» — да."""
+    monkeypatch.setitem(core.CONFIG, "live_doze", True)
+    monkeypatch.setattr(core.LiveConversation, "start_dozing", True, raising=False)
+    turns, said = live_env([{"type": "ready"}, utt("Какая погода?"), 0.1, utt("Ксения, какая погода?"), 0.15,
+                            utt("Не слушай.")])
+    assert turns == ["какая погода?"]

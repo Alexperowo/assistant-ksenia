@@ -2825,7 +2825,7 @@ class LiveConversation(Conversation):
 
     async def run(self):
         self.turns, self.cur, self.early, self.last_utt, self.ctx_sent = 0, None, None, None, None
-        self.dozing = False
+        self.dozing, self.start_dozing = getattr(self, "start_dozing", False), False
         self.judge = live_intent.Judge(CONFIG, BRAIN_KEY)
         url = CONFIG["voice_in_url"].replace("http", "ws", 1) + "/stream" + ("?source=push" if self.source == "push" else "")
         try:
@@ -2836,8 +2836,8 @@ class LiveConversation(Conversation):
                     await ws.close()
                     return await Conversation.run(self)
                 self.ws = ws
-                log.info("Живой режим: слушаю постоянно")
-                hub.emit({"type": "state", "state": "listening", "where": "pc"})
+                log.info("Живой режим: слушаю постоянно" + (" — жду, когда позовут по имени" if self.dozing else ""))
+                hub.emit({"type": "state", "state": "idle" if self.dozing else "listening", "where": "pc"})
                 last = time.time()
                 while True:
                     await self.send_context()
@@ -3107,7 +3107,40 @@ async def stop_conversation():
     return old is not None
 
 
-async def start_talk(source=None):
+async def headset_auto_live():
+    """Надел наушники — сразу можно звать по имени (решение Александра 2026-10-10): наушники JBL засыпают, когда
+    их сняли; проснулись и подключились по LE Audio — живой разговор включается сам, сразу в «жду имени»,
+    без касаний (касания в LE Audio до компьютера не доходят). Отключены долго — раз в 2 минуты попробовать
+    подключить (после сна или перезагрузки наушники не всегда подключаются сами)."""
+    was, last_try = None, 0.0
+    while True:
+        await asyncio.sleep(CONFIG.get("headset_poll_s", 10))
+        try:
+            async with ks.session.get(CONFIG["voice_in_url"] + "/headset", timeout=aiohttp.ClientTimeout(total=8)) as r:
+                st = await r.json(content_type=None)
+        except Exception:
+            continue
+        now_on = bool(st.get("connected")) and st.get("mode") == "talk"
+        if not st.get("connected") and time.time() - last_try > CONFIG.get("headset_reconnect_s", 120):
+            last_try = time.time()
+            spawn(_quiet_reconnect())
+        if now_on and was is False and not conv.active() and CONFIG.get("live_mode", True) \
+                and CONFIG.get("live_doze", True):
+            log.info("Наушники подключились — живой разговор: жду, когда позовут по имени")
+            await start_talk(doze=True)
+        was = now_on
+
+
+async def _quiet_reconnect():
+    try:
+        async with ks.session.post(CONFIG["voice_in_url"] + "/headset/check",
+                                   timeout=aiohttp.ClientTimeout(total=90)) as r:
+            await r.read()
+    except Exception:
+        pass
+
+
+async def start_talk(source=None, doze=False):
     # Нажатие во время разговора: прервать речь Ксении и сразу слушать заново.
     # Замок — чтобы два быстрых нажатия не запустили два разговора сразу.
     async with talk_lock:
@@ -3122,6 +3155,7 @@ async def start_talk(source=None):
             live.source, live.output = "headset", "local"
             ks.last_client_t = 0.0  # говорит у компьютера: напоминания — сюда, а не на планшет
             runner = live if CONFIG.get("live_mode", True) and await live_possible() else conv
+        live.start_dozing = doze and runner is live  # включили сами (надел наушники) — сразу «жду имени»
         conv.task = asyncio.create_task(runner.run())
         conv._runner = runner
     return runner
@@ -3592,7 +3626,7 @@ async def on_start(app):
                        asyncio.create_task(music.book_autosave_loop()), asyncio.create_task(warmup()),
                        asyncio.create_task(startup_check()), asyncio.create_task(diary_loop()),
                        asyncio.create_task(watch_loop()), asyncio.create_task(resume_watch()),
-                       asyncio.create_task(rewindow_when_idle())])
+                       asyncio.create_task(rewindow_when_idle()), asyncio.create_task(headset_auto_live())])
     if CONFIG.get("headset_buttons", True):
         BACKGROUND.append(asyncio.create_task(buttons.run()))
 
