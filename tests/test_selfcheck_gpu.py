@@ -17,6 +17,10 @@ def run_check(monkeypatch, gpu_pids, brain_health=200):
             return 0, "\n".join(gpu_pids)
         if argv[0] == "pactl":
             return 0, "bluez_output.x"
+        if argv[0] == "curl":
+            return 0, '{"busy": false}'
+        if argv[0] == "nvidia-smi":
+            return 0, "0, 14000, 16000, 50"
         return 0, ""
 
     async def fake_http(session, url, headers=None):
@@ -41,3 +45,25 @@ def test_brain_on_cpu_is_reported_and_restarted(monkeypatch):
 def test_loading_brain_is_not_an_alarm(monkeypatch):
     r = run_check(monkeypatch, ["202", "303"], brain_health=503)
     assert r["restart"] == []
+
+
+def test_hung_hearing_and_dead_gpus_are_problems(monkeypatch):
+    async def fake_run(*argv):
+        if argv[:3] == ("systemctl", "--user", "is-active"):
+            return 0, "active"
+        if argv[:3] == ("systemctl", "--user", "show"):
+            return 0, "0"
+        if argv[0] == "curl":
+            return -1, "не ответил"
+        if argv[0] == "nvidia-smi":
+            return -1, "не ответил"
+        return 0, "bluez_output.x"
+
+    async def fake_http(session, url, headers=None):
+        return 200
+
+    monkeypatch.setattr(selfcheck, "_run", fake_run)
+    monkeypatch.setattr(selfcheck, "_http", fake_http)
+    r = asyncio.run(selfcheck.call("self_check", {}, None))
+    assert any("слух" in p and "не отвечает" in p for p in r["problems"])
+    assert any("видеокарты не отвечают" in p for p in r["problems"]) and "ksenia-voice-in" in r["restart"]

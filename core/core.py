@@ -1050,7 +1050,10 @@ def split_tail_offer(text: str, whole_ok: bool = False):
 INTERNAL_NO_TOOLS = {"ok": False, "error": "в служебной реплике инструменты не выполняются: просто расскажи словами; "
                                         "если нужно действие — предложи его Александру и дождись его ответа"}
 CANCELLED_RESULT = {"ok": False, "error": "отменено: Александр перебил, инструмент не выполнен или выполнен не до конца"}
-BRAIN_FAIL_PHRASE = "[sigh] Ой, у меня что-то с головой. Мозг не отвечает, проверь, пожалуйста, сервис."
+# Александр не видит экран и не чинит службы — никаких «проверь сервис» (аудит Fable, FA8)
+BRAIN_FAIL_PHRASE = "[sigh] Ой, у меня что-то с головой — мозг не ответил. Спроси ещё раз, пожалуйста."
+BRAIN_HUNG_PHRASE = "[sigh] Мой мозг завис. Перезапускаю его — это около минуты, потом спроси ещё раз."
+BRAIN_LOADING_PHRASE = "[sigh] Я ещё просыпаюсь — подожди полминуты и спроси снова."
 
 
 def parse_stream_line(raw: bytes):
@@ -1558,10 +1561,16 @@ class Ksenia:
         try:
             async with self.session.post(CONFIG["brain_url"] + "/v1/chat/completions", json=body,
                                          headers={"Authorization": "Bearer " + BRAIN_KEY},
-                                         timeout=aiohttp.ClientTimeout(total=180)) as r:
+                                         # sock_read: зависший мозг молчал до 3 минут после «Хм, секунду»
+                                         # (аудит Fable, FA9); 60 с хватает и на пересчёт всего разговора
+                                         timeout=aiohttp.ClientTimeout(total=300, sock_connect=5,
+                                                                       sock_read=CONFIG.get("brain_read_s", 60))) as r:
                 if r.status != 200:
-                    log.error("brain ответил %s: %s", r.status, (await r.text())[:300])
+                    body_text = (await r.text())[:300]
+                    log.error("brain ответил %s: %s", r.status, body_text)
                     failed = True
+                    if r.status == 503:  # «Loading model» — мозг ещё загружается после запуска
+                        self._brain_fail_phrase = BRAIN_LOADING_PHRASE
                 else:
                     async for raw in r.content:
                         if speaker.cancelled:
@@ -1619,11 +1628,15 @@ class Ksenia:
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:  # общий таймаут aiohttp — TimeoutError, не ClientError
             log.error("brain недоступен: %r", e)
             failed = True
+            if not getattr(self, "_sandbox", False) and restart_unit("ksenia-brain", "Мозг не отвечает"):
+                self._brain_fail_phrase = BRAIN_HUNG_PHRASE
         tail = think.flush()
         full, buf = full + tail, buf + tail
         if failed:
             self._brain_failed = True
-            buf = (buf.strip() + " " + BRAIN_FAIL_PHRASE).strip()
+            phrase = getattr(self, "_brain_fail_phrase", None) or BRAIN_FAIL_PHRASE
+            self._brain_fail_phrase = None
+            buf = (buf.strip() + " " + phrase).strip()
         # Промежуточный шаг (после первого и с вызовом инструмента) — это «рассуждения вслух»: не озвучиваем.
         narration = (not first_step) and bool(calls) and not failed
         if not calls and not failed and buf.strip():
@@ -3096,7 +3109,6 @@ async def startup_check():
     mark = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), f"ksenia-startcheck-{boot}")
     if os.path.exists(mark):
         return
-    open(mark, "w").close()
     deadline = time.time() + CONFIG.get("startup_check_wait_s", 240)
     res, restarted = {}, set()
     while time.time() < deadline:
@@ -3113,7 +3125,9 @@ async def startup_check():
         res["problems"] = [p for p in res.get("problems") or [] if not p.startswith("наушники не подключены")]
         if not res["problems"]:
             log.info("Самопроверка при запуске: всё в порядке")
+            open(mark, "w").close()  # отметка — после проверки: перезапуск ядра посреди неё её не отменяет (FA10)
             return
+    open(mark, "w").close()
     problems = res.get("problems") or []
     log.warning("Самопроверка при запуске: %s", problems)
     text = "Я включилась, но не всё в порядке: " + "; ".join(problems[:2]) + "."

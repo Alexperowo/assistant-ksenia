@@ -12,7 +12,7 @@ import aiohttp
 
 CFG = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config.json"), encoding="utf-8"))
 SERVICES = {"ksenia-brain": "мозг", "ksenia-voice-out": "голос", "ksenia-voice-in": "слух", "ksenia-judge": "судья реплик",
-            "ksenia-core": "ядро"}
+            "ksenia-core": "ядро", "ksenia-pwa": "связь с планшетом", "ksenia-unblock": "обход блокировок для YouTube"}
 GPU_UNITS = {"ksenia-brain": "мозг", "ksenia-voice-out": "голос", "ksenia-judge": "судья реплик"}
 
 SCHEMAS = [
@@ -48,7 +48,7 @@ async def _http(session, url, headers=None):
 
 
 async def call(name, args, session):
-    problems, fine = [], []
+    problems, fine, restart_hint = [], [], []
     for unit, what in SERVICES.items():
         rc, st = await _run("systemctl", "--user", "is-active", unit)
         (fine if st == "active" else problems).append(
@@ -87,13 +87,23 @@ async def call(name, args, session):
         fine.append("наушники в режиме музыки — слушаю после сигнала")
     if '"не удалось' in hs:
         problems.append("канал звука наушников недавно не поднялся — если звука нет, выключи и включи наушники")
-    rc, st = await _run("curl", "-s", "-m", "3", "http://127.0.0.1:18120/status")
+    rc, st = await _run("curl", "-s", "-m", "5", "http://127.0.0.1:18120/status")
     if '"busy": true' in st:
         fine.append("слух сейчас занят записью")
+    elif rc != 0 or '"busy"' not in st:
+        # служба «active», а на вопрос не отвечает — завис (аудит Fable, FA4)
+        problems.append("слух (ksenia-voice-in) не отвечает — поможет перезапуск")
+        restart_hint.append("ksenia-voice-in")
+    if await _http(session, CFG.get("voice_out_url", "http://127.0.0.1:18110") + "/") is None:
+        problems.append("голос (ksenia-voice-out) не отвечает — поможет перезапуск")
+        restart_hint.append("ksenia-voice-out")
     total, used, free = shutil.disk_usage("/")
     gb = free / 1e9
     (problems if gb < 10 else fine).append(f"свободно на диске {gb:.0f} ГБ" + (" — мало, стоит почистить" if gb < 10 else ""))
     rc, gpu = await _run("nvidia-smi", "--query-gpu=index,memory.used,memory.total,temperature.gpu", "--format=csv,noheader,nounits")
+    if rc != 0 or not gpu.strip():
+        # драйвер завис (бывало после сна) — раньше это молча пропускалось и выходило «всё в порядке»
+        problems.append("видеокарты не отвечают — скорее всего, поможет только перезагрузка компьютера")
     for ln in gpu.splitlines():
         parts = [x.strip() for x in ln.split(",")]
         if len(parts) == 4 and parts[3].isdigit():
@@ -111,5 +121,6 @@ async def call(name, args, session):
                 problems.append(f"мало свободной оперативной памяти: {avail // 1024} ГБ")
     if not os.path.exists(os.path.expanduser("~/Agents/Ksenia/secrets/yandex_music_token")):
         problems.append("Яндекс Музыка не подключена (нет ключа)")
+    restart += [u for u in restart_hint if u not in restart]
     return {"ok": True, "problems": problems, "fine": fine, "restart": restart,
             "note": "скажи Александру коротко: всё ли в порядке; если есть проблемы — что именно и что сделать, простыми словами"}

@@ -115,26 +115,26 @@ def queued_text(items):
 def test_step_http_error_says_so_aloud(ks):
     ((content, calls, failed), items), _ = run_step(ks, FakeResponse(503, body='{"error":"Loading model"}'))
     assert failed and calls == [] and content == ""
-    assert "Мозг не отвечает" in queued_text(items)
+    assert ("мозг" in queued_text(items).lower() or "просыпаюсь" in queued_text(items))
 
 
 def test_step_timeout_is_handled(ks):
     # общий таймаут aiohttp — TimeoutError, а не ClientError: раньше он ронял ход и оставлял озвучку висеть
     ((content, calls, failed), items), _ = run_step(ks, TimeoutError())
-    assert failed and "Мозг не отвечает" in queued_text(items)
+    assert failed and ("мозг" in queued_text(items).lower() or "просыпаюсь" in queued_text(items))
 
 
 def test_step_connection_error_is_handled(ks):
     import aiohttp
     ((_, _, failed), items), _ = run_step(ks, aiohttp.ClientConnectionError("refused"))
-    assert failed and "Мозг не отвечает" in queued_text(items)
+    assert failed and ("мозг" in queued_text(items).lower() or "просыпаюсь" in queued_text(items))
 
 
 def test_step_error_event_in_stream(ks):
     lines = [sse({"content": "Сейчас"}), sse(raw='{"error": {"code": 500, "message": "context overflow"}}')]
     ((content, calls, failed), items), _ = run_step(ks, FakeResponse(200, lines))
     assert failed and content == "Сейчас"
-    assert queued_text(items).startswith("Сейчас") and "Мозг не отвечает" in queued_text(items)
+    assert queued_text(items).startswith("Сейчас") and ("мозг" in queued_text(items).lower() or "просыпаюсь" in queued_text(items))
 
 
 def test_step_broken_stream_drops_half_tool_call(ks):
@@ -223,7 +223,7 @@ def test_server_disconnect_before_answer_is_retried_once(ks):
 def test_server_disconnect_twice_is_a_failure(ks):
     import aiohttp
     ((content, _, failed), items), reqs = run_step(ks, aiohttp.ServerDisconnectedError(), aiohttp.ServerDisconnectedError())
-    assert failed and len(reqs) == 2 and "Мозг не отвечает" in queued_text(items)
+    assert failed and len(reqs) == 2 and ("мозг" in queued_text(items).lower() or "просыпаюсь" in queued_text(items))
 
 
 def test_silent_tool_call_gets_spoken_ack_immediately(ks):
