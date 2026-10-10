@@ -108,7 +108,7 @@ def due():
 def notify(text):
     try:
         subprocess.Popen(["notify-send", "-a", "Ксения", "-i", "appointment-soon", "-u", "critical",
-                          "Напоминание", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                          "--", "Ксения", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except OSError:
         pass
 
@@ -144,6 +144,8 @@ async def _weather(city, day, session):
         geo_url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode(
             {"name": name, "count": 1, "language": "ru"})
         async with session.get(geo_url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status != 200:  # 429/5xx — сбой сервиса, а не «город не найден» (аудит Fable, C14)
+                return {"ok": False, "error": "служба погоды сейчас не отвечает, попробую чуть позже"}
             g = await r.json(content_type=None)
         res = (g.get("results") or [None])[0]
         if res:

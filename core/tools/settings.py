@@ -48,6 +48,9 @@ async def _run(*argv, timeout=15):
     return p.returncode, out.decode("utf-8", "replace")
 
 
+MIN_VOLUME = 10
+
+
 async def _volume():
     rc, out = await _run("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@")
     m = re.search(r"([\d.]+)", out)
@@ -174,18 +177,31 @@ async def call(name, args, session):
         rc, default = await _run("pactl", "get-default-sink")
         return {"ok": vol is not None, "volume_percent": vol, "muted": muted, "output": default.strip()}
     if a in ("volume_up", "volume_down"):
+        vol0, _ = await _volume()
+        if a == "volume_down" and vol0 is not None and vol0 <= MIN_VOLUME:
+            return {"ok": True, "volume_percent": vol0, "note": "уже самый тихий уровень, при котором ты меня слышишь"}
         await _run("wpctl", "set-volume", "-l", "1.5", "@DEFAULT_AUDIO_SINK@", "10%+" if a == "volume_up" else "10%-")
         vol, muted = await _volume()
         return {"ok": True, "volume_percent": vol, "muted": muted}
     if a == "volume_set":
         if not v.isdigit() or not 0 <= int(v) <= 150:
             return {"ok": False, "error": "громкость — число от 0 до 150"}
-        await _run("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{int(v) / 100:.2f}")
+        # не тише 10 %: через этот же выход говорит сама Ксения — Александр не видит экран и остался бы
+        # совсем без голоса (аудит Fable, C10); тишину для музыки — music_control pause
+        level = max(int(v), MIN_VOLUME)
+        await _run("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{level / 100:.2f}")
         vol, muted = await _volume()
-        return {"ok": True, "volume_percent": vol}
+        return {"ok": True, "volume_percent": vol,
+                **({"note": f"тише {MIN_VOLUME} % не ставлю — иначе ты меня не услышишь"} if level != int(v) else {})}
     if a in ("mute", "unmute"):
-        await _run("wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "1" if a == "mute" else "0")
-        return {"ok": True, "muted": a == "mute"}
+        if a == "mute":
+            # «выключи звук» глушил и саму Ксению: глушим музыку (пауза), а голос остаётся
+            from tools import music
+            await music.call("music_control", {"action": "pause"}, session)
+            return {"ok": True, "music_paused": True,
+                    "note": "звук компьютера совсем не выключаю — иначе ты не услышишь меня; музыку поставила на паузу"}
+        await _run("wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0")
+        return {"ok": True, "muted": False}
     if a == "audio_to":
         sinks = await _sinks()
         want = [s for s in sinks if (s.startswith("bluez_output") if v.startswith("head") or "наушн" in v

@@ -91,7 +91,7 @@ CHANGE = {
                           "подключить Bluetooth-устройство {p}", lambda p: ["bluetoothctl", "connect", p], 30),
 }
 
-PARAM_RULES = {"is_installed": PKG_RE, "search_package": re.compile(r"^[\w+.\- ]{2,40}$"), "install": PKG_RE,
+PARAM_RULES = {"is_installed": PKG_RE, "search_package": re.compile(r"^\w[\w+.\- ]{1,39}$"), "install": PKG_RE,
                "remove": PKG_RE, "restart_user_service": UNIT_RE, "bluetooth_connect": MAC_RE}
 PROTECTED = {"sudo", "systemd", "plasma-desktop", "kwin-wayland", "linux-image-generic", "network-manager",
              "pipewire", "bluez", "nvidia-driver", "apt", "dpkg", "python3", "openssh-server", "sddm"}
@@ -186,7 +186,20 @@ async def _run_change(cmd, p):
         argv = CHANGE[cmd][2](p)
         rc, out = await _exec(argv, CHANGE[cmd][3])
     tail = "\n".join([ln for ln in out.splitlines() if ln.strip()][-12:])
-    return {"ok": rc == 0, "command": cmd, "param": p, "exit_code": rc, "output_tail": tail[:1500]}
+    res = {"ok": rc == 0, "command": cmd, "param": p, "exit_code": rc, "output_tail": tail[:1500]}
+    if rc != 0:  # «НЕ удалось: None» ничего не объясняло (аудит Fable, C5)
+        res["error"] = next((why for pat, why in APT_ERRORS if re.search(pat, out, re.I)),
+                            "команда не удалась — подробности в журнале")
+    return res
+
+
+APT_ERRORS = [(r"could not get lock|unable to acquire the dpkg|dpkg.*lock", "сейчас идёт другая установка или обновление — "
+               "попробую через несколько минут"),
+              (r"unable to locate package|has no installation candidate", "такой программы нет в каталоге"),
+              (r"a password is required|sudo:.*password", "нет прав без пароля на установку"),
+              (r"temporary failure resolving|could not resolve|failed to fetch", "нет связи с сервером программ"),
+              (r"no space left", "не хватает места на диске"),
+              (r"не уложилось во время", "это заняло слишком долго — прервала")]
 
 
 async def call(name, args, session):

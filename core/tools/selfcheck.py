@@ -26,12 +26,17 @@ TIMEOUTS = {"self_check": 40}
 
 
 async def _run(*argv):
+    p = None
     try:
         p = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         out, _ = await asyncio.wait_for(p.communicate(), 10)
         return p.returncode, out.decode("utf-8", "replace").strip()
-    except Exception as e:
-        return -1, repr(e)
+    except asyncio.TimeoutError:
+        if p and p.returncode is None:
+            p.kill()  # зависший nvidia-smi после сна не должен копиться (аудит Fable, C16)
+        return -1, "не ответил"
+    except Exception:
+        return -1, "не получилось проверить"
 
 
 async def _http(session, url, headers=None):
