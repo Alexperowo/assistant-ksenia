@@ -1297,7 +1297,8 @@ class Ksenia:
         self.history = self._load_history()
         self.window_start = 0
         self.build_system()
-        if self._restore_prefix():
+        self._needs_prewarm = not self._restore_prefix()
+        if not self._needs_prewarm:
             log.info("Начало разговора для мозга то же, что до перезапуска: первый ответ без пересчёта истории")
         # время последней реплики переживает перезапуск ядра (иначе «Доброе утро» после каждого перезапуска)
         self.last_turn_t = os.path.getmtime(HISTORY_FILE) if os.path.exists(HISTORY_FILE) and self.history else 0.0
@@ -1369,7 +1370,7 @@ class Ksenia:
     def _save_prefix(self):
         if not self.history or not 0 <= self.window_start < len(self.history):
             return
-        d = {"persona": _digest(PERSONA), "system": getattr(self, "system", PERSONA),
+        d = {"persona": _digest(PERSONA), "tools": _digest(TOOL_SCHEMAS), "system": getattr(self, "system", PERSONA),
              "window_from_end": len(self.history) - self.window_start,
              "first": _digest(self.history[self.window_start]), "facts": getattr(self, "facts_seen", None)}
         tmp = prefix_file() + ".tmp"
@@ -1386,7 +1387,10 @@ class Ksenia:
             with open(prefix_file(), encoding="utf-8") as f:
                 d = json.load(f)
             start = len(self.history) - int(d["window_from_end"])
-            if d.get("persona") != _digest(PERSONA) or not isinstance(d.get("system"), str) \
+            # инструменты тоже входят в начало запроса (шаблон рисует их в подсказке): поменялись описания —
+            # мозгу всё равно пересчитывать, и это надо сделать заранее, а не на первой реплике (2026-10-10: 23 с)
+            if d.get("persona") != _digest(PERSONA) or d.get("tools") != _digest(TOOL_SCHEMAS) \
+                    or not isinstance(d.get("system"), str) \
                     or not 0 <= start < len(self.history) or d.get("first") != _digest(self.history[start]):
                 return False
         except (OSError, ValueError, KeyError, TypeError):
@@ -3513,13 +3517,17 @@ async def rewindow_when_idle():
         await asyncio.sleep(30)
         try:
             idle = time.time() - getattr(ks, "last_turn_t", 0.0)
-            if conv.active() or ks.lock.locked():
+            # «жду имени» — это тишина, а не разговор: живой режим теперь включён почти всегда
+            talking = conv.active() and not (getattr(conv, "_runner", None) is live and getattr(live, "dozing", False))
+            if talking or ks.lock.locked():
                 continue
-            if idle > 20 and ks.history and await brain_slot_cold():
+            if idle > 20 and ks.history and (getattr(ks, "_needs_prewarm", False) or await brain_slot_cold()):
                 # мозг перезапускался (после сна, сбоя, режима Nexus) и разговор забыл — первая реплика ждала бы ~15 с
                 async with ks.lock:
                     if await ks.prewarm():
                         ks._warm_at = len(ks.history)
+                        ks._needs_prewarm = False
+                        ks._save_prefix()
                 continue
             if idle < CONFIG.get("rewindow_idle_s", 180):
                 continue
