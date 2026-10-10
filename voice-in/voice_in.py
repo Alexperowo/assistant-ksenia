@@ -144,7 +144,7 @@ HANGING_WORDS = set("""и а но или либо что чтобы как ка�
 def hanging(text: str) -> bool:
     """Распознанное в паузе обрывается так, что продолжение почти наверняка будет."""
     t = text.strip().lower()
-    if not t:
+    if not t or t[-1] in "?!":  # «Что?», «Давай!» — законченный вопрос или ответ (аудит Fable, D8)
         return False
     if t[-1] in ",-—:;" or t.endswith("...") or t.endswith("…"):
         return True
@@ -167,12 +167,13 @@ def turn_policy(p: float, text: str, ctx: dict, cfg: dict, fast: bool = False):
     - иначе на обычной проверке (~0,8 с) — интонация Smart Turn, затем текст.
     Если он всё же продолжит, пока Ксения думает, ядро склеит обе части (LiveConversation)."""
     t = (text or "").strip()
-    if t and hanging(t):
-        return "wait", cfg.get("turn_hang_wait_ms", 3000)
     words = len(re.findall(r"\w+", t))
+    # сначала явный конец: «Давай.» в ответ на вопрос Ксении ждал 3 с из-за «висящего» «давай» (аудит Fable, D8)
     strong = bool(t) and (t.endswith(("?", "!")) or (ctx.get("asked") and bool(SHORT_ANSWER.match(t))))
     if strong:
         return "end", None
+    if t and hanging(t):
+        return "wait", cfg.get("turn_hang_wait_ms", 3000)
     if fast:
         return "wait", None
     if p >= cfg.get("turn_threshold", 0.5) and (words or not t):
@@ -297,7 +298,13 @@ class Ear:
             p.stdin.write(BEEP)
             await p.stdin.drain()
             p.stdin.close()
-            await p.wait()
+            try:
+                # выход наушников без звукового канала — pacat висел вечно, держа замок слуха (аудит Fable, D4)
+                await asyncio.wait_for(p.wait(), 3)
+            except asyncio.TimeoutError:
+                p.kill()
+                await p.wait()
+                log.warning("Сигнал не проигрался за 3 с — выход наушников не отвечает")
         rec = await asyncio.create_subprocess_exec(
             "parec", "-d", source, "--raw", f"--rate={RATE}", "--channels=1", "--format=s16le",
             "--latency-msec=20", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
@@ -306,7 +313,7 @@ class Ear:
         turn_checked, turn_probs, turn_texts = False, [], []
         wait_ms = CONFIG.get("turn_wait_ms", 2000)
         t_start = time.time()
-        t_speech = None
+        t_speech, speech_frame = None, 0
         try:
             while True:
                 try:
@@ -345,6 +352,7 @@ class Ear:
                         voiced_win.pop(0)
                     if sum(voiced_win) * 20 >= CONFIG.get("min_voiced_ms", 120):
                         speech_started, t_speech = True, time.time()
+                        speech_frame = max(0, len(frames) - 30)  # окно речи (до 300 мс) + 300 мс запаса
                     elif elapsed > start_timeout:
                         self._save_debug(frames)
                         return None, {"reason": "no_speech", "noise_rms": round(noise, 4),
@@ -365,7 +373,7 @@ class Ear:
                         if partial:
                             turn_texts.append(partial[-40:])
                         hang = hanging(partial)
-                        if p >= CONFIG.get("turn_threshold", 0.5) and not hang:
+                        if partial.strip().endswith(("?", "!")) or (p >= CONFIG.get("turn_threshold", 0.5) and not hang):
                             break
                         wait_ms = CONFIG.get("turn_hang_wait_ms", 3000) if hang else CONFIG.get("turn_wait_ms", 2000)
                     if silent_ms >= (wait_ms if smart else silence_ms):
@@ -374,7 +382,9 @@ class Ear:
             rec.kill()
             await rec.wait()
         self._save_debug(frames)
-        pcm = np.concatenate(frames)
+        # тишина до начала речи (до 12 с после сигнала) не нужна ни распознаванию, ни отпечатку голоса: отпечаток
+        # брал середину записи и слышал в основном тишину (аудит Fable, D3)
+        pcm = np.concatenate(frames[speech_frame:])
         # отрезаем хвост тишины, оставляя 200 мс
         cut = max(0, silent_ms - 200) * RATE // 1000
         if cut:

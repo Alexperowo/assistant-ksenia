@@ -2149,8 +2149,9 @@ class Conversation:
         deadline = time.time() + CONFIG.get("listen_busy_wait_s", 20)
         hub.emit({"type": "state", "state": "listening", "where": "pc"})
         while True:
+            # слух ждёт начала речи до 12 с и пишет до 120 с: 90 с обрывали длинную диктовку (аудит Fable, D7)
             async with ks.session.post(CONFIG["voice_in_url"] + "/listen",
-                                       timeout=aiohttp.ClientTimeout(total=90)) as r:
+                                       timeout=aiohttp.ClientTimeout(total=CONFIG.get("listen_timeout_s", 170))) as r:
                 if r.status == 409 and time.time() < deadline:
                     await asyncio.sleep(0.3)
                     continue

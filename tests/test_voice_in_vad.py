@@ -107,17 +107,19 @@ def test_phrase_between_pauses(rec):
     audio, info = rec(pcm(noise(1.0), speech(1.5), noise(1.5)))
     # начало: 6 громких кадров (min_voiced_ms 120) после 1,0 с
     assert info["speech_start_s"] == pytest.approx(1.12, abs=0.03)
-    # конец: 700 мс тишины, хвост обрезан до 200 мс -> 1,0 + 1,5 + 0,2
-    assert info["audio_s"] == pytest.approx(2.7, abs=0.03)
+    # начало записи — за 0,6 с до обнаружения речи (тишина после сигнала не нужна ни распознаванию, ни отпечатку),
+    # конец: 700 мс тишины, хвост обрезан до 200 мс -> (1,12 − 0,6) … 2,7
+    assert info["audio_s"] == pytest.approx(2.18, abs=0.03)
     assert len(audio) == int(info["audio_s"] * RATE)
-    assert np.abs(audio[int(RATE * 1.1):int(RATE * 2.4)]).max() > 3000  # речь внутри
+    assert np.abs(audio[:int(RATE * 0.4)]).max() < 3000  # до речи — только запас тишины
+    assert np.abs(audio[int(RATE * 0.6):int(RATE * 1.9)]).max() > 3000  # речь внутри
 
 
 def test_jbl_gaps_still_count_as_speech(rec):
     audio, info = rec(pcm(noise(0.8), jbl_speech(1.2), noise(1.2)))
     assert info["speech_start_s"] == pytest.approx(0.8, abs=0.25)
     # провалы по 40 мс короче 700 мс — фраза не обрывается посередине
-    assert info["audio_s"] > 1.9
+    assert info["audio_s"] > 1.3  # 1,2 с речи + запас в начале и 200 мс хвоста
 
 
 def test_beep_echo_in_first_350ms_is_ignored(rec):
@@ -205,7 +207,7 @@ def test_mic_lost_before_speech(rec):
 
 def test_mic_lost_mid_phrase_keeps_what_was_said(rec):
     audio, info = rec(pcm(noise(0.6), speech(1.0)))
-    assert audio is not None and info["audio_s"] == pytest.approx(1.6, abs=0.03)
+    assert audio is not None and info["audio_s"] == pytest.approx(1.48, abs=0.03)  # без тишины до речи
 
 
 def test_mic_stalls(rec):
@@ -241,3 +243,9 @@ def test_mood_hint_after_baseline():
     tired = (speech(4.0, amp=0.05) * 32767).astype(np.int16)  # тише и медленнее (те же слова за вдвое дольше)
     assert "тише и медленнее" in m.hint(tired, "обычная фраза из пяти слов", "le")
     assert m.hint(normal[:8000], "коротко", "le") is None  # коротко — не судим
+
+
+def test_question_is_not_hanging():
+    import voice_in
+    assert not voice_in.hanging("Что?") and not voice_in.hanging("Давай!") and voice_in.hanging("расскажи мне")
+    assert voice_in.turn_policy(0.1, "Давай.", {"asked": True}, {})[0] == "end"
