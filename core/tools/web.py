@@ -21,11 +21,15 @@ from tools import browser_core, confirm, screen
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140 Safari/537.36"
 RISKY = re.compile(r"оплат|купить|заказ|оформ|отправ|удал|подтверд|подпис|перевест|перевод|списать|опубликов|"
-                   r"разместить|выйти|сохранить|изменить пароль|pay|buy|order|publish|post\b|log ?out|"
+                   r"разместить|выйти|сохранить|изменить пароль|ответить|комментир|pay|buy|order|publish|post\b|log ?out|reply|comment|"
                    r"checkout|send|delete|remove|confirm|submit", re.I)
 FINANCE_URL = re.compile(r"pay|checkout|oplata|bank|card|wallet|cart|korzina|basket", re.I)
 
-_state = {"results": [], "url": None}
+_state = {"results": [], "url": None, "typed": None}
+# Сообщения во ВКонтакте — только через vk_send: там ядро зачитывает, кому и что уйдёт. Через браузер вопрос был
+# бы только «Нажать „Отправить“?» — без адресата и текста (аудит Fable, B6)
+VK_HOSTS = re.compile(r"(^|\.)(vk\.com|vk\.ru|vkontakte\.ru|vk\.me)$", re.I)
+VK_REFUSAL = {"ok": False, "error": "во ВКонтакте пишу только через vk_send — там я зачитываю, кому и что уйдёт"}
 
 SCHEMAS = [
     {"type": "function", "function": {
@@ -257,15 +261,22 @@ async def call(name, args, session):
         res = await _click(pg, text)
         if res.get("needs_confirm"):
             url, label = pg.url, res["label"]
+            if VK_HOSTS.search(_host(url)):
+                return dict(VK_REFUSAL)
+            typed = _state.get("typed")
+            # что уйдёт вместе с нажатием: текст, вписанный перед этим на той же странице, — в вопрос целиком
+            before = f" Перед этим я вписала: «{typed['text']}»." if typed and typed["url"] == url else ""
             return confirm.ask(f"нажать «{label}» на {_host(url)}",
                                lambda: _click(pg, text, allow_risky=True, expect_url=url),
-                               question=f"Нажать «{label}» на сайте {_host(url)}?")
+                               question=f"Нажать «{label}» на сайте {_host(url)}?{before}")
         return res
     if name == "web_type":
         pg = await browser_core.page("web")
         if not _state["url"]:
             return {"ok": False, "error": "страница не открыта"}
         field, text = (args.get("field") or "").strip(), args.get("text", "")
+        if VK_HOSTS.search(_host(pg.url)):
+            return dict(VK_REFUSAL)
         if args.get("enter"):
             # Enter в поле — это отправка формы: сообщение на сайте, комментарий, письмо. Без вопроса — только поиск.
             el = await _first(_field_candidates(pg, field))
@@ -278,5 +289,8 @@ async def call(name, args, session):
                 return confirm.ask(f"вписать и отправить на {_host(url)}",
                                    lambda: _type(pg, field, text, True, expect_url=url),
                                    question=f"Вписать на сайте {_host(url)}: {text}. И отправить?")
-        return await _type(pg, field, text, bool(args.get("enter")))
+        res = await _type(pg, field, text, bool(args.get("enter")))
+        if res.get("ok") and not args.get("enter"):
+            _state["typed"] = {"url": pg.url, "text": text[:300]}
+        return res
     return {"ok": False, "error": f"неизвестный инструмент {name}"}

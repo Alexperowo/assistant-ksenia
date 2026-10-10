@@ -11,7 +11,7 @@ import json
 import os
 import time
 
-from tools import browser_core, memory, vk
+from tools import confirm, browser_core, memory, vk
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 RULES = os.path.normpath(os.path.join(ROOT, "..", "..", "data", "watch_rules.json"))
@@ -64,13 +64,26 @@ async def call(name, args, session):
     if not who:
         return {"ok": False, "error": "от кого? назови имя или чат"}
     if a == "add":
-        rs = [r for r in rs if not (r["who"].lower() == who.lower() and r["source"] == src)]
-        rs.append({"who": who, "source": src, "remind": bool(args.get("remind", True)), "added": time.strftime("%Y-%m-%d")})
-        _save(RULES, rs)
-        await memory._remember(f"о сообщениях от «{who}» ({'ВКонтакте' if src == 'vk' else 'Telegram'}) говорить сразу"
-                               + (" и напоминать, пока не прочитано" if args.get("remind", True) else ""))
-        note = "Telegram пока не подключён — правило заработает после входа" if src == "telegram" else ""
-        return {"ok": True, "added": who, "source": src, **({"note": note} if note else {})}
+        # имя попадает в память и подсказку мозга: длинный «who» из чужого текста был бы внедрением команд
+        # (аудит Fable, B5) — только короткое имя и только после «да» Александра (с планшета — его нажатие)
+        who = who.strip("«»\"'“” ").strip()
+        if not who or len(who) > 60 or any(ch in who for ch in "\n:;{}<>"):
+            return {"ok": False, "error": "назови коротко, как человек или чат подписан во ВКонтакте"}
+        remind = bool(args.get("remind", True))
+
+        async def add():
+            left = [r for r in rules() if not (r["who"].lower() == who.lower() and r["source"] == src)]
+            left.append({"who": who, "source": src, "remind": remind, "added": time.strftime("%Y-%m-%d")})
+            _save(RULES, left)
+            await memory._remember(f"о сообщениях от «{who}» ({'ВКонтакте' if src == 'vk' else 'Telegram'}) "
+                                   f"говорить сразу" + (" и напоминать, пока не прочитано" if remind else ""))
+            note = "Telegram пока не подключён — правило заработает после входа" if src == "telegram" else ""
+            return {"ok": True, "added": who, "source": src, **({"note": note} if note else {})}
+
+        if args.get("_from_control"):
+            return await add()
+        return confirm.ask(f"сообщать сразу о сообщениях от «{who}»", add,
+                           question=f"Говорить сразу, когда напишет «{who}»?")
     if a == "remove":
         left = [r for r in rs if r["who"].lower() != who.lower()]
         if len(left) == len(rs):

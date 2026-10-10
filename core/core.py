@@ -98,6 +98,8 @@ async def run_tool(name, arguments, session):
         return {"ok": False, "error": "аргументы инструмента — не JSON"}
     if not isinstance(args, dict):
         return {"ok": False, "error": "аргументы инструмента должны быть объектом JSON"}
+    # служебные флаги («_from_control» — нажал сам Александр в центре управления) модель передать не может
+    args = {k: v for k, v in args.items() if not str(k).startswith("_")}
     mod = TOOL_INDEX.get(name)
     if not mod:
         return {"ok": False, "error": f"нет такого инструмента: {name}"}
@@ -1861,7 +1863,8 @@ async def handle_control_act(request):
             return web.json_response({"ok": True, "say": "Запомнила."})
         if a in ("rule_add", "rule_remove"):
             res = await watch.call("watch_rule", {"action": "add" if a == "rule_add" else "remove",
-                                                  "who": d.get("who"), "remind": bool(d.get("remind", True))}, None)
+                                                  "who": d.get("who"), "remind": bool(d.get("remind", True)),
+                                                  "_from_control": True}, None)  # нажал сам Александр
             return web.json_response({"ok": bool(res.get("ok")), "say": "Правило добавлено." if a == "rule_add"
                                       else "Правило убрано." if res.get("ok") else res.get("error", "Не получилось.")})
         if a == "reminder_cancel":

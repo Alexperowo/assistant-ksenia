@@ -18,7 +18,10 @@ def call(args):
 
 
 def test_add_list_remove_also_in_memory():
-    assert call({"action": "add", "who": "Курьер"})["ok"]
+    r = call({"action": "add", "who": "Курьер"})
+    assert r["prepared"]  # голосом — только после «да» Александра
+    from tools import confirm
+    assert asyncio.run(confirm.take()["run"]())["ok"]
     assert [r["who"] for r in call({"action": "list"})["rules"]] == ["Курьер"]
     assert any("Курьер" in f["fact"] for f in memory._load())
     assert call({"action": "remove", "who": "курьер"})["ok"]

@@ -61,7 +61,7 @@ def test_payment_is_refused_by_element_label(page):
 
 
 def test_enter_in_message_field_needs_confirmation(page):
-    pg = page("https://vk.ru/im/convo/1", [{"kind": "field", "role": "textbox", "label": "Напишите сообщение",
+    pg = page("https://forum.example/t/1", [{"kind": "field", "role": "textbox", "label": "Напишите сообщение",
                                              "placeholder": "Напишите сообщение"}])
     r = call("web_type", {"field": "Напишите сообщение", "text": "привет", "enter": True})
     assert r["prepared"] and pg.log == []  # раньше: сообщение уходило без «Отправить?»
@@ -98,3 +98,18 @@ def test_open_refuses_redirect_into_home_network(page, monkeypatch):
     pg.goto = blank
     r = call("web_open", {"url": "https://public.example/r"})
     assert r["ok"] is False and "домашней сети" in r["error"] and pg.url == "about:blank"
+
+
+def test_vk_in_browser_is_refused(page):
+    pg = page("https://vk.com/im/convo/123", [{"role": "textbox", "text": "Напишите сообщение"},
+                                               {"role": "button", "text": "Отправить"}])
+    assert call("web_type", {"field": "Напишите сообщение", "text": "привет"})["ok"] is False
+    assert call("web_click", {"text": "Отправить"})["ok"] is False and confirm.peek() is None and pg.log == []
+
+
+def test_question_names_typed_text(page):
+    pg = page("https://forum.example/t/1", [{"role": "textbox", "text": "Ответ"},
+                                            {"role": "button", "text": "Опубликовать"}])
+    call("web_type", {"field": "Ответ", "text": "Согласен с автором"})
+    r = call("web_click", {"text": "Опубликовать"})
+    assert r["prepared"] and "Согласен с автором" in r["speak_verbatim"]
