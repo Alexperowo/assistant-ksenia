@@ -94,10 +94,19 @@ def test_no_typing_into_terminal(tree):
 
 def test_typing_into_field(tree):
     write, actions = tree
-    write([window("Поиск", [{"role": "entry", "name": "Найти", "states": ["showing", "enabled", "editable"],
+    write([window("Поиск", [{"role": "entry", "name": "Найти", "states": ["showing", "enabled", "editable", "single-line"],
                              "editable_iface": True, "text": ""}])])
     r = run(desktop.call("ui_type", {"field": "найти", "text": "погода"}, None))
     assert r["ok"] and actions() == [{"typed": "погода"}]
+
+
+def test_typing_into_document_inserts_not_replaces(tree):
+    """«Впиши привет» в документе не стирает весь текст — вставка у курсора (аудит Fable, B17)."""
+    write, actions = tree
+    write([window("Kate", [{"role": "text", "name": "Документ", "states": ["showing", "enabled", "editable", "multi-line"],
+                            "editable_iface": True, "text": "длинное письмо"}])])
+    r = run(desktop.call("ui_type", {"field": "документ", "text": "привет"}, None))
+    assert r["ok"] and actions() == [{"inserted": "привет"}]
 
 
 def test_broken_names_do_not_break_the_list(tree):

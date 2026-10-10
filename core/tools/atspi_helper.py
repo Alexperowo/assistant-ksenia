@@ -199,13 +199,19 @@ def main():
         try:
             et = node.get_editable_text_iface()
             if et is not None:
-                if args.get("replace", True):
+                # заменять всё — только в однострочном поле (поиск, имя); в документе «впиши привет» стирало
+                # весь текст (аудит Fable, B17) — там вставляем у курсора
+                try:
+                    single = node.get_state_set().contains(Atspi.StateType.SINGLE_LINE)
+                except Exception:
+                    single = False
+                if args.get("replace", single):
                     ok = Atspi.EditableText.set_text_contents(et, args.get("text", ""))
                 else:
                     pos = Atspi.Text.get_caret_offset(node.get_text_iface())
                     ok = Atspi.EditableText.insert_text(et, pos, args.get("text", ""), len(args.get("text", "")))
         except Exception as e:
-            print(json.dumps({"ok": False, "error": f"поле не принимает текст: {e}"}, ensure_ascii=False))
+            print(json.dumps({"ok": False, "error": "поле не принимает текст", "detail": repr(e)[:200]}, ensure_ascii=False))
             return
         print(json.dumps({"ok": bool(ok), "field": info(node)["name"], "window": title}, ensure_ascii=False))
     elif cmd == "read":

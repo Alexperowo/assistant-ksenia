@@ -81,3 +81,11 @@ def test_find_text_on_screenshot():
     x, y, seen = desktop._find_text(im, "сохранить файл")
     assert 700 < x < 1150 and 250 < y < 320
     assert desktop._find_text(im, "удалить") is None
+
+
+def test_programs_are_not_opened(tmp_path):
+    from tools import files
+    exe = tmp_path / "setup.exe"; exe.write_text("x")
+    script = tmp_path / "run"; script.write_text("#!/bin/sh"); script.chmod(0o755)
+    doc = tmp_path / "письмо.pdf"; doc.write_text("x")
+    assert files.is_program(str(exe)) and files.is_program(str(script)) and not files.is_program(str(doc))

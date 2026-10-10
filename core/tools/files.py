@@ -180,6 +180,20 @@ async def _trash(path):
             **({} if p.returncode == 0 else {"error": err.decode("utf-8", "replace")[:200]})}
 
 
+PROGRAM_EXT = {".exe", ".msi", ".bat", ".cmd", ".com", ".scr", ".jar", ".appimage", ".desktop", ".deb", ".rpm",
+               ".run", ".sh", ".bin", ".py", ".pl", ".flatpakref", ".snap", ".ps1", ".vbs", ".apk", ".lnk"}
+
+
+def is_program(path: str) -> bool:
+    """Исполняемое или установщик: по расширению или по праву на запуск (у обычного документа его нет)."""
+    if os.path.splitext(path)[1].lower() in PROGRAM_EXT:
+        return True
+    try:
+        return os.path.isfile(path) and os.access(path, os.X_OK)
+    except OSError:
+        return False
+
+
 async def call(name, args, session):
     a = args.get("action")
     if a == "find":
@@ -197,6 +211,10 @@ async def call(name, args, session):
     if err:
         return err
     if a == "open":
+        if is_program(path):
+            # скачанная программа запустилась бы без вопроса, а её окна Александр не увидит (аудит Fable, B22)
+            return {"ok": False, "error": "это программа или установщик — запускать такое я не буду; если она нужна, "
+                                          "установим её проверенным способом (system install)"}
         subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         return {"ok": True, "opened": os.path.basename(path)}
     if a == "read":

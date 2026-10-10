@@ -5,6 +5,7 @@ import time
 
 class _States:
     ACTIVE, SHOWING, ENABLED, FOCUSED, EDITABLE = "active", "showing", "enabled", "focused", "editable"
+    SINGLE_LINE, MULTI_LINE = "single-line", "multi-line"
 
 
 class _StateSet:
@@ -96,6 +97,10 @@ class EditableText:
 
     @staticmethod
     def insert_text(et, pos, text, n):
+        log = os.environ.get("FAKE_ATSPI_LOG")
+        if log:
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"inserted": text}, ensure_ascii=False) + "\n")
         return True
 
 
