@@ -156,6 +156,28 @@ def main():
         f.write(text)
     print(text)
     print(f"Сохранено: {path}")
+    rotate_logs()
+
+
+def rotate_logs(limit_mb=10, keep_mb=2):
+    """Журналы служб растут без конца (systemd пишет в них с O_APPEND) — раз в неделю, ПОСЛЕ отчёта: больше
+    limit_mb — копия в .1 и в самом файле остаются последние keep_mb (аудит Fable, D18)."""
+    logs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
+    for name in sorted(os.listdir(logs)):
+        p = os.path.join(logs, name)
+        if not name.endswith(".log") or os.path.getsize(p) < limit_mb * 1024 * 1024:
+            continue
+        with open(p, "rb") as f:
+            data = f.read()
+        with open(p + ".1", "wb") as f:
+            f.write(data)
+        tail = data[-keep_mb * 1024 * 1024:]
+        tail = tail[tail.find(b"\n") + 1:]
+        with open(p, "r+b") as f:  # тот же файл (служба продолжает дописывать в него), только короче
+            f.seek(0)
+            f.write(tail)
+            f.truncate()
+        print(f"Журнал {name}: {len(data) // 1024 // 1024} МБ -> {len(tail) // 1024 // 1024} МБ")
 
 
 if __name__ == "__main__":
