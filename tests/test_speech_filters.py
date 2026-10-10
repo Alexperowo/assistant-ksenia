@@ -26,3 +26,13 @@ def test_english_numbers(src, out):
 def test_grammar():
     assert core.fix_grammar("Вот что я знаю обо тебе.") == "Вот что я знаю о тебе."
     assert core.fix_grammar("обо всём") == "обо всём"
+
+
+@pytest.mark.parametrize("src,out", [
+    ("С самого начала фильма", "С самого начала фильма"), ("5 г. сахара", "5 граммов сахара"),
+    ("в 2026 г.", "в 2026 году"), ("днём 12-14°", "днём 12-14 градусов"), ("ночью –5", "ночью минус 5"),
+    ("прогноз «+14»", "прогноз «плюс 14»"),
+])
+def test_speech_norm_fixes(src, out):
+    import speech_norm
+    assert speech_norm.normalize(src) == out
