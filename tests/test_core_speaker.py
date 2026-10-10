@@ -231,3 +231,12 @@ def test_stop_is_quick_audio_is_not_written_far_ahead(players):
     before, after = asyncio.run(go())
     assert before / total < 0.3 + core.CONFIG.get("play_ahead_s", 0.35) + 0.1
     assert (after - before) / total <= core.CONFIG.get("fade_ms", 120) / 1000 + 0.01
+
+
+def test_one_emotion_tag_per_reply_and_rare_teasing(monkeypatch):
+    core.TEASED["t"] = 0.0
+    sp = core.Speaker(None)
+    assert sp._limit_tags("[teasing] Ну ты даёшь. [laughing] Ладно.") == "[teasing] Ну ты даёшь. Ладно."
+    sp2 = core.Speaker(None)
+    assert sp2._limit_tags("[teasing] Опять ты.") == "Опять ты."  # подколка уже была недавно
+    assert sp2._limit_tags("[warm] Спокойной ночи.") == "[warm] Спокойной ночи."

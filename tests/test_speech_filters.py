@@ -36,3 +36,12 @@ def test_grammar():
 def test_speech_norm_fixes(src, out):
     import speech_norm
     assert speech_norm.normalize(src) == out
+
+
+@pytest.mark.parametrize("src,out", [
+    ("Вот что я знаю обо тебе.", "Вот что я знаю о тебе."), ("обо этом", "об этом"), ("обо мне", "обо мне"),
+    ("обо всём", "обо всём"), ("Сам могу сказать", "Сама могу сказать"), ("сам не знаю", "сама не знаю"),
+    ("Ты сам видишь", "Ты сам видишь"), ("сам по себе", "сам по себе"),
+])
+def test_grammar_obo_sam(src, out):
+    assert core.fix_grammar(src) == out

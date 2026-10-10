@@ -181,6 +181,7 @@ def sandbox_allows(name: str, arguments: str) -> bool:
     except ValueError:
         return False
     return isinstance(args, dict) and args.get(rule[0]) in rule[1]
+TEASED = {"t": 0.0}  # когда последний раз прозвучал [teasing] (на весь процесс ядра)
 ALLOWED_TAGS = {"laughing", "sigh", "teasing", "excited", "surprised", "whisper", "annoyed", "warm"}
 MONTHS = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа",
           "сентября", "октября", "ноября", "декабря"]
@@ -189,7 +190,9 @@ WEEKDAYS = ["понедельник", "вторник", "среда", "четв�
 
 def now_context():
     n = datetime.datetime.now()
-    return f"Сейчас {WEEKDAYS[n.weekday()]}, {n.day} {MONTHS[n.month - 1]} {n.year} года, {n.strftime('%H:%M')}."
+    night = n.hour >= CONFIG.get("night_from", 23) or n.hour < CONFIG.get("night_to", 7)  # те же часы, что у тихого голоса
+    return (f"Сейчас {WEEKDAYS[n.weekday()]}, {n.day} {MONTHS[n.month - 1]} {n.year} года, {n.strftime('%H:%M')}."
+            + (" Сейчас ночь." if night else ""))
 
 
 THINK_RE = re.compile(r"<think>.*?</think>|<think>.*$|</?think>"
@@ -266,13 +269,16 @@ EN_NUM_RE = re.compile(r"\b(?:(plus|minus)\s+)?(" + "|".join(sorted(EN_NUMS, key
 
 
 # частые оговорки 2-битного мозга, которые можно исправить без риска (живая автопроверка 2026-10-09)
-GRAMMAR_FIXES = [(re.compile(r"\b([Оо])бо (тебе|тебя|мне|нём|нем|ней)\b"), r"\1 \2")]
+# «обо тебе» -> «о тебе», «обо этом» -> «об этом»; «обо мне», «обо всём», «обо что-то» — верно, не трогаем
+_OBO = re.compile(r"\b([Оо])бо(\s+)(?!(?:мне|всём|всем|всех|всё|все|что|чём|льду)\b)(?=([А-Яа-яЁё]))")
+# «Сам могу» о себе без «я» -> «Сама могу»; «ты сам видишь», «сам по себе» — не трогаем (регулярки — аудит Fable)
+_SAM = re.compile(r"(?<!\bты\s)(?<!\bТы\s)(?<!\bон\s)(?<!\bОн\s)(?<!\bвы\s)(?<!\bВы\s)\b([Сс])ам"
+                  r"(\s+(?:не\s+)?(?!(?:всю|ту|эту|мою|твою|свою|нашу|вашу|одну|себя|себе)\b)[а-яё]+[ую])\b")
 
 
 def fix_grammar(text: str) -> str:
-    for rx, rep in GRAMMAR_FIXES:
-        text = rx.sub(rep, text)
-    return text
+    text = _OBO.sub(lambda m: f"{m.group(1)}{'б' if m.group(3).lower() in 'аоуэиы' else ''}{m.group(2)}", text)
+    return _SAM.sub(lambda m: f"{m.group(1)}ама{m.group(2)}", text)
 
 
 _LATIN_WORD_BEFORE = re.compile(r"[A-Za-z][A-Za-z'’.]*[\s-]*$")
@@ -693,10 +699,28 @@ class Speaker:
             except (ProcessLookupError, asyncio.TimeoutError):
                 pass
 
+    def _limit_tags(self, text: str) -> str:
+        """Одна пометка эмоции на ответ, [teasing] — не чаще раза в 20 минут: мозг ставил их почти везде, в том числе
+        в середине ответа, куда прежний ограничитель не смотрел (аудит Fable, B4)."""
+        def rep(m):
+            t = m.group(1).lower()
+            if t not in ALLOWED_TAGS:
+                return m.group(0)  # не пометка — разберётся clean_for_speech
+            if getattr(self, "tag_spoken", None) or \
+                    (t == "teasing" and time.time() - TEASED["t"] < CONFIG.get("teasing_every_s", 1200)):
+                return ""
+            self.tag_spoken = t
+            if t == "teasing":
+                TEASED["t"] = time.time()
+            return m.group(0)
+        return re.sub(r"\[(\w+)\]\s*", rep, text)
+
     async def speak(self, text: str, timings: dict, verbatim: bool = False):
         """Озвучить одну фразу. Никогда не бросает исключений: сбой одной фразы не должен глушить остальные.
         Основной голос не ответил — та же фраза запасным (RHVoice на процессоре): Александр не видит экран,
         молчание ему ничего не объяснит (аудит Fable, FA1)."""
+        if not verbatim:
+            text = self._limit_tags(text)
         text = clean_for_speech(text, verbatim=verbatim)
         if not text or self.cancelled:
             return
@@ -1031,9 +1055,11 @@ def _digest(obj) -> str:
     return hashlib.sha1(json.dumps(obj, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 # Хвост-предложение «Хочешь ещё?», «Рассказать ещё?», «Продолжить?» — живой тест: почти каждый ответ кончался им.
-OFFER_RE = re.compile(r"(?:^|[\s,])(?:хочешь|хотите|рассказать|продолжить|продолжать|интересно|ещё что-нибудь|еще что-нибудь|"
-                      r"что-нибудь ещё|что-нибудь еще|может,? ещё|может,? еще|давай ещё|давай еще|что скажешь|"
-                      r"как тебе|включить ещё|включить еще)\b[^.!?]*\?\s*$", re.I)
+# Режется, только если и прошлый ответ кончался таким вопросом (offer_too_often) — один «Как тебе?» можно.
+# «Интересно, правда?» — не предложение (аудит Fable, B9)
+OFFER_RE = re.compile(r"(?:^|[\s,])(?:хочешь|хотите|рассказать|продолжить|продолжим|продолжать|ещё что-нибудь|"
+                      r"еще что-нибудь|что-нибудь ещё|что-нибудь еще|может,? ещё|может,? еще|давай ещё|давай еще|"
+                      r"что скажешь|как тебе|включить ещё|включить еще|ещё|еще)\b[^.!?]*\?\s*$", re.I)
 
 
 def split_tail_offer(text: str, whole_ok: bool = False):
@@ -1389,7 +1415,8 @@ class Ksenia:
         if first_today and not internal and not user_text.startswith("(служебно"):
             note += ("; это первый разговор за сегодня — тепло поздоровайся по времени суток; можешь коротко "
                      "предложить погоду и напомнить, что стоит на сегодня (remind_list), если это к месту; "
-                     "иногда (не каждый день) можешь сама предложить свежую новость про нейросети — твою любимую тему")
+                     "иногда (не каждый день) можешь сама предложить узнать свежие новости про нейросети — твою любимую "
+                     "тему (через research_background, не по памяти)")
         if not internal and not guest and not getattr(self, "_sandbox", False):
             note += self.news_note(first_today and not user_text.startswith("(служебно"))
         self.history.append({"role": "user", "content": f"{user_text}\n\n(служебно: {now_context()}{note})"})
