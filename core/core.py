@@ -211,7 +211,7 @@ SANDBOX_READONLY = {"weather", "remind_list", "ui_elements", "cursor_look", "win
                     "vk_unread", "tg_unread", "web_search", "web_open", "web_outline"}
 SANDBOX_READONLY_ACTIONS = {"files": ("action", {"find", "recent", "read"}), "headphones": ("action", {"status"}),
                             "system": ("command", set(system.INFO)),
-                            "setting": ("action", {"volume_get", "brightness_get", "wifi_status", "wifi_list"}),
+                            "setting": ("action", {"volume_get", "brightness_get", "speakers_get", "wifi_status", "wifi_list"}),
                             "watch_rule": ("action", {"list"}), "voice_enroll": ("action", {"status"}),
                             "audiobook": ("action", {"search"})}
 
@@ -743,6 +743,26 @@ class ClientPlayer:
         return self.returncode
 
 
+import collections
+SPOKEN = collections.deque(maxlen=40)  # (когда, слова) — что Ксения недавно говорила
+
+
+def is_own_echo(text: str, window_s: float = 20) -> bool:
+    """Микрофон наушников услышал саму Ксению из колонок монитора (голос в колонки — проверено 2026-10-10:
+    «Опять про кота», «Ну ладно, раз хочешь» приходили как его реплики). Эхо — если почти все слова услышанного
+    подряд или вразбивку есть в одной из фраз, сказанных за последние 20 с."""
+    words = [w for w in live_intent.norm(text).split() if len(w) > 1]
+    if not words:
+        return False
+    now = time.time()
+    for t, said in reversed(SPOKEN):
+        if now - t > window_s:
+            break
+        if said and sum(w in said for w in words) >= max(1, round(len(words) * 0.8)):
+            return True
+    return False
+
+
 class Speaker:
     """Озвучка ответа: фразы по очереди -> voice-out (поток PCM) -> pacat в выбранный выход
     или клиенту (планшет через шлюз pwa/), если реплика пришла оттуда."""
@@ -879,6 +899,7 @@ class Speaker:
             return
         self.started = True  # речь уже пошла в озвучку — «Хм, секунду» не нужно
         shown = re.sub(r"\[\w+\]\s*", "", text)
+        SPOKEN.append((time.time(), live_intent.norm(shown).split()))  # для распознавания эха из колонок
         hub.emit({"type": "say", "text": shown})  # текст реплики — на экран планшета
         failed_before = self.failed
         written = 0 if self.down else await self._speak_main(text, shown, timings)
@@ -2651,6 +2672,9 @@ class LiveConversation(Conversation):
         if self.source == "push":
             speaker["source"] = "tablet"  # живой разговор с микрофона планшета: отпечаток узнаёт хуже, см. respond
         early, self.early = self.early, None
+        if len(text) >= 2 and not is_stop(text) and is_own_echo(text):
+            log.info("Эхо собственного голоса — не реплика: %s", text)
+            text = ""  # дальше — как шум: рассказ продолжается в полный голос
         if len(text) < 2:
             await self.unduck()  # шум, а не слова — рассказ дальше в полный голос
             if early and not self.busy():

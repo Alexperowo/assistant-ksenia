@@ -67,6 +67,8 @@ def _no_real_services(monkeypatch):
     except Exception:
         return
     restarted = []
+    if hasattr(core, "SPOKEN"):
+        core.SPOKEN.clear()  # «что Ксения недавно говорила» — своё в каждом тесте (иначе чужое «Привет» — эхо)
     monkeypatch.setattr(core, "voice_out_broken", lambda: restarted.append("ksenia-voice-out"), raising=False)
     monkeypatch.setattr(core, "fallback_pcm", lambda text: b"", raising=False)
     monkeypatch.setattr(core, "restart_unit", lambda unit, why, every_s=180: restarted.append(unit) or True,

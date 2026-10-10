@@ -220,3 +220,15 @@ def test_guest_cannot_stop_ksenia(live_env, monkeypatch):
     turns, said = live_env([{"type": "ready"}, utt("Расскажи про Рим."), 0.05,
                             {"type": "partial", "text": "Подожди", "owner": False}, guest])
     assert stops == []
+
+
+def test_own_echo_from_speakers_is_recognized():
+    import time as t
+    import core
+    core.SPOKEN.clear()
+    core.SPOKEN.append((t.time(), core.live_intent.norm("Опять про кота? Ну ладно, раз хочешь — расскажу по-другому.").split()))
+    assert core.is_own_echo("Ну ладно, раз хочешь.") and core.is_own_echo("Опять про кота.")
+    assert not core.is_own_echo("Расскажи про собаку") and not core.is_own_echo("Который час?")
+    core.SPOKEN.clear()
+    core.SPOKEN.append((t.time() - 60, ["опять", "про", "кота"]))
+    assert not core.is_own_echo("Опять про кота")  # давно сказано — уже не эхо

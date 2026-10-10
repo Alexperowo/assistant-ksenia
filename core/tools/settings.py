@@ -23,12 +23,15 @@ SCHEMAS = [
                         "night_light (value: on | off) — тёплый экран вечером; cursor_size (value: 24–96); "
                         "font_size (value: размер основного шрифта 10–28; спросит «да»); restore_fonts — вернуть шрифты из копии; "
                         "brightness_get / brightness_up / brightness_down / brightness_set (value 0–100) — яркость монитора; "
+                        "speakers_get / speakers_up / speakers_down / speakers_set (value 0–100) — громкость колонок самого "
+                        "монитора (когда голос и музыка в колонках, а системная громкость уже на максимуме); "
                         "wifi_status — к какой сети подключён и сигнал; wifi_list — какие сети рядом; "
                         "wifi_connect (value: имя сети; password — если сеть новая; спросит «да»)."),
         "parameters": {"type": "object", "properties": {
             "action": {"type": "string", "enum": ["volume_get", "volume_up", "volume_down", "volume_set", "mute", "unmute", "audio_to",
                                                   "theme", "night_light", "cursor_size", "font_size", "restore_fonts",
                                                   "brightness_get", "brightness_up", "brightness_down", "brightness_set",
+                                                  "speakers_get", "speakers_up", "speakers_down", "speakers_set",
                                                   "wifi_status", "wifi_list", "wifi_connect"]},
             "value": {"type": "string"}, "password": {"type": "string"}}, "required": ["action"]}}},
 ]
@@ -107,25 +110,39 @@ async def _set_cursor(size):
 _ddc = {"bus": None}
 
 
+async def _speakers(set_to=None, delta=None):
+    """Громкость колонок самого монитора по DDC/CI (код 0x62): выход HDMI уже на 100 %, громче — только в мониторе
+    (2026-10-10: стояло 50 из 100, голос Ксении в колонках был тихим)."""
+    return await _vcp("62", "speakers", "громкость колонок монитора", set_to, delta)
+
+
 async def _brightness(set_to=None, delta=None):
-    """Яркость монитора по DDC/CI (ddcutil). Шина находится один раз."""
+    return await _vcp("10", "brightness", "яркость", set_to, delta)
+
+
+async def _vcp(code, key, what, set_to=None, delta=None):
+    """Настройка монитора по DDC/CI (ddcutil): 10 — яркость, 62 — громкость колонок. Шина находится один раз."""
     if _ddc["bus"] is None:
         rc, out = await _run("ddcutil", "detect", "--brief", timeout=30)
         m = re.search(r"I2C bus:\s*/dev/i2c-(\d+)", out)
         if not m:
             return {"ok": False, "error": "монитор не отвечает на управление яркостью"}
         _ddc["bus"] = m.group(1)
-    rc, out = await _run("ddcutil", "--bus", _ddc["bus"], "getvcp", "10", timeout=20)
+    rc, out = await _run("ddcutil", "--bus", _ddc["bus"], "getvcp", code, timeout=20)
     m = re.search(r"current value =\s*(\d+), max value =\s*(\d+)", out)
-    if not m:
-        return {"ok": False, "error": "не смогла узнать яркость"}
-    cur, mx = int(m.group(1)), int(m.group(2))
+    if m:
+        cur, mx = int(m.group(1)), int(m.group(2))
+    else:
+        m = re.search(r"level:\s*(\d+)", out)  # громкость ddcutil печатает как «Volume level: 50»
+        if not m:
+            return {"ok": False, "error": f"не смогла узнать: {what}"}
+        cur, mx = int(m.group(1)), 100
     if set_to is None and delta is None:
-        return {"ok": True, "brightness": round(cur * 100 / mx)}
+        return {"ok": True, key: round(cur * 100 / mx)}
     new = set_to if set_to is not None else round(cur * 100 / mx) + delta
     new = max(0, min(100, new))
-    rc, out = await _run("ddcutil", "--bus", _ddc["bus"], "setvcp", "10", str(round(new * mx / 100)), timeout=20)
-    return {"ok": rc == 0, "brightness": new, **({} if rc == 0 else {"error": out[-200:]})}
+    rc, out = await _run("ddcutil", "--bus", _ddc["bus"], "setvcp", code, str(round(new * mx / 100)), timeout=20)
+    return {"ok": rc == 0, key: new, **({} if rc == 0 else {"error": f"не получилось изменить: {what}"})}
 
 
 def _fields(line: str):
@@ -252,6 +269,14 @@ async def call(name, args, session):
         if not v.isdigit() or not 0 <= int(v) <= 100:
             return {"ok": False, "error": "яркость — число от 0 до 100"}
         return await _brightness(set_to=int(v))
+    if a == "speakers_get":
+        return await _speakers()
+    if a in ("speakers_up", "speakers_down"):
+        return await _speakers(delta=15 if a == "speakers_up" else -15)
+    if a == "speakers_set":
+        if not v.isdigit() or not 0 <= int(v) <= 100:
+            return {"ok": False, "error": "громкость колонок — число от 0 до 100"}
+        return await _speakers(set_to=int(v))
     if a == "wifi_status":
         return await _wifi_status()
     if a == "wifi_list":
