@@ -67,6 +67,9 @@ def _no_real_services(monkeypatch):
     except Exception:
         return
     restarted = []
+    # «дремота» живого режима (ждать имени вместо закрытия) — в тестах выключена: старые тесты ждут конца
+    # разговора; тесты дремоты включают её сами
+    monkeypatch.setitem(core.CONFIG, "live_doze", False)
     if hasattr(core, "SPOKEN"):
         core.SPOKEN.clear()  # «что Ксения недавно говорила» — своё в каждом тесте (иначе чужое «Привет» — эхо)
     monkeypatch.setattr(core, "voice_out_broken", lambda: restarted.append("ksenia-voice-out"), raising=False)

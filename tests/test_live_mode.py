@@ -121,7 +121,7 @@ def live_env(monkeypatch):
         turns.append(text)
         await asyncio.sleep(0.05)
 
-    async def fake_notice(text):
+    async def fake_notice(text, output=None):
         said.append(text)
 
     async def noop(*a, **k):
@@ -232,3 +232,25 @@ def test_own_echo_from_speakers_is_recognized():
     core.SPOKEN.clear()
     core.SPOKEN.append((t.time() - 60, ["опять", "про", "кота"]))
     assert not core.is_own_echo("Опять про кота")  # давно сказано — уже не эхо
+
+
+def test_after_dialog_ends_she_answers_only_to_her_name(live_env, monkeypatch):
+    """Разговор окончен (тишина) — чужие фразы не трогают её; «Ксения, …» — снова разговор без имени."""
+    monkeypatch.setitem(core.CONFIG, "live_doze", True)
+    turns, said = live_env([{"type": "ready"}, utt("Привет."), 0.5, utt("Какая погода?"), 0.1,
+                            utt("Ксения, который час?"), 0.15, utt("А завтра?"), 0.15, utt("Не слушай.")])
+    assert turns == ["Привет.", "который час?", "А завтра?"]
+    assert any("не слушаю" in x for x in said)
+
+
+def test_name_alone_gets_a_short_reply(live_env, monkeypatch):
+    monkeypatch.setitem(core.CONFIG, "live_doze", True)
+    turns, said = live_env([{"type": "ready"}, 0.5, utt("Ксения?"), 0.1, utt("Какая погода?"), 0.15,
+                            utt("Выключи микрофон.")])
+    assert turns == ["Какая погода?"] and any(x in ("Да?", "Слушаю.", "Да, я тут.") for x in said)
+
+
+def test_wake_rest():
+    assert core.wake_rest("Ксения, какая погода?") == "какая погода?"
+    assert core.wake_rest("Эй, Ксения") == "" and core.wake_rest("Ксюша, привет") == "привет"
+    assert core.wake_rest("Я рассказывал Ксении") is None and core.wake_rest("Позвони маме") is None

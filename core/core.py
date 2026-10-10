@@ -2348,6 +2348,32 @@ def is_stop(text: str) -> bool:
     return t in STOP_PHRASES
 
 
+WAKE_LEAD = {"эй", "слушай", "привет", "алло", "ну", "а", "так", "скажи", "хей"}
+
+
+def wake_rest(text: str):
+    """Позвали по имени? None — нет; «» — только имя («Ксения?»); иначе — просьба после имени
+    («Ксения, какая погода» -> «какая погода»). Имя — в первых словах, как зовут человека."""
+    words = re.findall(r"[\w-]+|[^\w\s]+", text or "")
+    plain = [w.lower() for w in words if re.match(r"\w", w)]
+    for i, w in enumerate(plain[:3]):
+        if w in ("ксения", "ксюша", "ксюш"):
+            if all(x in WAKE_LEAD for x in plain[:i]):
+                rest = re.split(r"(?i)\b(?:ксения|ксюша|ксюш)\b[\s,.!?—-]*", text, maxsplit=1)
+                return rest[1].strip() if len(rest) > 1 else ""
+            return None
+    return None
+
+
+STOP_LISTEN = re.compile(r"\b(?:не слушай|перестань слушать|хватит слушать|выключи (?:живой (?:режим|разговор)|микрофон)|"
+                         r"закрой микрофон)\b", re.I)
+
+
+def stop_listening(text: str) -> bool:
+    """Просьба совсем выключить живой режим (микрофон), а не просто закончить разговор."""
+    return bool(STOP_LISTEN.search(text or ""))
+
+
 def is_goodbye(text: str) -> bool:
     """Прощание — целыми словами: в конце реплики или в начале короткой («пока, Ксения»).
     «Покажи экран» и «пока я готовлю, включи музыку» — не прощание."""
@@ -2672,6 +2698,23 @@ class LiveConversation(Conversation):
         if self.source == "push":
             speaker["source"] = "tablet"  # живой разговор с микрофона планшета: отпечаток узнаёт хуже, см. respond
         early, self.early = self.early, None
+        if stop_listening(text):
+            log.info("Живой режим: просят не слушать — выключаю микрофон")
+            await say_notice("Хорошо, не слушаю. Позови касанием или клавишами.", output=self.output)
+            return True
+        if self.dozing:
+            # разговор окончен: откликаться только на имя — как человек, которого позвали
+            rest = wake_rest(text)
+            if rest is None:
+                return False
+            self.dozing = False
+            log.info("Живой режим: позвали по имени — снова в разговоре (%s)", text)
+            hub.emit({"type": "state", "state": "listening", "where": "pc"})
+            if not rest:
+                await say_notice(random.choice(("Да?", "Слушаю.", "Да, я тут.")), output=self.output)
+                return False
+            ev = {**ev, "text": rest}
+            text = rest
         if len(text) >= 2 and not is_stop(text) and is_own_echo(text):
             log.info("Эхо собственного голоса — не реплика: %s", text)
             text = ""  # дальше — как шум: рассказ продолжается в полный голос
@@ -2765,13 +2808,24 @@ class LiveConversation(Conversation):
             self.cur = asyncio.create_task(self.live_turn(merged, ev.get("timings") or {}, speaker))
             if kind == "goodbye" or is_goodbye(text):
                 await asyncio.wait({self.cur})
+                if CONFIG.get("live_doze", True) and not stop_listening(text):
+                    self.doze("попрощались")  # как человек: разговор окончен, но позвать по имени можно
+                    return False
                 return True
             return False
         finally:
             live_intent.log_decision(text, ctx, d, acted=acted)
 
+    def doze(self, why: str):
+        """Разговор окончен, но микрофон не закрываем: Ксения «отходит в сторону» и ждёт своего имени
+        (решение Александра 2026-10-10: звать по имени, только когда разговор закончился — как человека)."""
+        self.dozing = True
+        log.info("Живой режим: %s — жду, когда позовут по имени", why)
+        hub.emit({"type": "state", "state": "idle", "where": "pc"})
+
     async def run(self):
         self.turns, self.cur, self.early, self.last_utt, self.ctx_sent = 0, None, None, None, None
+        self.dozing = False
         self.judge = live_intent.Judge(CONFIG, BRAIN_KEY)
         url = CONFIG["voice_in_url"].replace("http", "ws", 1) + "/stream" + ("?source=push" if self.source == "push" else "")
         try:
@@ -2794,9 +2848,11 @@ class LiveConversation(Conversation):
                             last = time.time()
                         elif waiting:
                             self.cur = asyncio.create_task(self.live_waiting())
-                        elif time.time() - last > CONFIG.get("live_idle_s", 60):
-                            log.info("Живой режим: долго тихо — микрофон закрываю")
-                            return
+                        elif not self.dozing and time.time() - last > CONFIG.get("live_idle_s", 60):
+                            if not CONFIG.get("live_doze", True):
+                                log.info("Живой режим: долго тихо — микрофон закрываю")
+                                return
+                            self.doze("долго тихо")
                         continue
                     if msg.type != aiohttp.WSMsgType.TEXT:
                         log.warning("Живой режим: слух закрыл поток (%s)", msg.type)
