@@ -5,7 +5,8 @@ After=ksenia-core.service ksenia-voice-in.service network-online.target
 [Service]
 Type=simple
 ExecStart=/home/user/Agents/Ksenia/pwa/run_pwa.sh
-Restart=on-failure
+# always: и после внешнего kill с кодом 0 (аудит Fable, FA15); stop и Conflicts= по-прежнему останавливают
+Restart=always
 RestartSec=10s
 StandardOutput=append:/home/user/Agents/Ksenia/logs/pwa.log
 StandardError=append:/home/user/Agents/Ksenia/logs/pwa.log

@@ -11,8 +11,23 @@ parts = [("text", text), ("voice", "masha"), ("params", json.dumps(params))]
 body = b"".join(f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode() for k, v in parts) + f"--{b}--\r\n".encode()
 req = urllib.request.Request("http://127.0.0.1:18110/generate", data=body,
                              headers={"Content-Type": f"multipart/form-data; boundary={b}"})
+import time, urllib.error, os, tempfile
+r = None
+deadline = time.time() + 15
+while r is None:
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(req.full_url, data=body, headers=dict(req.headers)), timeout=60)
+    except urllib.error.HTTPError as e:
+        if e.code == 503 and time.time() < deadline:  # голос занят другой фразой — подождать (аудит Fable, FA18)
+            time.sleep(0.3)
+            continue
+        break
+    except Exception:
+        break
 try:
-    with urllib.request.urlopen(req, timeout=60) as r:
+    if r is None:
+        raise RuntimeError("голос не ответил")
+    with r:
         p = subprocess.Popen(["pacat", "--playback", "--raw", "--rate=44100", "--channels=1", "--format=s16le"],
                              stdin=subprocess.PIPE)
         while True:
@@ -23,5 +38,15 @@ try:
         p.stdin.close()
         p.wait()
 except Exception as e:
-    subprocess.run(["notify-send", "-a", "Ксения", "Ксения", text])
+    # Александр не видит всплывающих окон: запасной голос RHVoice, окно — только в дополнение
+    wav = os.path.join(tempfile.gettempdir(), f"ksenia-announce-{os.getpid()}.wav")
+    try:
+        subprocess.run(["RHVoice-test", "-p", "anna", "-o", wav], input=text.encode(), timeout=20, check=True)
+        subprocess.run(["paplay", wav], timeout=60)
+    except Exception:
+        pass
+    finally:
+        if os.path.exists(wav):
+            os.remove(wav)
+    subprocess.run(["notify-send", "-a", "Ксения", "--", "Ксения", text])
 PY

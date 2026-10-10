@@ -4,7 +4,8 @@ Description=Ксения: слух (Whisper large-v3-turbo на RTX 2080 Ti, :18
 [Service]
 Type=simple
 ExecStart=/home/user/Agents/Ksenia/voice-in/run_voice_in.sh
-Restart=on-failure
+# always: и после внешнего kill с кодом 0 (аудит Fable, FA15); stop и Conflicts= по-прежнему останавливают
+Restart=always
 RestartSec=10s
 StandardOutput=append:/home/user/Agents/Ksenia/logs/voice-in.log
 StandardError=append:/home/user/Agents/Ksenia/logs/voice-in.log

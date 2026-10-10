@@ -4,7 +4,8 @@ Description=Ксения: голос (Fish S2 Pro через s2.cpp на RTX 208
 [Service]
 Type=simple
 ExecStart=/home/user/Agents/Ksenia/voice-out/run_voice_out.sh
-Restart=on-failure
+# always: и после внешнего kill с кодом 0 (аудит Fable, FA15); stop и Conflicts= по-прежнему останавливают
+Restart=always
 RestartSec=10s
 StandardOutput=append:/home/user/Agents/Ksenia/logs/voice-out.log
 StandardError=append:/home/user/Agents/Ksenia/logs/voice-out.log

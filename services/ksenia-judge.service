@@ -4,7 +4,8 @@ Description=Ксения: судья реплик живого режима (Neo
 [Service]
 Type=simple
 ExecStart=/home/user/Agents/Ksenia/brain/run_judge.sh
-Restart=on-failure
+# always: и после внешнего kill с кодом 0 (аудит Fable, FA15); stop и Conflicts= по-прежнему останавливают
+Restart=always
 RestartSec=10s
 StandardOutput=append:/home/user/Agents/Ksenia/logs/judge.log
 StandardError=append:/home/user/Agents/Ksenia/logs/judge.log

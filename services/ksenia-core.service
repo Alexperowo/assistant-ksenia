@@ -1,15 +1,18 @@
 [Unit]
 Description=Ксения: ядро (разговор, характер, озвучка, :18130)
-After=ksenia-brain.service ksenia-voice-out.service ksenia-voice-in.service
+# после рабочего стола: иначе у ядра нет WAYLAND_DISPLAY — снимки экрана, буфер обмена, видео не работали бы
+# до первого перезапуска (2026-10-10: ядро стартовало на 11 с раньше graphical-session.target)
+After=ksenia-brain.service ksenia-voice-out.service ksenia-voice-in.service graphical-session.target
 
 [Service]
 Type=simple
 WorkingDirectory=/home/user/Agents/Ksenia/core
 ExecStart=/home/user/Agents/Ksenia/.venv/bin/python core.py
-Restart=on-failure
+# always: и после внешнего kill с кодом 0 (аудит Fable, FA15); stop и Conflicts= по-прежнему останавливают
+Restart=always
 RestartSec=5s
 StandardOutput=append:/home/user/Agents/Ksenia/logs/core.log
 StandardError=append:/home/user/Agents/Ksenia/logs/core.log
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target

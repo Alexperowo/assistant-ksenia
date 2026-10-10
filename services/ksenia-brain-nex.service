@@ -6,7 +6,8 @@ Conflicts=ksenia-brain.service nexus-llama.service nexus-tinfield.service nexus-
 [Service]
 Type=simple
 ExecStart=/home/user/Agents/Ksenia/brain/run_brain_nex.sh
-Restart=on-failure
+# always: и после внешнего kill с кодом 0 (аудит Fable, FA15); stop и Conflicts= по-прежнему останавливают
+Restart=always
 RestartSec=20s
 TimeoutStopSec=60s
 StandardOutput=append:/home/user/Agents/Ksenia/logs/brain-nex.log
