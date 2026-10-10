@@ -155,3 +155,39 @@ def test_garbage_request_is_closed(proxy):
 
 def test_browser_proxy_disables_loopback_bypass():
     assert net_guard.browser_proxy(1234) == {"server": "http://127.0.0.1:1234", "bypass": "<-loopback>"}
+
+
+@pytest.mark.parametrize("ip", ["64:ff9b::7f00:1", "::7f00:1", "::ffff:0:7f00:1", "fec0::1", "::ffff:127.0.0.1"])
+def test_ipv6_forms_of_local_are_not_public(ip):
+    assert not net_guard.ip_is_public(ip)
+
+
+def test_ipv6_public_still_public():
+    assert net_guard.ip_is_public("2a00:1450:4010:c05::8b")
+
+
+def test_unblock_bridge_only_public_web():
+    import importlib.util, os
+    spec = importlib.util.spec_from_file_location("unblock", os.path.join(os.path.dirname(__file__), "..", "net", "unblock.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    assert m.allowed("rr3---sn-abc.googlevideo.com", "443")
+    assert not m.allowed("127.0.0.1", "18100") and not m.allowed("192.168.1.1", "80")
+    assert not m.allowed("localhost", "443") and not m.allowed("nas.local", "443") and not m.allowed("router", "443")
+
+
+def test_second_request_on_same_connection_does_not_reach_first_server(proxy):
+    """Keep-alive: второй запрос (к другому, непроверенному хосту) не уходит на уже открытый сервер."""
+    setup, hits = proxy
+
+    async def go():
+        runner, port, pport = await setup()
+        try:
+            return await raw(pport, (f"GET http://127.0.0.1:{port}/first HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+                                     f"GET http://victim.example/account HTTP/1.1\r\nHost: victim.example\r\n"
+                                     f"Cookie: session=SECRET\r\n\r\n").encode())
+        finally:
+            await runner.cleanup()
+
+    out = asyncio.run(go())
+    assert "ok /first" in out and [h[1] for h in hits] == ["/first"]

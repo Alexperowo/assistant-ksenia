@@ -54,6 +54,21 @@ async def socks_connect(host, port):
     return r, w
 
 
+def allowed(host: str, port: str) -> bool:
+    """Мостик — только для YouTube и подобного: публичные адреса, порты 443/80. Раньше через него любая
+    программа компьютера доходила до 127.0.0.1:18100 (мозг) или роутера (аудит Fable, C21)."""
+    import ipaddress
+    if port not in ("443", "80"):
+        return False
+    h = host.lower().rstrip(".")
+    try:
+        ip = ipaddress.ip_address(h)
+        return ip.is_global and not ip.is_multicast
+    except ValueError:
+        return bool(h) and "." in h and h != "localhost" and not h.endswith((".local", ".lan", ".home", ".internal",
+                                                                             ".localhost", ".localdomain"))
+
+
 async def handle(cr, cw):
     try:
         line = (await asyncio.wait_for(cr.readline(), 15)).decode("latin-1")
@@ -66,7 +81,13 @@ async def handle(cr, cw):
             cw.close()
             return
         host, port = parts[1].rsplit(":", 1)
-        sr, sw = await socks_connect(host.strip("[]"), int(port))
+        host = host.strip("[]")
+        if not allowed(host, port):
+            cw.write(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+            await cw.drain()
+            cw.close()
+            return
+        sr, sw = await socks_connect(host, int(port))
         cw.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
         await cw.drain()
         await asyncio.gather(pipe(cr, sw), pipe(sr, cw))

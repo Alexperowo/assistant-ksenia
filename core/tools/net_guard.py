@@ -24,10 +24,20 @@ TIMEOUT_S = 15
 _server = {"srv": None, "port": None}
 
 
+_V4_IN_V6 = [ipaddress.ip_network("64:ff9b::/96"), ipaddress.ip_network("::ffff:0:0:0/96"),
+             ipaddress.ip_network("::/96")]  # NAT64, SIIT, устаревшие «IPv4-совместимые»: внутри — адрес IPv4
+
+
 def ip_is_public(ip) -> bool:
     ip = ipaddress.ip_address(ip)
-    if ip.version == 6 and ip.ipv4_mapped:
-        ip = ip.ipv4_mapped
+    if ip.version == 6:
+        if ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        elif ip.is_site_local:  # fec0::/10 — устаревшие адреса локальной сети
+            return False
+        elif any(ip in n for n in _V4_IN_V6):
+            # 64:ff9b::7f00:1 — это 127.0.0.1 через NAT64 (аудит Fable, C18)
+            ip = ipaddress.ip_address(int(ip) & 0xFFFFFFFF)
     return ip.is_global and not ip.is_multicast
 
 
@@ -120,8 +130,21 @@ async def _handle(reader, writer):
         return
     if first:
         w2.write(first)
-    else:
-        writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        # дальше от браузера — только тело ЭТОГО запроса: по тому же соединению Chromium мог бы послать запрос
+        # к другому хосту, и он ушёл бы на уже открытый сервер мимо проверки (аудит Fable, C4)
+        length = next((int(ln.split(":", 1)[1]) for ln in lines[1:]
+                       if ln.lower().startswith("content-length:") and ln.split(":", 1)[1].strip().isdigit()), 0)
+        try:
+            if length:
+                w2.write(await asyncio.wait_for(reader.readexactly(length), TIMEOUT_S))
+            await w2.drain()
+        except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError):
+            w2.close()
+            writer.close()
+            return
+        await _pipe(r2, writer)  # ответ (сервер закроет — просили Connection: close), и соединение браузера тоже
+        return
+    writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
     await asyncio.gather(_pipe(reader, w2), _pipe(r2, writer))
 
 

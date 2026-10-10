@@ -42,7 +42,10 @@ async def context():
         port = await net_guard.start()
         _ctx = await _pw.chromium.launch_persistent_context(
             PROFILE, headless=True, locale="ru-RU", viewport={"width": 1280, "height": 900},
-            proxy=net_guard.browser_proxy(port))
+            proxy=net_guard.browser_proxy(port),
+            # WebRTC шёл бы по UDP мимо сторожа — в локальную сеть (аудит Fable, C17)
+            args=["--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                  "--webrtc-ip-handling-policy=disable_non_proxied_udp"])
         _ctx.on("close", _forget)
         _pages.clear()
         return _ctx
