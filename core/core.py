@@ -1287,7 +1287,9 @@ class Ksenia:
         # Чей голос: speaker из voice-in (отпечаток). owner False — говорит не Александр (гость):
         # разговор вежливый, но без действий; ожидающее подтверждение он решить не может.
         speaker = speaker or {}
-        guest = speaker.get("owner") is False
+        # с микрофона планшета отпечаток (записан через наушники) узнаёт хуже — гостем не считаем, но «да» голосом
+        # решает только уверенное совпадение; кнопка «Да» на планшете (вход по коду) — как прежде
+        guest = speaker.get("owner") is False and speaker.get("source") != "tablet"
         # образец голоса записан, а уверенного совпадения нет (в том числе «не узнан»: фраза короче 0,6 с) —
         # такое «да» рискованное действие не решает
         weak_voice = bool(speaker.get("enrolled")) and not speaker.get("confirm_ok")
@@ -2374,14 +2376,16 @@ class LiveConversation(Conversation):
     async def on_utterance(self, ev):
         """Реплика целиком. Возвращает True — живой режим окончен."""
         text = str(ev.get("text") or "").strip()
-        speaker = ev.get("speaker") or {}
+        speaker = dict(ev.get("speaker") or {})
+        if self.source == "push":
+            speaker["source"] = "tablet"  # живой разговор с микрофона планшета: отпечаток узнаёт хуже, см. respond
         early, self.early = self.early, None
         if len(text) < 2:
             await self.unduck()  # шум, а не слова — рассказ дальше в полный голос
             if early and not self.busy():
                 self.cur = asyncio.create_task(self.live_turn("продолжай", ev.get("timings") or {}, speaker, resume=True))
             return False
-        if speaker.get("owner") is False and voicectl.STATE["mode"] == "owner_only":
+        if speaker.get("owner") is False and voicectl.STATE["mode"] == "owner_only" and speaker.get("source") != "tablet":
             log.info("Чужой голос — режим «только Александр»: %s", text)
             await self.unduck()
             return False

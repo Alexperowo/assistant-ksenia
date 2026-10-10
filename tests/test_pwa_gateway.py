@@ -49,7 +49,7 @@ class FakeBackends:
         self.voice_calls.append(body)
         if not self.voice_up:
             return web.Response(status=500, text="boom")
-        return web.json_response({"text": self.heard})
+        return web.json_response({"text": self.heard, "speaker": {"owner": True, "enrolled": True, "confirm_ok": False}})
 
     def core_app(self):
         app = web.Application()
@@ -215,7 +215,9 @@ def test_utterance_goes_to_voice_in_then_core(env):
 
     res, same_audio, calls = run(env, s)
     assert res == {"text": "Привет, Ксения"} and same_audio
-    assert calls == [("/say", {"text": "Привет, Ксения", "output": "client"})]
+    # чей голос — дальше в ядро: «да» с планшета решает только уверенно узнанный голос Александра
+    assert calls == [("/say", {"text": "Привет, Ксения", "output": "client",
+                               "speaker": {"owner": True, "enrolled": True, "confirm_ok": False, "source": "tablet"}})]
 
 
 def test_not_wav_and_voice_down(env):

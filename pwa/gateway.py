@@ -344,10 +344,14 @@ class Gateway:
                                      timeout=aiohttp.ClientTimeout(total=timeout)) as r:
             return r.status, await r.json(content_type=None)
 
-    async def say(self, text):
-        """Реплика в ядро; ответ звучит на планшете (output=client). Ждём весь ход — поэтому в фоне."""
+    async def say(self, text, speaker=None):
+        """Реплика в ядро; ответ звучит на планшете (output=client). Ждём весь ход — поэтому в фоне.
+        speaker — чей голос (отпечаток из слуха): без него «да» мог сказать любой голос рядом с планшетом."""
+        body = {"text": text, "output": "client"}
+        if isinstance(speaker, dict):
+            body["speaker"] = {**speaker, "source": "tablet"}
         try:
-            status, res = await self.core_post("/say", {"text": text, "output": "client"}, timeout=600)
+            status, res = await self.core_post("/say", body, timeout=600)
             if status != 200:
                 self.fanout.emit({"type": "error", "text": "Компьютер не принял реплику."})
         except Exception as e:
@@ -500,7 +504,7 @@ class Gateway:
         text = " ".join(str(res.get("text") or "").split())
         self.fanout.emit({"type": "heard", "text": text})
         if text:
-            self.spawn(self.say(text))
+            self.spawn(self.say(text, res.get("speaker")))
         return web.json_response({"text": text})
 
     async def h_text(self, request):
