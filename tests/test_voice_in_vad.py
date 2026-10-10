@@ -249,3 +249,24 @@ def test_question_is_not_hanging():
     import voice_in
     assert not voice_in.hanging("Что?") and not voice_in.hanging("Давай!") and voice_in.hanging("расскажи мне")
     assert voice_in.turn_policy(0.1, "Давай.", {"asked": True}, {})[0] == "end"
+
+
+def test_live_utterance_ends_despite_steady_background():
+    """Фраза, затем ровный фон (телевизор): реплика всё равно кончается по пределу длины."""
+    import voice_in
+    seg = voice_in.LiveSegmenter({**voice_in.CONFIG, "live_max_s": 5, "smart_turn": False})
+    loud = (np.sin(np.arange(320) / 3) * 8000).astype(np.int16)
+    hum = (np.sin(np.arange(320) / 5) * 700).astype(np.int16)  # ~0,02 RMS — выше порога конца речи
+    evs = [seg.push(loud) for _ in range(50)] + [seg.push(hum) for _ in range(400)]
+    assert "end" in evs
+
+
+def test_hung_inference_exits_for_restart(monkeypatch):
+    import asyncio as aio
+    import time as t
+    import voice_in
+    exits = []
+    monkeypatch.setitem(voice_in.CONFIG, "infer_timeout_s", 0.1)
+    monkeypatch.setattr(voice_in.os, "_exit", lambda code: exits.append(code))
+    aio.run(voice_in.infer(t.sleep, 0.5))
+    assert exits == [1]

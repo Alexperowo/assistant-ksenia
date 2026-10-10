@@ -181,6 +181,22 @@ def turn_policy(p: float, text: str, ctx: dict, cfg: dict, fast: bool = False):
     return "wait", cfg.get("turn_wait_ms", 2000)
 
 
+async def infer(fn, *args):
+    """Распознавание/отпечаток в отдельном потоке, но не дольше 15 с. Зависшая CUDA (после сна) держала замок
+    слуха навсегда — «Я ещё дослушиваю» без конца; сломанная — 500 на каждую реплику при живом процессе.
+    Тогда лучше выйти: systemd перезапустит слух (аудит Fable, D1)."""
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(fn, *args), CONFIG.get("infer_timeout_s", 15))
+    except asyncio.TimeoutError:
+        log.critical("Распознавание зависло дольше %s с — перезапускаюсь", CONFIG.get("infer_timeout_s", 15))
+        os._exit(1)
+    except Exception as e:
+        if re.search(r"cuda|cudnn|cublas|CUDNN|CUBLAS|device", repr(e), re.I):
+            log.critical("Сбой видеокарты в распознавании (%r) — перезапускаюсь", e)
+            os._exit(1)
+        raise
+
+
 class Ear:
     def __init__(self):
         t0 = time.time()
@@ -193,8 +209,16 @@ class Ear:
             # процессор — запасной путь, если видеокарта голоса и слуха недоступна (зависший процесс держит её)
             providers = ["CPUExecutionProvider"] if CONFIG.get("asr_device") == "cpu" else \
                 ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            self.model = onnx_asr.load_model(CONFIG.get("gigaam_model", "gigaam-v3-e2e-ctc"), providers=providers)
-            self.model.recognize(np.zeros(RATE, dtype=np.float32), sample_rate=RATE)  # прогрев
+            try:
+                self.model = onnx_asr.load_model(CONFIG.get("gigaam_model", "gigaam-v3-e2e-ctc"), providers=providers)
+                self.model.recognize(np.zeros(RATE, dtype=np.float32), sample_rate=RATE)  # прогрев
+            except Exception as e:
+                # видеокарта недоступна (после сна, зависший процесс): слышать на процессоре лучше, чем падать
+                # каждые 10 с (аудит Fable, D1)
+                log.error("Распознавание на видеокарте не запустилось (%r) — работаю на процессоре", e)
+                self.model = onnx_asr.load_model(CONFIG.get("gigaam_model", "gigaam-v3-e2e-ctc"),
+                                                 providers=["CPUExecutionProvider"])
+                self.model.recognize(np.zeros(RATE, dtype=np.float32), sample_rate=RATE)
             self.model_ts = self.model.with_timestamps()  # та же модель, плюс уверенность по слогам
         else:
             self.model = WhisperModel(CONFIG["model_dir"], device="cuda", compute_type=CONFIG.get("compute_type", "int8_float16"))
@@ -368,7 +392,7 @@ class Ear:
                         # пауза: договорил ли? Интонация (Smart Turn) + смысл (на чём оборвалась фраза);
                         # если нет — ждём продолжения до turn_wait_ms тишины
                         turn_checked = True
-                        p, partial = await asyncio.to_thread(self.turn_check, np.concatenate(frames))
+                        p, partial = await infer(self.turn_check, np.concatenate(frames))
                         turn_probs.append(round(p, 2))
                         if partial:
                             turn_texts.append(partial[-40:])
@@ -435,6 +459,10 @@ class LiveSegmenter:
             return None
         self.frames.append(x)
         self.since_partial += 20
+        # предел длины — на каждом кадре: ровный фон (телевизор, чайник, пылесос) после фразы держал реплику
+        # открытой без конца — ответа не было вовсе (аудит Fable, D6)
+        if len(self.frames) * 20 >= self.c.get("live_max_s", 45) * 1000:
+            return "end"
         thr = max(self.noise * 2.0, self.c.get("min_speech_rms", 0.012) * 0.7)
         if rms >= thr:
             self.silent_ms, self.checked, self.fast_checked = 0, False, False
@@ -445,8 +473,6 @@ class LiveSegmenter:
                 return "long"
             return self._maybe_partial()
         self.silent_ms += 20
-        if len(self.frames) * 20 >= self.c.get("max_s", 120) * 1000:
-            return "end"
         fast_ms = self.c.get("turn_fast_ms", 400)
         if fast_ms and not self.fast_checked and self.silent_ms >= fast_ms and self.silent_ms < self.c.get("turn_check_ms", 800):
             self.fast_checked = True
@@ -607,8 +633,8 @@ async def handle_listen(request):
                 await restore_task
             return web.json_response({"text": "", "timings": timings})
         t1 = time.time()
-        spk_task = asyncio.create_task(asyncio.to_thread(ear.vp.check, pcm)) if ear.vp else None
-        text, sure = await asyncio.to_thread(ear.transcribe_sure, pcm)
+        spk_task = asyncio.create_task(infer(ear.vp.check, pcm)) if ear.vp else None
+        text, sure = await infer(ear.transcribe_sure, pcm)
         timings["stt_s"] = round(time.time() - t1, 2)
         if sure and (sure["weak"] or sure["mean"] < CONFIG.get("asr_unsure_mean", -0.2)):
             timings["asr"] = sure
@@ -634,8 +660,8 @@ async def handle_transcribe(request):
         audio = audio[idx[idx < len(audio)]]
     t1 = time.time()
     async with ear.lock:
-        text = await asyncio.to_thread(ear.transcribe, audio)
-        speaker = await asyncio.to_thread(ear.vp.check, audio) if ear.vp else {"owner": None, "enrolled": False}
+        text = await infer(ear.transcribe, audio)
+        speaker = await infer(ear.vp.check, audio) if ear.vp else {"owner": None, "enrolled": False}
     return web.json_response({"text": text, "stt_s": round(time.time() - t1, 2), "speaker": speaker})
 
 
@@ -720,6 +746,14 @@ async def handle_stream(request):
         await ws.send_json({"type": "error", "reason": "busy"})
         await ws.close()
         return ws
+    ear.streaming = True  # сразу: второй /stream во время подготовки запускался параллельно (аудит Fable, D16)
+    try:
+        return await _stream(ws, push)
+    finally:
+        ear.streaming = False
+
+
+async def _stream(ws, push):
     if push:
         # звук с планшета: эхо гасит его браузер, сигнал «слушаю» звучит на самом планшете
         for _ in range(50):
@@ -742,7 +776,6 @@ async def handle_stream(request):
             await asyncio.sleep(CONFIG.get("le_settle_s", 0.5))
         source = await asyncio.to_thread(find_source, card)
         sink = await asyncio.to_thread(bt_node, card, "sinks")
-    ear.streaming = True
     rec = None
     try:
         if sink and CONFIG.get("beep", True):
@@ -753,7 +786,11 @@ async def handle_stream(request):
             p.stdin.write(BEEP)
             await p.stdin.drain()
             p.stdin.close()
-            await p.wait()
+            try:
+                await asyncio.wait_for(p.wait(), 3)  # выход без звукового канала — pacat висел вечно (D4)
+            except asyncio.TimeoutError:
+                p.kill()
+                await p.wait()
         if push:
             mic = PUSH["pipe"]
         else:
@@ -780,7 +817,7 @@ async def handle_stream(request):
 
         async def send_partial(pcm, utt_no):
             try:
-                text = await asyncio.to_thread(ear.transcribe, pcm)
+                text = await infer(ear.transcribe, pcm)
             except Exception as e:
                 log.warning("частичное распознавание: %r", e)
                 return
@@ -789,7 +826,7 @@ async def handle_stream(request):
             owner = partial.get("owner") if partial.get("owner_utt") == utt_no else None
             if owner is None and ear.vp is not None and ear.vp.centroid is not None and len(pcm) >= RATE:
                 try:
-                    owner = (await asyncio.to_thread(ear.vp.check, pcm)).get("owner")
+                    owner = (await infer(ear.vp.check, pcm)).get("owner")
                     partial.update({"owner": owner, "owner_utt": utt_no})
                 except Exception:
                     owner = None
@@ -808,43 +845,19 @@ async def handle_stream(request):
                 if headset and not push:  # канал LE Audio мог не подняться — проверить и починить в фоне
                     asyncio.create_task(headset.check_and_recover("микрофон оборвался"))
                 break
-            ev = seg.push(np.frombuffer(buf, dtype=np.int16))
-            if ev == "partial":
-                if partial["task"] is None or partial["task"].done():  # одно распознавание за раз
-                    partial["task"] = asyncio.create_task(send_partial(seg.pcm(), partial["utt"]))
-                ev = None
-            elif ev == "check_fast":
-                # быстрая проверка (~0,4 с): только текст, конец — лишь при ясных признаках
-                text = await asyncio.to_thread(ear.transcribe, seg.pcm())
-                ev = seg.decide(1.0, text, fast=True)
-            elif ev == "check":
-                ev = seg.decide(*await asyncio.to_thread(ear.turn_check, seg.pcm()))
-                if ev is None:  # пауза, но он не договорил — ядро может ответить своим «угу»
-                    await ws.send_json({"type": "pause", "speech_s": round(seg.voiced_ms / 1000, 1)})
-            if ev == "start":
-                await ws.send_json({"type": "speech_start"})
-            elif ev == "long":
-                await ws.send_json({"type": "speech_long"})
-            elif ev == "end":
-                partial["utt"] += 1  # опоздавшие частичные результаты этой реплики больше не нужны
-                pcm, info = seg.utterance()
-                t1 = time.time()
-                ear._save_debug([pcm])
-                spk = asyncio.create_task(asyncio.to_thread(ear.vp.check, pcm)) if ear.vp else None
-                text, sure = await asyncio.to_thread(ear.transcribe_sure, pcm)
-                info["stt_s"] = round(time.time() - t1, 2)
-                if sure and (sure["weak"] or sure["mean"] < CONFIG.get("asr_unsure_mean", -0.2)):
-                    info["asr"] = sure
-                m = mood.hint(pcm, text, "le")
-                if m:
-                    info["mood"] = m
-                speaker = await spk if spk else {"owner": None, "enrolled": False}
-                log.info("Живой режим, услышала (%s, голос %s): %s", info, speaker, text)
-                await ws.send_json({"type": "utterance", "text": text, "speaker": speaker, "timings": info})
+            try:
+                await _live_event(ws, seg, partial, send_partial, np.frombuffer(buf, dtype=np.int16))
+            except (ConnectionResetError, asyncio.CancelledError):
+                raise
+            except Exception as e:
+                # раньше любое исключение тихо закрывало поток — живой режим кончался молча (аудит Fable, D5)
+                log.exception("Живой режим: сбой обработки реплики")
+                if not ws.closed:
+                    await ws.send_json({"type": "error", "reason": "asr_failed", "detail": repr(e)[:200]})
+                seg.reset()
     except (ConnectionResetError, asyncio.CancelledError):
         pass
     finally:
-        ear.streaming = False
         if "reader_task" in locals():
             reader_task.cancel()
         if rec and rec.returncode is None:
@@ -856,10 +869,57 @@ async def handle_stream(request):
     return ws
 
 
+async def _live_event(ws, seg, partial, send_partial, frame):
+    """Один кадр живого потока: события начала, паузы, конца реплики."""
+    ev = seg.push(frame)
+    if ev == "partial":
+        if partial["task"] is None or partial["task"].done():  # одно распознавание за раз
+            partial["task"] = asyncio.create_task(send_partial(seg.pcm(), partial["utt"]))
+        ev = None
+    elif ev == "check_fast":
+        # быстрая проверка (~0,4 с): только текст, конец — лишь при ясных признаках
+        text = await infer(ear.transcribe, seg.pcm())
+        ev = seg.decide(1.0, text, fast=True)
+    elif ev == "check":
+        ev = seg.decide(*await infer(ear.turn_check, seg.pcm()))
+        if ev is None:  # пауза, но он не договорил — ядро может ответить своим «угу»
+            await ws.send_json({"type": "pause", "speech_s": round(seg.voiced_ms / 1000, 1)})
+    if ev == "start":
+        await ws.send_json({"type": "speech_start"})
+    elif ev == "long":
+        await ws.send_json({"type": "speech_long"})
+    elif ev == "end":
+        partial["utt"] += 1  # опоздавшие частичные результаты этой реплики больше не нужны
+        pcm, info = seg.utterance()
+        t1 = time.time()
+        ear._save_debug([pcm])
+        spk = asyncio.create_task(infer(ear.vp.check, pcm)) if ear.vp else None
+        text, sure = await infer(ear.transcribe_sure, pcm)
+        info["stt_s"] = round(time.time() - t1, 2)
+        if sure and (sure["weak"] or sure["mean"] < CONFIG.get("asr_unsure_mean", -0.2)):
+            info["asr"] = sure
+        m = mood.hint(pcm, text, "le")
+        if m:
+            info["mood"] = m
+        try:
+            speaker = await spk if spk else {"owner": None, "enrolled": False}
+        except Exception:
+            speaker = {"owner": None, "enrolled": True}  # не проверили — неизвестный голос, не «гость»
+        log.info("Живой режим, услышала (%s, голос %s): %s", info, speaker, text)
+        await ws.send_json({"type": "utterance", "text": text, "speaker": speaker, "timings": info})
+
+
 async def handle_status(request):
-    card = find_bt_card()
-    return web.json_response({"busy": ear.lock.locked(), "bt_card": card,
-                              "profile": card_profile(card) if card else None, "source": find_source(card)})
+    # pactl — в потоке и без падения: синхронный вызов держал весь слух до 15 с (аудит Fable, D15)
+    def snapshot():
+        card = find_bt_card()
+        return card, (card_profile(card) if card else None), find_source(card)
+    try:
+        card, prof, src = await asyncio.wait_for(asyncio.to_thread(snapshot), 8)
+    except Exception:
+        card = prof = src = None
+    return web.json_response({"busy": ear.lock.locked() or ear.streaming, "bt_card": card, "profile": prof,
+                              "source": src})
 
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}

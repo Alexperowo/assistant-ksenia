@@ -2520,6 +2520,8 @@ class LiveConversation(Conversation):
                         continue
                     if msg.type != aiohttp.WSMsgType.TEXT:
                         log.warning("Живой режим: слух закрыл поток (%s)", msg.type)
+                        # раньше — молча: живой режим просто кончался (аудит Fable, D5)
+                        await say_notice("[sigh] Мой слух отключился, живой разговор прервался. Позови меня ещё раз.")
                         return
                     ev = json.loads(msg.data)
                     kind = ev.get("type")
@@ -2542,6 +2544,10 @@ class LiveConversation(Conversation):
                                 ev.get("speech_s", 0) >= CONFIG.get("live_backchannel_after_s", 8) and \
                                 time.time() - self.last_bc > CONFIG.get("live_backchannel_every_s", 12):
                             spawn(self.backchannel())
+                        continue
+                    if kind == "error" and ev.get("reason") == "asr_failed":
+                        log.warning("Живой режим: %s", ev)  # слух жив, не разобрал одну реплику — разговор идёт дальше
+                        await say_notice("Ой, не расслышала. Повтори, пожалуйста.")
                         continue
                     if kind == "error":
                         log.warning("Живой режим: %s", ev)
