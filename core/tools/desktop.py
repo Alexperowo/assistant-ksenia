@@ -275,7 +275,7 @@ def _find_text(im, target, nth=1):
                                          for w, t in zip(seq, want)):
             x0, y0 = min(w[1] for w in seq), min(w[2] for w in seq)
             x1, y1 = max(w[1] + w[3] for w in seq), max(w[2] + w[4] for w in seq)
-            hits.append(((x0 + x1) // 2, (y0 + y1) // 2))
+            hits.append(((x0 + x1) // 2, (y0 + y1) // 2, " ".join(w[0] for w in seq)))
     hits.sort(key=lambda p: (p[1] // 20, p[0]))  # сверху вниз, слева направо
     return hits[nth - 1] if 0 < nth <= len(hits) else None
 
@@ -292,15 +292,23 @@ async def _screen_click(text, nth):
         return {"ok": False, "error": "включена экранная лупа — сначала уменьши её до конца (magnifier zoom_out), "
                                       "иначе я не попаду в нужное место"}
     im = await asyncio.to_thread(screen._capture, "screen")
-    pt = await asyncio.to_thread(_find_text, im, text, nth)
-    if pt is None:
+    hit = await asyncio.to_thread(_find_text, im, text, nth)
+    if hit is None:
         return {"ok": False, "error": f"не вижу на экране надписи «{text}»"}
     scale = await asyncio.to_thread(_screen_scale)
-    lx, ly = round(pt[0] / scale), round(pt[1] / scale)
-    if confirm.is_financial(text):
+    lx, ly, seen = round(hit[0] / scale), round(hit[1] / scale), hit[2]
+    # риск — по тому, что РЕАЛЬНО написано на экране: «Оп» от модели находило «Оплатить» (аудит Fable, B15)
+    if confirm.is_financial(text, seen):
         return dict(confirm.MONEY_REFUSAL)
-    if RISKY.search(text):
-        return confirm.ask(f"нажать «{text}» на экране", lambda: _click_at(lx, ly), question=f"Нажать «{text}»?")
+    if RISKY.search(text) or RISKY.search(seen):
+        async def click_if_same():
+            # после «да» экран мог измениться (до 3 минут): нажимаем, только если та же надпись на том же месте
+            im2 = await asyncio.to_thread(screen._capture, "screen")
+            again = await asyncio.to_thread(_find_text, im2, seen, 1)
+            if again is None or abs(round(again[0] / scale) - lx) > 25 or abs(round(again[1] / scale) - ly) > 25:
+                return {"ok": False, "error": f"надпись «{seen}» уже не на прежнем месте — нажимать не стала"}
+            return await _click_at(lx, ly)
+        return confirm.ask(f"нажать «{seen}» на экране", click_if_same, question=f"Нажать «{seen}»?")
     return await _click_at(lx, ly)
 
 

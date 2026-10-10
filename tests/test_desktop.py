@@ -163,3 +163,25 @@ def test_dictate_refuses_terminal(monkeypatch):
     import asyncio as aio
     desktop, keys = _dictate_env(monkeypatch, {"now": "Konsole — bash"})
     assert aio.run(desktop.call("dictate", {"text": "rm -rf ~"}, None))["ok"] is False and keys == []
+
+
+def test_screen_click_checks_text_really_on_screen(monkeypatch):
+    """Модель сказала «Оп», на экране — «Оплатить»: отказ; «Уда» -> «Удалить» — с вопросом."""
+    import asyncio as aio
+    from tools import confirm, desktop, screen
+    clicks = []
+    monkeypatch.setattr(screen, "zoom_active", lambda: False)
+    monkeypatch.setattr(screen, "_capture", lambda target: object())
+    monkeypatch.setattr(desktop, "_screen_scale", lambda: 1.0)
+
+    async def click_at(x, y):
+        clicks.append((x, y))
+        return {"ok": True}
+
+    monkeypatch.setattr(desktop, "_click_at", click_at)
+    monkeypatch.setattr(desktop, "_find_text", lambda im, t, nth=1: (100, 200, "оплатить"))
+    assert aio.run(desktop._screen_click("Оп", 1))["ok"] is False and clicks == []
+    monkeypatch.setattr(desktop, "_find_text", lambda im, t, nth=1: (100, 200, "удалить"))
+    r = aio.run(desktop._screen_click("Уда", 1))
+    assert r["speak_verbatim"] == "Нажать «удалить»?" and clicks == []
+    assert aio.run(confirm.take()["run"]())["ok"] and clicks == [(100, 200)]
