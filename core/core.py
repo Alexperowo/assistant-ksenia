@@ -2704,10 +2704,17 @@ async def startup_check():
         return
     open(mark, "w").close()
     deadline = time.time() + CONFIG.get("startup_check_wait_s", 240)
-    res = {}
+    res, restarted = {}, set()
     while time.time() < deadline:
         await asyncio.sleep(20)
         res = await selfcheck.call("self_check", {}, ks.session)
+        fix = [u for u in res.get("restart") or [] if u not in restarted]
+        if fix:
+            # движок без видеокарты (драйвер не успел при загрузке) — один перезапуск, без вопросов: ничего не теряется
+            log.warning("Самопроверка при запуске: перезапускаю %s — работали без видеокарты", fix)
+            restarted.update(fix)
+            await asyncio.to_thread(subprocess.run, ["systemctl", "--user", "restart", *fix], timeout=60)
+            continue
         # выключенные наушники при включении компьютера — обычное дело, не проблема
         res["problems"] = [p for p in res.get("problems") or [] if not p.startswith("наушники не подключены")]
         if not res["problems"]:

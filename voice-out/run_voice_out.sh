@@ -4,6 +4,7 @@
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=1
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+"$(dirname "$0")/../scripts/wait-gpu.sh" 1 || exit 1  # драйвер после загрузки системы ещё не готов
 export S2_CODEC_PROF=1
 export S2_CODEC_TAIL=8   # тяжёлая часть кодека только по новым кадрам + 8 кадров разгона (проверено: 46,8 дБ к эталону)
 exec /home/user/backend/s2.cpp/build/s2 --server -H 127.0.0.1 -P 18110 \

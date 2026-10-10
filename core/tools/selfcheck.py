@@ -13,6 +13,7 @@ import aiohttp
 CFG = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config.json"), encoding="utf-8"))
 SERVICES = {"ksenia-brain": "мозг", "ksenia-voice-out": "голос", "ksenia-voice-in": "слух", "ksenia-judge": "судья реплик",
             "ksenia-core": "ядро"}
+GPU_UNITS = {"ksenia-brain": "мозг", "ksenia-voice-out": "голос", "ksenia-judge": "судья реплик"}
 
 SCHEMAS = [
     {"type": "function", "function": {
@@ -52,8 +53,23 @@ async def call(name, args, session):
         key = open(CFG["brain_key_file"], encoding="utf-8").read().strip()
     except OSError:
         problems.append("нет ключа мозга")
-    if await _http(session, CFG["brain_url"] + "/health", {"Authorization": "Bearer " + key}) != 200:
+    brain_down = await _http(session, CFG["brain_url"] + "/health", {"Authorization": "Bearer " + key}) != 200
+    if brain_down:
         problems.append("мозг не отвечает на проверку (возможно, ещё загружается — до минуты после запуска)")
+    restart = []
+    rc, apps = await _run("nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader")
+    on_gpu = set(apps.split()) if rc == 0 else None
+    for unit, what in GPU_UNITS.items():
+        rc, pid = await _run("systemctl", "--user", "show", "-p", "MainPID", "--value", unit)
+        # служба работает, а её процесса нет на видеокарте: драйвер не был готов при запуске, и движок молча
+        # ушёл на процессор (2026-10-10: мозг отвечал по 3 минуты). Мозг загружается до минуты — пока он не
+        # отвечает на /health, не считаем (иначе ложная тревога)
+        if on_gpu is None or pid in ("", "0") or pid in on_gpu:
+            continue
+        if unit == "ksenia-brain" and brain_down:
+            continue
+        problems.append(f"{what} работает без видеокарты — очень медленно; поможет перезапуск службы {unit}")
+        restart.append(unit)
     rc, sinks = await _run("pactl", "list", "sinks", "short")
     if "bluez_output" in sinks:
         fine.append("наушники подключены")
@@ -90,5 +106,5 @@ async def call(name, args, session):
                 problems.append(f"мало свободной оперативной памяти: {avail // 1024} ГБ")
     if not os.path.exists(os.path.expanduser("~/Agents/Ksenia/secrets/yandex_music_token")):
         problems.append("Яндекс Музыка не подключена (нет ключа)")
-    return {"ok": True, "problems": problems, "fine": fine,
+    return {"ok": True, "problems": problems, "fine": fine, "restart": restart,
             "note": "скажи Александру коротко: всё ли в порядке; если есть проблемы — что именно и что сделать, простыми словами"}
