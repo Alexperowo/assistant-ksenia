@@ -958,9 +958,9 @@ def _hostname(value: str):
 async def local_only(request, handler):
     """Только программы этого компьютера. Любая веб-страница в браузере может послать POST на 127.0.0.1 (CSRF)
     или подменить свой DNS на 127.0.0.1 и читать ответы (DNS rebinding) — узнаём их по заголовкам Host и Origin."""
+    # браузер к слуху не ходит (звук планшета — через шлюз, без Origin): любой Origin — отказ (аудит Fable, A2)
     origin = request.headers.get("Origin")
-    if _hostname(request.headers.get("Host", "")) not in LOCAL_HOSTS or \
-            (origin is not None and _hostname(origin) not in LOCAL_HOSTS):
+    if _hostname(request.headers.get("Host", "")) not in LOCAL_HOSTS or origin is not None:
         log.warning("Отклонён запрос %s %s: Host=%s Origin=%s", request.method, request.path,
                     request.headers.get("Host"), origin)
         return web.json_response({"error": "forbidden"}, status=403)

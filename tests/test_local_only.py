@@ -22,7 +22,6 @@ def status(module, headers):
 @pytest.mark.parametrize("headers", [
     {"Host": "127.0.0.1:18130"},                                     # curl, команда ksenia
     {"Host": "localhost:18130"},
-    {"Host": "127.0.0.1:18130", "Origin": "http://127.0.0.1:18130"},  # своя страница (будущая PWA через ядро)
 ])
 def test_local_clients_allowed(module, headers):
     assert status(module, headers) == 200
@@ -32,6 +31,10 @@ def test_local_clients_allowed(module, headers):
 @pytest.mark.parametrize("headers", [
     {"Host": "127.0.0.1:18130", "Origin": "https://evil.example"},  # CSRF: страница шлёт POST на localhost
     {"Host": "127.0.0.1:18130", "Origin": "null"},                  # песочница/file://
+    # страница другой программы этого компьютера (аудит Fable, A2): браузер к ядру не ходит вовсе — всё через шлюз
+    {"Host": "127.0.0.1:18130", "Origin": "http://127.0.0.1:8888"},
+    {"Host": "127.0.0.1:18130", "Origin": "http://[::1]:3000"},
+    {"Host": "127.0.0.1:18130", "Origin": "http://127.0.0.1:18130"},
     {"Host": "rebind.evil.example:18130"},                          # DNS rebinding
     {},
 ])

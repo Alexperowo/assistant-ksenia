@@ -3117,9 +3117,11 @@ def _hostname(value: str):
 async def local_only(request, handler):
     """Только программы этого компьютера. Любая веб-страница в браузере может послать POST на 127.0.0.1 (CSRF)
     или подменить свой DNS на 127.0.0.1 и читать ответы (DNS rebinding) — узнаём их по заголовкам Host и Origin."""
+    # Origin есть только у запросов из браузера, а к ядру браузер не ходит никогда — всё идёт через шлюз планшета
+    # (сервер, без Origin). Раньше пропускался Origin другого локального порта: страница любой программы этого
+    # компьютера (http://127.0.0.1:8888) могла бы командовать Ксенией (аудит Fable, A2)
     origin = request.headers.get("Origin")
-    if _hostname(request.headers.get("Host", "")) not in LOCAL_HOSTS or \
-            (origin is not None and _hostname(origin) not in LOCAL_HOSTS):
+    if _hostname(request.headers.get("Host", "")) not in LOCAL_HOSTS or origin is not None:
         log.warning("Отклонён запрос %s %s: Host=%s Origin=%s", request.method, request.path,
                     request.headers.get("Host"), origin)
         return web.json_response({"error": "forbidden"}, status=403)
