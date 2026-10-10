@@ -127,6 +127,10 @@ async def call(name, args, session):
             listed = "; ".join(hit[:5]) + (f" и ещё {len(hit) - 5}" if len(hit) > 5 else "")
             return confirm.ask(f"забыть {len(hit)} фактов", lambda: _forget(set(hit)),
                                question=f"Забыть {len(hit)}: {listed}?")
+        if not re.search(r"забуд|забыть|удали|сотри|стереть|убери|не помни", confirm.CONTEXT.get("user_text", "").lower()) \
+                or confirm.CONTEXT.get("internal"):
+            # модель решила забыть сама (или подсказала страница) — только после «да» (аудит Fable, B13)
+            return confirm.ask(f"забыть: {hit[0]}", lambda: _forget(set(hit)), question=f"Забыть: {hit[0]}?")
         return await _forget(set(hit))
     if name == "memory_list":
         return {"ok": True, "facts": [f["fact"] for f in facts]}

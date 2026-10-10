@@ -58,6 +58,8 @@ def test_set_list_due_cancel(rem):
     items[0]["ts"] = time.time() - 1
     rem.write_text(json.dumps(items), encoding="utf-8")
     assert [r["text"] for r in daily.due()] == ["таблетки"] and daily.due() == []
+    from tools import confirm
+    confirm.CONTEXT.update({"user_text": "отмени напоминание про маму", "internal": False})
     assert call("remind_cancel", query="маме")["cancelled"] == 1
 
 
@@ -65,7 +67,11 @@ def test_empty_cancel_does_not_wipe_everything(rem):
     call("remind_set", text="таблетки", in_minutes=10)
     assert call("remind_cancel", query=" ")["ok"] is False
     assert len(call("remind_list")["reminders"]) == 1
-    assert call("remind_cancel", query="все")["cancelled"] == 1
+    r = call("remind_cancel", query="все")
+    from tools import confirm
+    if r.get("prepared"):  # несколько сразу или без его «отмени» — после «да»
+        r = asyncio.run(confirm.take()["run"]())
+    assert r["cancelled"] == 1
 
 
 @pytest.mark.parametrize("content", ['{"a": 1}', '[{"text": "x"}, "мусор", {"ts": "завтра", "text": "y"}]'])

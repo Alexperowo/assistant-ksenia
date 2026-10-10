@@ -72,3 +72,17 @@ def _no_real_services(monkeypatch):
     monkeypatch.setattr(core, "restart_unit", lambda unit, why, every_s=180: restarted.append(unit) or True,
                         raising=False)
     return restarted
+
+
+@pytest.fixture(autouse=True)
+def _fresh_confirm_context():
+    """Что сказал Александр (confirm.CONTEXT) — своё в каждом тесте, иначе «отмени…» одного теста разрешало бы
+    действие в другом."""
+    try:
+        from tools import confirm
+    except Exception:
+        yield
+        return
+    confirm.CONTEXT.update({"user_text": "", "internal": False, "affirmative": False, "last_said": ""})
+    yield
+    confirm.CONTEXT.update({"user_text": "", "internal": False, "affirmative": False, "last_said": ""})

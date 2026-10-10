@@ -340,17 +340,27 @@ async def _cursor_look(session):
                     "на фоне картинок бывает мусором — используй только если совпадает по смыслу"}
 
 
-async def _dictate(text: str, enter: bool):
-    """Вставка через буфер обмена (русские буквы и знаки ydotool «печатать» не умеет — раскладка) и Ctrl+V;
-    в терминале — Ctrl+Shift+V. Прежний буфер возвращается."""
+TERMINAL_RE = re.compile(r"konsole|terminal|терминал|yakuake|kitty|alacritty|xterm|tilix|wezterm", re.I)
+
+
+async def _focused_window() -> str:
     focused = await _helper("focused")
-    window = focused.get("window", "") if isinstance(focused, dict) else ""
+    return focused.get("window", "") if isinstance(focused, dict) else ""
+
+
+async def _dictate(text: str, enter: bool, expect_window: str = None):
+    """Вставка через буфер обмена (русские буквы и знаки ydotool «печатать» не умеет — раскладка) и Ctrl+V.
+    В терминал не печатаем: вставка с Enter — это команда оболочке (аудит Fable, B7). После «да» — только в то
+    окно, о котором спрашивали. Прежний буфер возвращается."""
+    window = await _focused_window()
+    if TERMINAL_RE.search(window):
+        return {"ok": False, "error": "в окно терминала не печатаю — там текст стал бы командой компьютеру"}
+    if expect_window is not None and window != expect_window:
+        return {"ok": False, "error": f"окно уже другое («{window}») — печатать не стала, скажи ещё раз"}
     rc, old = await _sh("wl-paste", "--no-newline")
     await _sh("wl-copy", input_bytes=text.encode("utf-8"))
     await asyncio.sleep(0.15)
-    terminal = bool(re.search(r"konsole|terminal|терминал|yakuake", window, re.I))
-    keys = [f"{KEY_CTRL}:1"] + ([f"{KEY_SHIFT}:1"] if terminal else []) + [f"{KEY_V}:1", f"{KEY_V}:0"] + \
-        ([f"{KEY_SHIFT}:0"] if terminal else []) + [f"{KEY_CTRL}:0"]
+    keys = [f"{KEY_CTRL}:1", f"{KEY_V}:1", f"{KEY_V}:0", f"{KEY_CTRL}:0"]
     rc, _ = await _sh("ydotool", "key", *keys)
     if enter and rc == 0:
         await asyncio.sleep(0.2)
@@ -412,8 +422,15 @@ async def call(name, args, session):
         if not text:
             return {"ok": False, "error": "нечего печатать"}
         if args.get("enter"):
-            return confirm.ask("напечатать и нажать Enter", lambda: _dictate(text, True),
-                               question=f"Печатаю «{text[:80]}» и нажимаю Enter. Отправить?")
+            # вопрос — с текстом целиком: уходит ровно то, что Александр услышал
+            if len(text) > 300:
+                return {"ok": False, "error": "это слишком длинно, чтобы зачитать перед отправкой — напечатаю без "
+                                              "Enter, а отправит Александр сам, или скажи короче"}
+            window = await _focused_window()
+            if TERMINAL_RE.search(window):
+                return {"ok": False, "error": "в окно терминала не печатаю — там текст стал бы командой компьютеру"}
+            return confirm.ask(f"напечатать в «{window}» и нажать Enter", lambda: _dictate(text, True, window),
+                               question=f"Печатаю в окне «{window}»: «{text}». И нажимаю Enter. Отправить?")
         return await _dictate(text, False)
     if name == "app_menu":
         # при спящем мониторе Plasma ждёт видеокарту и не отвечает на D-Bus (живой тест 2026-10-08) — будим;

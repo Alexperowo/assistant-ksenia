@@ -8,13 +8,14 @@ import asyncio
 import datetime as dt
 import json
 import os
+import re
 import secrets
 import subprocess
 import urllib.parse
 
 import aiohttp
 
-from tools import memory
+from tools import confirm, memory
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 FILE = os.path.normpath(os.path.join(ROOT, "..", "..", "data", "reminders.json"))
@@ -257,8 +258,25 @@ async def call(name, args, session):
             # пустой запрос: all() по пустому списку — истина, и стирались ВСЕ напоминания
             return {"ok": False, "error": "не сказано, какое напоминание отменить"}
         items = _load()
-        keep = [] if q.strip() in ("все", "всё", "all") else [r for r in items if not all(w in r["text"].lower() for w in q.split())]
-        removed = len(items) - len(keep)
-        _save(keep)
-        return {"ok": bool(removed), "cancelled": removed, **({} if removed else {"error": "такого напоминания нет"})}
+        everything = q.strip() in ("все", "всё", "all")
+        if not everything and len(q.strip()) < 3:
+            return {"ok": False, "error": "скажи, какое напоминание: «а» подошло бы ко всем"}
+        keep = [] if everything else [r for r in items if not all(w in r["text"].lower() for w in q.split())]
+        gone = [r for r in items if r not in keep]
+        if not gone:
+            return {"ok": False, "cancelled": 0, "error": "такого напоминания нет"}
+
+        async def cancel():
+            left = [r for r in _load() if r.get("text") not in {g["text"] for g in gone} or
+                    r.get("ts") not in {g["ts"] for g in gone}]
+            _save(left)
+            return {"ok": True, "cancelled": len(gone)}
+
+        asked = re.search(r"отмен|убер|удали|сними|не надо|не напомина", confirm.CONTEXT.get("user_text", "").lower())
+        if len(gone) > 1 or not asked or confirm.CONTEXT.get("internal"):
+            # несколько сразу или Александр не просил отменять — только после «да» (аудит Fable, B13)
+            listed = "; ".join(r["text"] for r in gone[:3]) + (f" и ещё {len(gone) - 3}" if len(gone) > 3 else "")
+            return confirm.ask(f"отменить напоминания: {listed}", cancel,
+                               question=f"Отменить {'напоминание' if len(gone) == 1 else str(len(gone)) + ' напоминания'}: {listed}?")
+        return await cancel()
     return {"ok": False, "error": f"неизвестный инструмент {name}"}

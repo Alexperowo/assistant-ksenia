@@ -127,3 +127,39 @@ def test_hung_application_times_out(tree, monkeypatch):
     monkeypatch.setattr(desktop, "HELPER_TIMEOUT_S", 1)
     r = run(desktop.call("ui_elements", {}, None))
     assert r["ok"] is False and "зависла" in r["error"]
+
+
+def _dictate_env(monkeypatch, window):
+    from tools import desktop
+    keys = []
+
+    async def helper(cmd, args=None):
+        return {"window": window["now"]}
+
+    async def sh(*argv, input_bytes=None):
+        keys.append(argv)
+        return 0, ""
+
+    monkeypatch.setattr(desktop, "_helper", helper)
+    monkeypatch.setattr(desktop, "_sh", sh)
+    monkeypatch.setattr(desktop.asyncio, "sleep", lambda s: asyncio.sleep(0))
+    return desktop, keys
+
+
+def test_dictate_with_enter_speaks_full_text_and_pins_window(monkeypatch):
+    import asyncio as aio
+    from tools import confirm
+    window = {"now": "Telegram — Петя"}
+    desktop, keys = _dictate_env(monkeypatch, window)
+    text = "Буду через полчаса, возьми хлеб и молоко, пожалуйста, и ещё посмотри, не закрыт ли магазин у дома"
+    r = aio.run(desktop.call("dictate", {"text": text, "enter": True}, None))
+    assert text in r["speak_verbatim"] and "Telegram — Петя" in r["speak_verbatim"]
+    window["now"] = "Konsole"  # к «да» фокус ушёл в другое окно
+    res = aio.run(confirm.take()["run"]())
+    assert res["ok"] is False and not any("ydotool" in a for a in keys)
+
+
+def test_dictate_refuses_terminal(monkeypatch):
+    import asyncio as aio
+    desktop, keys = _dictate_env(monkeypatch, {"now": "Konsole — bash"})
+    assert aio.run(desktop.call("dictate", {"text": "rm -rf ~"}, None))["ok"] is False and keys == []

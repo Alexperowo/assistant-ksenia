@@ -71,8 +71,17 @@ def test_no_remembering_in_service_turn(mem):
 def test_forget_one_fact_directly(mem):
     f, said = mem
     f.write_text(json.dumps([{"fact": "любит чай"}, {"fact": "живёт в городе Казань"}], ensure_ascii=False), encoding="utf-8")
+    said("забудь, что я люблю чай")
     assert call("memory_forget", query="чай")["forgotten"] == 1
     assert facts(f) == ["живёт в городе Казань"]
+
+
+def test_forget_without_his_word_asks_first(mem):
+    f, said = mem
+    f.write_text(json.dumps([{"fact": "любит чай"}], ensure_ascii=False), encoding="utf-8")
+    said("открой статью")
+    r = call("memory_forget", query="чай")
+    assert r["prepared"] and facts(f) == ["любит чай"]
 
 
 def test_forget_many_asks_first(mem):

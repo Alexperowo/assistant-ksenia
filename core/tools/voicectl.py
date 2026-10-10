@@ -11,6 +11,8 @@ import os
 
 import aiohttp
 
+from tools import confirm
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 FILE = os.path.normpath(os.path.join(ROOT, "..", "..", "data", "voice_policy.json"))
 VOICE_IN = "http://127.0.0.1:18120"
@@ -61,6 +63,10 @@ async def call(name, args, session):
         mode = args.get("mode")
         if mode not in ("guest", "owner_only"):
             return {"ok": False, "error": "неизвестный режим"}
+        if mode == "guest" and STATE["mode"] == "owner_only" and not args.get("_confirmed"):
+            # ослабить защиту — только после «да»: иначе чужой текст (страница, сообщение) снимал бы её молча
+            return confirm.ask("включить гостевой режим", lambda: call(name, {**args, "_confirmed": True}, session),
+                               question="Включить гостевой режим? Чужие голоса я снова буду слышать.")
         STATE["mode"] = mode
         _save_mode(mode)
         st = await _vp(session, "status")
@@ -75,8 +81,12 @@ async def call(name, args, session):
             return {"ok": True, "started": True, "phrases": ENROLL_PHRASES,
                     "note": f"попроси Александра рассказать о чём-нибудь — следующие {ENROLL_PHRASES} его фраз станут образцом"}
         if a == "clear":
-            STATE["enrolling"] = 0
-            return await _vp(session, "clear")
+            async def clear():
+                STATE["enrolling"] = 0
+                return await _vp(session, "clear")
+            # без образца «да» и «стоп» принимаются от любого голоса — только после «да» (аудит Fable, B11)
+            return confirm.ask("стереть образец голоса Александра", clear,
+                               question="Стереть образец твоего голоса? Пока не запишем новый, я не отличу тебя от гостей.")
         st = await _vp(session, "status")
         meaning = {"guest": "гостевой: с ЧУЖИМИ голосами Ксения говорит, но действий для них не выполняет; Александру — всё как обычно",
                    "owner_only": "только Александр: чужие голоса Ксения не слушает"}[STATE["mode"]]
