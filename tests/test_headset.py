@@ -106,8 +106,8 @@ def test_connect_powers_adapter_and_falls_back_to_le(monkeypatch):
     async def no_sleep(s):
         pass
 
-    monkeypatch.setattr(headset, "run", fake_run)
-    monkeypatch.setattr(headset, "_wait_connected", fake_wait)
+    monkeypatch.setattr(hs, "run", fake_run)
+    monkeypatch.setattr(hs, "_wait_connected", fake_wait)
     monkeypatch.setattr(hs.asyncio, "sleep", no_sleep)
     assert asyncio.run(hs.try_connect("AA")) is True
     assert ("bluetoothctl", "power", "on") in calls and ("stdin", "bearer AA le") in calls
