@@ -86,6 +86,25 @@ ASK_GATES = {"remind_set": r"напомн|таймер|будильник|раз
 UNASKED_RESULT = {"ok": False, "error": "Александр об этом не просил — сама такое не делай; если это нужно, предложи словами"}
 
 
+SECRET_ARGS = ("password", "пароль")
+
+
+def redact_calls(calls):
+    """Копия вызовов инструментов без паролей — для истории и журнала (аудит Fable, C23)."""
+    out = []
+    for c in calls:
+        c2 = json.loads(json.dumps(c))
+        try:
+            a = json.loads(c2["function"].get("arguments") or "{}")
+            if isinstance(a, dict) and any(k in a for k in SECRET_ARGS):
+                c2["function"]["arguments"] = json.dumps({k: ("***" if k in SECRET_ARGS else v) for k, v in a.items()},
+                                                         ensure_ascii=False)
+        except (ValueError, KeyError, TypeError):
+            pass
+        out.append(c2)
+    return out
+
+
 def asked_for(name: str, user_text: str) -> bool:
     gate = ASK_GATES.get(name)
     return not gate or re.search(gate, user_text.lower()) is not None
@@ -1392,7 +1411,7 @@ class Ksenia:
                 if getattr(self, "_last_reasoning", "").strip():
                     msg["reasoning_content"] = self._last_reasoning
                 if calls:
-                    msg["tool_calls"] = calls
+                    msg["tool_calls"] = redact_calls(calls)  # пароль Wi-Fi — не в историю (исполняются calls)
                 self.history.append(msg)
                 pending = list(calls)
                 if not calls or speaker.cancelled:
@@ -1417,7 +1436,8 @@ class Ksenia:
                         result = {**result, "already_said": f"ты уже сказала вслух «{self._acked['said']}» — не повторяй, скажи результат"}
                     any_error = any_error or not result.get("ok", False)
                     timings.setdefault("tools", []).append({"name": c["function"]["name"], "ok": bool(result.get("ok"))})
-                    log.info("Инструмент %s(%s) -> %s", c["function"]["name"], c["function"].get("arguments"),
+                    log.info("Инструмент %s(%s) -> %s", c["function"]["name"],
+                             redact_calls([c])[0]["function"].get("arguments"),
                              {k: (v[:200] + "…" if isinstance(v, str) and len(v) > 200 else v) for k, v in result.items()})
                     if result.get("speak_verbatim") and not speaker.cancelled:
                         # дословное чтение: текст идёт прямо в голос кусками по предложениям, без пересказа мозгом

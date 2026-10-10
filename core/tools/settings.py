@@ -121,10 +121,15 @@ async def _brightness(set_to=None, delta=None):
     return {"ok": rc == 0, "brightness": new, **({} if rc == 0 else {"error": out[-200:]})}
 
 
+def _fields(line: str):
+    """Строка nmcli -t: поля через «:», а «:» внутри имени сети экранировано как «\\:» (аудит Fable, C12)."""
+    return [p.replace("\\:", ":").replace("\\\\", "\\") for p in re.split(r"(?<!\\):", line)]
+
+
 async def _wifi_status():
     rc, out = await _run("nmcli", "-t", "-f", "ACTIVE,SSID,SIGNAL", "dev", "wifi")
     for ln in out.splitlines():
-        parts = ln.split(":")
+        parts = _fields(ln)
         if len(parts) >= 3 and parts[0] == "yes":
             return {"ok": True, "ssid": parts[1], "signal_percent": int(parts[2] or 0)}
     return {"ok": True, "ssid": None, "note": "Wi-Fi не подключён"}
@@ -135,6 +140,10 @@ async def _online(timeout=30):
         rc, out = await _run("nmcli", "networking", "connectivity", "check", timeout=10)
         if out.strip() == "full":
             return True
+        if out.strip() == "unknown":  # проверка связи выключена в NetworkManager — смотрим, подключён ли он
+            rc, st = await _run("nmcli", "-t", "-f", "STATE", "general", timeout=10)
+            if st.strip() in ("connected", "подключено"):
+                return True
         await asyncio.sleep(3)
     return False
 
@@ -142,10 +151,14 @@ async def _online(timeout=30):
 async def _wifi_connect(ssid, password):
     """Подключиться; нет интернета за 30 с — вернуться на прежнюю сеть (это единственная связь компьютера)."""
     before = (await _wifi_status()).get("ssid")
+    rc, names = await _run("nmcli", "-t", "-f", "NAME", "con", "show", timeout=10)
+    had_profile = ssid in [_fields(n)[0] for n in names.splitlines()]
     argv = ["nmcli", "dev", "wifi", "connect", ssid] + (["password", password] if password else [])
     rc, out = await _run(*argv, timeout=45)
     if rc == 0 and await _online():
         return {"ok": True, "connected": ssid}
+    if not had_profile:  # профиль с неверным паролем не оставляем — он мешал бы следующей попытке
+        await _run("nmcli", "con", "delete", "id", ssid, timeout=15)
     if before and before != ssid:
         await _run("nmcli", "con", "up", "id", before, timeout=45)
         await _online()
