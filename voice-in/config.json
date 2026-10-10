@@ -20,5 +20,6 @@
   "min_voiced_ms": 120,
   "barge_ms": 1500,
   "turn_dither": false,
-  "asr_device": "cuda"
+  "asr_device": "cuda",
+  "headset_name": "JBL Tour One"
 }

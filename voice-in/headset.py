@@ -32,18 +32,21 @@ async def run(*argv, input_text=None, timeout=20):
     return p.returncode, out.decode("utf-8", "replace")
 
 
-async def find_mac(config_mac="auto"):
-    """Адрес наушников: из настроек или первое сопряжённое устройство со службой Audio Sink."""
+async def find_mac(config_mac="auto", name_hint=""):
+    """Адрес наушников: из настроек, иначе сопряжённое устройство со службой Audio Sink — сначала то, чьё имя
+    содержит name_hint («JBL Tour One»): первое попавшееся могло оказаться колонкой (аудит Fable, D17)."""
     if config_mac and config_mac != "auto":
         return config_mac
     rc, out = await run("bluetoothctl", "devices", "Paired")
+    audio = []
     for line in out.splitlines():
-        parts = line.split()
+        parts = line.split(maxsplit=2)
         if len(parts) >= 2 and parts[0] == "Device":
-            rc, info = await run("bluetoothctl", "info", parts[1])
+            rc, info = await run("bluetoothctl", "info", parts[1], timeout=5)
             if "Audio Sink" in info or "Published Audio Capabil" in info:
-                return parts[1]
-    return None
+                audio.append((parts[1], parts[2] if len(parts) > 2 else ""))
+    hinted = [mac for mac, name in audio if name_hint and name_hint.lower() in name.lower()]
+    return (hinted or [mac for mac, _ in audio] or [None])[0]
 
 
 async def info(mac):
@@ -171,7 +174,7 @@ class Headset:
 
     async def ensure_mac(self):
         if not self.mac:
-            self.mac = await find_mac(self.config.get("headset_mac", "auto"))
+            self.mac = await find_mac(self.config.get("headset_mac", "auto"), self.config.get("headset_name", ""))
         return self.mac
 
     async def status(self):
