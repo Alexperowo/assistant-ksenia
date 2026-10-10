@@ -3124,7 +3124,8 @@ async def headset_auto_live():
         if not st.get("connected") and time.time() - last_try > CONFIG.get("headset_reconnect_s", 120):
             last_try = time.time()
             spawn(_quiet_reconnect())
-        if now_on and was is False and not conv.active() and CONFIG.get("live_mode", True) \
+        # и при запуске ядра, если наушники уже подключены (was ещё None), — не только при переходе
+        if now_on and was is not True and not conv.active() and CONFIG.get("live_mode", True) \
                 and CONFIG.get("live_doze", True):
             log.info("Наушники подключились — живой разговор: жду, когда позовут по имени")
             await start_talk(doze=True)
