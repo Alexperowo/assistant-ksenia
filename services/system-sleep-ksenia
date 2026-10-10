@@ -18,6 +18,8 @@ case "$1" in
   post)
     if [ -e /run/ksenia-slept ]; then
       rm -f /run/ksenia-slept
+      # частоты видеокарты после сна могли сброситься — шина снова без переключений (ksenia-gpu-pcie.service)
+      systemctl restart --no-block ksenia-gpu-pcie.service
       run_user start --no-block $UNITS  # wait-gpu.sh в каждой службе дождётся драйвера
     fi
     ;;

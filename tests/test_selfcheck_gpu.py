@@ -67,3 +67,27 @@ def test_hung_hearing_and_dead_gpus_are_problems(monkeypatch):
     r = asyncio.run(selfcheck.call("self_check", {}, None))
     assert any("слух" in p and "не отвечает" in p for p in r["problems"])
     assert any("видеокарты не отвечают" in p for p in r["problems"]) and "ksenia-voice-in" in r["restart"]
+
+
+def test_gpu_xid_in_kernel_log_is_a_problem(monkeypatch):
+    async def fake_run(*argv):
+        if argv[0] == "journalctl":
+            return 0, ("kernel: NVRM: Xid (PCI:0000:01:00): 79, pid=1, name=llama-server, GPU has fallen off the bus.\n"
+                       "kernel: NVRM: Xid (PCI:0000:01:00): 154, GPU recovery action changed")
+        if argv[:3] == ("systemctl", "--user", "is-active"):
+            return 0, "active"
+        if argv[:3] == ("systemctl", "--user", "show"):
+            return 0, "0"
+        if argv[0] == "curl":
+            return 0, '{"busy": false}'
+        if argv[0] == "nvidia-smi":
+            return 0, "0, 14000, 16000, 50"
+        return 0, "bluez_output.x"
+
+    async def fake_http(session, url, headers=None):
+        return 200
+
+    monkeypatch.setattr(selfcheck, "_run", fake_run)
+    monkeypatch.setattr(selfcheck, "_http", fake_http)
+    r = asyncio.run(selfcheck.call("self_check", {}, None))
+    assert any("Xid 79" in p and "отвалилась" in p for p in r["problems"])

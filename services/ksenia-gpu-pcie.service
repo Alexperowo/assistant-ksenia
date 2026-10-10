@@ -1,0 +1,20 @@
+# Системная служба (ставится в /etc/systemd/system): RTX 5060 Ti подключена через переходник M.2 (PCIe 4.0 x4) и
+# в простое сбрасывала шину до 2,5 ГТ/с, а под нагрузкой поднимала до 16 — 2026-10-10 при таком переключении
+# видеокарта «отвалилась от шины» (Xid 79). Закреплённые нижние частоты держат её в P1: шина всегда на PCIe 4.0
+# (проверено: 16 ГТ/с в простое, +7 Вт). Верхние частоты не трогаются — скорость работы та же.
+# Карта выбирается по адресу на шине, а не по номеру. Снять: nvidia-smi -i 00000000:01:00.0 -rgc -rmc
+[Unit]
+Description=RTX 5060 Ti: шина PCIe 4.0 без переключений (переходник M.2)
+After=nvidia-persistenced.service systemd-modules-load.service
+Wants=nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/nvidia-smi -i 00000000:01:00.0 -lgc 1200,3090
+ExecStart=/usr/bin/nvidia-smi -i 00000000:01:00.0 -lmc 14001,14001
+ExecStop=/usr/bin/nvidia-smi -i 00000000:01:00.0 -rgc
+ExecStop=/usr/bin/nvidia-smi -i 00000000:01:00.0 -rmc
+
+[Install]
+WantedBy=multi-user.target

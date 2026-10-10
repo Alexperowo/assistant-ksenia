@@ -6,6 +6,7 @@
 import asyncio
 import json
 import os
+import re
 import shutil
 
 import aiohttp
@@ -113,6 +114,13 @@ async def call(name, args, session):
                 problems.append(f"{name_} горячая: {temp}°")
             if int(used_mb) > int(total_mb) * 0.97:
                 problems.append(f"{name_}: память почти кончилась")
+    # ошибки видеокарты за эту загрузку (Xid): 79 — «отвалилась от шины» (2026-10-10, переходник M.2), остальные —
+    # сбои драйвера; Александр не видит журналов, поэтому — словами
+    rc, xid = await _run("journalctl", "-k", "-b", "--no-pager", "-g", "NVRM: Xid")
+    codes = sorted({m for m in re.findall(r"Xid \(PCI:[^)]*\): (\d+)", xid or "")} - {"154"})
+    if rc == 0 and codes:
+        what = "видеокарта отвалилась от шины — проверь переходник и питание" if "79" in codes else "сбой драйвера"
+        problems.append(f"видеокарта сообщала об ошибке (Xid {', '.join(codes)}): {what}")
     rc, mem = await _run("free", "-m")
     for ln in mem.splitlines():
         if ln.startswith(("Mem:", "Память:")):
