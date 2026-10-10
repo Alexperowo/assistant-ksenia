@@ -113,3 +113,26 @@ def test_sandbox_runs_only_read_only_tools():
     assert not core.sandbox_allows("files", json.dumps({"action": "trash"}))
     assert not core.sandbox_allows("vk_send", "{}")
     assert not core.sandbox_allows("brand_new_tool", "{}")  # новый инструмент по умолчанию не исполняется
+
+
+@pytest.mark.parametrize("text", ["Купить в 1 клик", "Оформить заказ", "Оплатить 1399 ₽", "Перевести 500 руб",
+                                  "Buy now", "Перейти к оплате", "Пополнить баланс", "Списать 200 ₽"])
+def test_money_buttons_are_always_refused(text):
+    assert confirm.is_financial(text)
+
+
+@pytest.mark.parametrize("text", ["Показать перевод", "Отправить", "Удалить", "Подписаться", "Перевести страницу",
+                                  "Добавить в корзину"])
+def test_ordinary_buttons_are_not_money(text):
+    assert not confirm.is_financial(text)
+
+
+def test_desktop_money_click_refused_without_question(monkeypatch):
+    from tools import desktop
+
+    async def helper(cmd, args):
+        return {"needs_confirm": True, "matched": "Купить подписку", "window": "Магазин"}
+
+    monkeypatch.setattr(desktop, "_helper", helper)
+    r = asyncio.run(desktop.call("ui_click", {"name": "кнопку"}, None))
+    assert r["ok"] is False and confirm.peek() is None
