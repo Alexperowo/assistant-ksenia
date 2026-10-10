@@ -144,7 +144,10 @@ def test_pin_guard_windows():
     g.check("b", "x")
     g.check("c", "x")
     g.check("d", "x")
-    assert g.check("e", "123456")[0] is False  # перебор с разных адресов — общий предел
+    # перебор с разных адресов — общий предел для тех, кто уже ошибался...
+    assert g.check("b", "123456")[0] is False
+    # ...а Александра с его устройства (без ошибок) он не запирает на час (проверка Fable, agent_e/h1_auth)
+    assert g.check("e", "123456")[0] is True
 
 
 def test_sessions_hashed_expire_and_revoke(tmp_path):
@@ -346,3 +349,17 @@ def test_help_page_links_to_https_app(env):
     known, unknown = asyncio.run(go())
     assert 'href="https://192.168.0.14:18140/"' in known
     assert "evil.example" not in unknown and "https://" in unknown
+
+
+def test_core_down_clears_stale_question_and_stop_ends_live():
+    """Ядро упало — его «Отправить?» на планшете убирается; «Стоп» заканчивает и поток живого разговора."""
+    gw = gateway.Gateway.__new__(gateway.Gateway)
+    events = []
+
+    class F:
+        def emit(self, e):
+            events.append(e)
+
+    gw.fanout, gw.core_up, gw.pending_confirm = F(), True, {"type": "confirm", "question": "Отправить?"}
+    gw.set_core(False)
+    assert gw.pending_confirm is None and {"type": "confirm_clear", "reason": "core_down"} in events

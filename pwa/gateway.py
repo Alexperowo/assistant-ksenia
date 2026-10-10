@@ -111,7 +111,9 @@ class PinGuard:
         self.fails[ip] = mine
         if len(mine) >= self.per_ip:
             return False, int(self.window - (now - mine[0])) + 1
-        if len(self.all_fails) >= self.global_limit:
+        if len(self.all_fails) >= self.global_limit and mine:
+            # общий предел — только для адресов, которые уже ошибались: иначе перебор с чужого устройства на час
+            # запирал и Александра с верным кодом (проверка Fable, agent_e/h1_auth). Новый адрес — одна попытка
             return False, int(self.global_window - (now - self.all_fails[0])) + 1
         if hmac.compare_digest(self.pin.encode(), "".join(str(supplied or "").split()).encode()):
             self.fails.pop(ip, None)
@@ -243,6 +245,8 @@ class Gateway:
             log.warning("Нет %s — запустите pwa/make-certs.sh", os.path.join(data, "hosts.json"))
         self.fanout = Fanout()
         self.pending_confirm = None  # вопрос «Отправить?» для вкладки, открытой уже после него
+        self.live_end = asyncio.Event()  # ядро закончило живой разговор с планшета
+        self.ws_tokens = {}  # открытые соединения планшета -> токен входа (после «Выйти» — закрыть)
         self.core_up = False
         self.session = None
         self.tasks = set()
@@ -302,6 +306,10 @@ class Gateway:
         if up != self.core_up:
             self.core_up = up
             self.fanout.emit({"type": "link", "core": up})
+            if not up and self.pending_confirm:
+                # ядро упало — его вопрос «Отправить?» больше никто не решит; кнопки «Да/Нет» убрать
+                self.pending_confirm = None
+                self.fanout.emit({"type": "confirm_clear", "reason": "core_down"})
 
     async def core_link(self):
         """Держать WebSocket к ядру и пересылать его события планшету; при разрыве — «нет связи с компьютером»."""
@@ -338,6 +346,8 @@ class Gateway:
             self.pending_confirm = None
         elif ev.get("type") == "hello":
             self.pending_confirm = ev.get("confirm")
+        elif ev.get("type") == "live_end":
+            self.live_end.set()
 
     async def core_post(self, path, body, timeout=30):
         async with self.session.post(self.cfg["core_url"] + path, json=body,
@@ -423,7 +433,12 @@ class Gateway:
         return web.json_response({"ok": True})
 
     async def h_logout(self, request):
-        self.sessions.revoke(request.cookies.get(COOKIE))
+        token = request.cookies.get(COOKIE)
+        self.sessions.revoke(token)
+        # уже открытые соединения этого входа — закрыть: иначе после «Выйти» они продолжали получать разговор
+        for ws, t in list(self.ws_tokens.items()):
+            if t and t == token and not ws.closed:
+                self.spawn(ws.close())
         resp = web.json_response({"ok": True})
         resp.del_cookie(COOKIE, path="/")
         return resp
@@ -431,6 +446,7 @@ class Gateway:
     async def h_ws(self, request):
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=64 * 1024)
         await ws.prepare(request)
+        self.ws_tokens[ws] = request.cookies.get(COOKIE)
         await ws.send_json({"type": "link", "core": self.core_up})
         if self.pending_confirm:
             await ws.send_json(self.pending_confirm)
@@ -442,6 +458,7 @@ class Gateway:
         finally:
             sender.cancel()
             self.fanout.queues.pop(ws, None)
+            self.ws_tokens.pop(ws, None)
         return ws
 
     async def h_live(self, request):
@@ -452,13 +469,37 @@ class Gateway:
         push = None
         try:
             push = await self.session.ws_connect(self.cfg["voice_in_url"].replace("http", "ws", 1) + "/push", heartbeat=20)
+            self.live_end.clear()
             self.spawn(self.core_post("/talk", {"source": "push"}, timeout=30))
             await ws.send_json({"type": "live", "on": True})
-            async for msg in ws:
-                if msg.type == aiohttp.WSMsgType.BINARY:
-                    await push.send_bytes(msg.data)
-                elif msg.type == aiohttp.WSMsgType.TEXT and msg.data == "stop":
-                    break
+            # слух закрыл /push (перезапуск) или ядро закончило разговор — раньше планшет об этом не узнавал и
+            # продолжал слать звук в пустоту (проверка Fable, agent_e/h3_live)
+            push_gone = asyncio.ensure_future(push.receive())
+            core_done = asyncio.ensure_future(self.live_end.wait())
+            why = None
+            try:
+                while True:
+                    tablet = asyncio.ensure_future(ws.receive())
+                    done, _ = await asyncio.wait({tablet, push_gone, core_done}, return_when=asyncio.FIRST_COMPLETED)
+                    if push_gone in done:
+                        tablet.cancel()
+                        why = "Слух перезапустился — включи живой разговор ещё раз."
+                        break
+                    if core_done in done:
+                        tablet.cancel()
+                        why = ""
+                        break
+                    msg = tablet.result()
+                    if msg.type == aiohttp.WSMsgType.BINARY:
+                        await push.send_bytes(msg.data)
+                    elif (msg.type == aiohttp.WSMsgType.TEXT and msg.data == "stop") or \
+                            msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        break
+            finally:
+                push_gone.cancel()
+                core_done.cancel()
+            if why is not None and not ws.closed:
+                await ws.send_json({"type": "live", "on": False, **({"error": why} if why else {})})
         except Exception as e:
             log.warning("живой разговор с планшета: %r", e)
             if not ws.closed:
@@ -518,6 +559,7 @@ class Gateway:
         return web.json_response({"ok": True})
 
     async def h_stop(self, request):
+        self.live_end.set()  # «Стоп» на планшете — и живой поток звука закончить, а не слать его в пустоту
         try:
             await self.core_post("/stop", {}, timeout=10)
         except Exception:

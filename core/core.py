@@ -1931,10 +1931,13 @@ async def handle_say(request):
         reply = await turn(text, timings, output="local", sandbox=True, sink=sink)
         return web.json_response({"reply": reply, "timings": timings})
     if output == "client":
-        # реплика с планшета: разговор через гарнитуру у ПК прерываем (иначе он слушал бы параллельно)
+        # реплика с планшета: разговор через гарнитуру у ПК прерываем (иначе он слушал бы параллельно); но живой
+        # разговор С ПЛАНШЕТА — нет: кнопка «Да» на вопросе «Отправить?» обрывала его (проверка Fable, agent_e/h3_live)
         ks.last_client_t = time.time()
-        async with talk_lock:
-            await stop_conversation()
+        tablet_live = conv.active() and getattr(conv, "_runner", None) is live and live.source == "push"
+        if not tablet_live:
+            async with talk_lock:
+                await stop_conversation()
     else:
         await ks.stop()
     await music.duck(True)
@@ -2776,6 +2779,10 @@ class LiveConversation(Conversation):
             if self.busy():
                 await self.cancel_turn()
             waiting_event.set()
+            if self.source == "push":
+                # живой разговор с планшета кончился здесь (тишина, «пока», слух упал) — шлюз перестаёт слать звук
+                # и гасит кнопку (проверка Fable, agent_e/h3_live: планшет продолжал стримить)
+                hub.emit({"type": "live_end"})
 
 
 conv = Conversation()
