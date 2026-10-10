@@ -840,16 +840,26 @@ class Speaker:
         self._q.put_nowait(chunk)
 
     async def _play_loop(self):
-        """Играть очередь звука в плеер (pacat сам держит темп реального времени через drain)."""
+        """Играть очередь звука в плеер. Вперёд отдаём не больше play_ahead_s (0,35 с — запас на занятый цикл событий): раньше в буферах asyncio и
+        канала лежало до 1,5 с звука, и после «стоп» Ксения договаривала полсекунды в полный голос, а затухание
+        было не слышно (аудит Fable, D9). То, что ещё в очереди, при «стоп» идёт на затухание."""
+        ahead = CONFIG.get("play_ahead_s", 0.35)
+        written_end = 0.0
         while True:
             chunk = await self._q.get()
             if chunk is None:
                 return
             if self.cancelled:
                 continue
+            while not self.cancelled and written_end - time.time() > ahead:
+                await asyncio.sleep(0.02)
+            if self.cancelled:
+                continue
+            written_end = max(written_end, time.time()) + len(chunk) / self.BYTES_PER_S
             try:
                 await self._ensure_player()
                 self.player.stdin.write(chunk)
+                self._sent_bytes = getattr(self, "_sent_bytes", 0) + len(chunk)
                 self._emit_level(chunk)
                 await self.player.stdin.drain()
             except (OSError, AttributeError) as e:  # pacat закрылся (наушники отключились)
@@ -919,18 +929,18 @@ class Speaker:
         # с ограничением: при усилении > 1 громкие места переворачивались в треск (аудит Fable, D19)
         return np.clip(x.astype(np.float32) * self.gain, -32768, 32767).astype(np.int16).tobytes()
 
-    async def _fade_out(self, chunk: bytes):
+    async def _fade_out(self, chunk: bytes, from_queue: bool = False):
         """Дописать в плеер начало следующего куска звука с затуханием до нуля и закрыть вход: pacat доиграет
         буфер (~60 мс) и затухание — человек «осекается», а не выключается посреди слога."""
         try:
             p = self.player
             ms = CONFIG.get("fade_ms", 120)
             if ms > 0 and p is not None and not isinstance(p, ClientPlayer) and p.returncode is None:
-                data = self._carry + chunk
+                data = chunk if from_queue else self._carry + chunk
                 n = min(len(data) // 2, 44100 * ms // 1000)
                 if n:
                     x = np.frombuffer(data[:n * 2], dtype=np.int16).astype(np.float32)
-                    x *= np.linspace(self.gain, 0.0, n, dtype=np.float32)
+                    x *= np.linspace(1.0 if from_queue else self.gain, 0.0, n, dtype=np.float32)
                     tail = x.astype(np.int16).tobytes()
                     p.stdin.write(tail)
                     self._account(len(tail))
@@ -945,10 +955,14 @@ class Speaker:
         self.cancelled = True
         p = self.player
         ms = CONFIG.get("fade_ms", 120)
-        queued = self._take_queued(44100 * ms // 1000 * 2)
+        queued = self._take_queued(44100 * ms // 1000 * 2 + 1)
+        if getattr(self, "_sent_bytes", 0) % 2:
+            queued = queued[1:]  # поток оборвался посреди сэмпла: без выравнивания затухание — треск (D9)
+        queued = queued[:len(queued) - len(queued) % 2]
         if queued and ms > 0 and p is not None and not isinstance(p, ClientPlayer) and p.returncode is None:
-            # следующий звук уже синтезирован и лежит в очереди: из него — затухание, остальное выбросить
-            await self._fade_out(queued)
+            # следующий звук уже синтезирован и лежит в очереди: из него — затухание, остальное выбросить;
+            # громкость в нём уже применена — второй раз не умножаем (ночью звук ступенькой проседал)
+            await self._fade_out(queued, from_queue=True)
             try:
                 await asyncio.wait_for(p.wait(), timeout=0.5)
             except asyncio.TimeoutError:

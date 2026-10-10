@@ -210,3 +210,24 @@ def test_broken_voice_falls_back_and_restarts_service(players, monkeypatch, _no_
     assert bytes(made[0].stdin.data) == b"\x09\x00\x01\x00"
     assert _no_real_services == ["ksenia-voice-out"]
     assert sp.failed is False
+
+
+def test_stop_is_quick_audio_is_not_written_far_ahead(players):
+    """2 с звука в очереди, «стоп» через 0,3 с: в плеер ушло не больше ~0,75 с (было — до 1,5 с вперёд), и после
+    «стоп» дописано только затухание (не больше fade_ms)."""
+    made, _ = players
+    sp = core.Speaker(FakeSession())
+    chunk = b"\x10\x00" * 4096  # ~93 мс
+    total = core.Speaker.BYTES_PER_S
+
+    async def go():
+        for _ in range(22):  # ~2 с
+            sp._send(chunk)
+        await asyncio.sleep(0.3)
+        before = len(made[0].stdin.data)
+        await sp.cancel()
+        return before, len(made[0].stdin.data)
+
+    before, after = asyncio.run(go())
+    assert before / total < 0.3 + core.CONFIG.get("play_ahead_s", 0.35) + 0.1
+    assert (after - before) / total <= core.CONFIG.get("fade_ms", 120) / 1000 + 0.01
