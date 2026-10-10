@@ -93,7 +93,7 @@ def test_failure_still_delivers_one_finding(env, monkeypatch):
         return research.findings.get_nowait()
 
     f = asyncio.run(go())
-    assert "сломался" in f["answer"] and research._running == {}
+    assert "не получился" in f["answer"] and "bing" not in f["answer"] and research._running == {}
 
 
 def test_redirect_into_home_network_is_not_read(env, monkeypatch):

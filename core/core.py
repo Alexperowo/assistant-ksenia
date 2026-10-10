@@ -129,7 +129,8 @@ async def run_tool(name, arguments, session):
         return {"ok": False, "error": "инструмент не ответил вовремя"}
     except Exception as e:
         log.exception("инструмент %s", name)
-        return {"ok": False, "error": f"сбой инструмента: {e!r}"[:300]}
+        # подробности — в журнал; мозгу — простыми словами, иначе он зачитал бы «ClientConnectorError(…)» (аудит Fable, C15)
+        return {"ok": False, "error": "не получилось — внутри что-то сломалось; скажи об этом просто, без подробностей"}
 
 
 CONFIG = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))

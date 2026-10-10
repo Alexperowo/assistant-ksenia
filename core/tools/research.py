@@ -106,7 +106,9 @@ async def _run(question, news, session, brain_url, brain_key, keywords=None, slo
         log.info("research: готово за %.1f с — %s", time.time() - t0, answer[:150])
     except Exception as e:
         log.exception("research: сбой")
-        await findings.put({"question": question, "answer": f"Фоновый поиск сломался: {e!r}"[:200], "sources": []})
+        log.warning("фоновый поиск: %r", e)
+        await findings.put({"question": question, "answer": "Фоновый поиск не получился — свежее найти не удалось.",
+                            "sources": []})
     finally:
         _running.pop(question, None)
 

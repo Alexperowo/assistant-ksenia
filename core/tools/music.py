@@ -532,7 +532,7 @@ async def call(name: str, args: dict, session) -> dict:
                 return await _play_book(book_id, saved["chapter"], max(0.0, saved["time"] - 5))
             return await _play_book(book_id)
         except Exception as e:
-            return {"ok": False, "error": f"Яндекс Музыка не ответила: {e}"}
+            return {"ok": False, "error": "Яндекс Музыка сейчас не отвечает"}
     if name == "youtube":
         return await _youtube(args.get("query", ""), bool(args.get("video")))
     if name in ("music_song", "music_wave"):
@@ -544,7 +544,7 @@ async def call(name: str, args: dict, session) -> dict:
             else:
                 tracks, label = await asyncio.to_thread(_ym_collect, "wave", None, bool(args.get("liked")))
         except Exception as e:
-            return {"ok": False, "error": f"Яндекс Музыка не ответила: {e}"}
+            return {"ok": False, "error": "Яндекс Музыка сейчас не отвечает"}
         if not tracks:
             return {"ok": False, "error": f"ничего не нашла в Яндекс Музыке по запросу «{args.get('query', '')}»"}
         await _play_tracks(tracks, label)

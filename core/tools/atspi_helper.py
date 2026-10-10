@@ -234,4 +234,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:  # помощник никогда не падает молча
-        print(json.dumps({"ok": False, "error": f"доступность: {e!r}"[:300]}, ensure_ascii=False))
+        print(json.dumps({"ok": False, "error": "не получилось разобрать окно", "detail": repr(e)[:300]},
+                         ensure_ascii=False))

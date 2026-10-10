@@ -39,7 +39,10 @@ FONT_KEYS = [("General", "font"), ("General", "menuFont"), ("General", "toolBarF
 
 
 async def _run(*argv, timeout=15):
-    p = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    try:
+        p = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    except FileNotFoundError:
+        return 127, f"нет программы {argv[0]}"
     try:
         out, _ = await asyncio.wait_for(p.communicate(), timeout)
     except asyncio.TimeoutError:
