@@ -2998,7 +2998,27 @@ async def resume_watch():
                 log.exception("проверка после сна")
 
 
+async def units_settled(timeout_s: float = 150) -> None:
+    """Подождать, пока службы перестанут запускаться (после сна их поднимает system-sleep/ksenia) и мозг
+    загрузится: иначе проверка приняла бы запуск за поломку и перезапустила бы их ещё раз."""
+    deadline = time.time() + timeout_s
+    units = ["ksenia-voice-in", "ksenia-voice-out", "ksenia-judge", "ksenia-brain"]
+    while time.time() < deadline:
+        out = await asyncio.to_thread(lambda: subprocess.run(["systemctl", "--user", "is-active", *units],
+                                                             capture_output=True, text=True, timeout=10).stdout)
+        brain = 0
+        try:
+            async with ks.session.get(CONFIG["brain_url"] + "/health", timeout=aiohttp.ClientTimeout(total=3)) as r:
+                brain = r.status
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            pass
+        if "activating" not in out and (brain == 200 or "inactive" in out or "failed" in out):
+            return
+        await asyncio.sleep(5)
+
+
 async def after_resume_check():
+    await units_settled()
     rc = await asyncio.to_thread(lambda: subprocess.run(["nvidia-smi", "-L"], capture_output=True, timeout=15).returncode
                                  if shutil.which("nvidia-smi") else 0)
     if rc != 0:
@@ -3018,7 +3038,7 @@ async def after_resume_check():
     res = await selfcheck.call("self_check", {}, ks.session)
     fix = list(res.get("restart") or [])
     fix += [u for u, what in selfcheck.SERVICES.items() if u != "ksenia-core"
-            and any(p.startswith(what + " (") for p in res.get("problems") or [])]
+            and any(p.startswith(f"{what} ({u}) не работает") for p in res.get("problems") or [])]
     for u in dict.fromkeys(fix):
         restart_unit(u, "После сна служба не в порядке", every_s=0)
     if fix or not ok:

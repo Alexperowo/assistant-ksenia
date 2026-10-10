@@ -1,0 +1,25 @@
+#!/bin/sh
+# Перед сном компьютера Ксения отпускает видеокарты, после пробуждения — поднимается снова.
+# Устанавливается в /usr/lib/systemd/system-sleep/ksenia (системный, от root).
+# Почему: 2026-10-09 при пробуждении драйвер NVIDIA споткнулся о процесс, державший RTX 2080 Ti
+# («Assertion failed: !PDB_PROP_GPU_IN_PM_CODEPATH»), слух так и не поднялся. Кроме того, драйвер перед
+# сном сохраняет занятую видеопамять (~25 ГБ) в /var — а свободного места на диске меньше.
+# Ядро (ksenia-core) не останавливается: после пробуждения оно само проверяет себя (resume_watch).
+USER_NAME=user
+UNITS="ksenia-voice-in ksenia-voice-out ksenia-judge ksenia-brain"
+run_user() { systemctl --user -M "$USER_NAME@" "$@"; }
+case "$1" in
+  pre)
+    # только если Ксения сейчас работает (в режиме Nexus её службы и так выключены)
+    if run_user is-active --quiet ksenia-core; then
+      run_user stop $UNITS && touch /run/ksenia-slept
+    fi
+    ;;
+  post)
+    if [ -e /run/ksenia-slept ]; then
+      rm -f /run/ksenia-slept
+      run_user start --no-block $UNITS  # wait-gpu.sh в каждой службе дождётся драйвера
+    fi
+    ;;
+esac
+exit 0

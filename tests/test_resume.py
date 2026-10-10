@@ -24,6 +24,11 @@ def env(monkeypatch, _no_real_services):
     monkeypatch.setattr(core, "say_notice", notice)
     monkeypatch.setattr(core.daily, "notify", lambda t: None)
     monkeypatch.setattr(core.asyncio, "sleep", no_sleep)
+
+    async def settled(timeout_s=150):
+        pass
+
+    monkeypatch.setattr(core, "units_settled", settled)
     return said, _no_real_services
 
 
