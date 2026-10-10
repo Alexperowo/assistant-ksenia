@@ -86,6 +86,43 @@ ASK_GATES = {"remind_set": r"напомн|таймер|будильник|раз
 UNASKED_RESULT = {"ok": False, "error": "Александр об этом не просил — сама такое не делай; если это нужно, предложи словами"}
 
 
+# Инструменты, которые приносят чужой текст (страницы, экран, письма, файлы): в нём могут быть «команды».
+UNTRUSTED_TOOLS = {"web_open", "web_outline", "web_search", "screen_read", "screen_describe", "window_read",
+                   "clipboard_read", "read_more", "vk_read", "vk_unread", "ui_elements", "cursor_look", "files"}
+# После них в том же ходе не выполняются: ввод текста, напоминания, настройки, перенос и удаление файлов.
+TAINT_BLOCKED = {"dictate", "ui_type", "web_type", "remind_set", "remind_cancel", "setting", "memory_remember",
+                 "memory_forget", "watch_rule", "voice_mode", "voice_enroll", "system"}
+
+
+def untrusted_call(name: str, arguments: str) -> bool:
+    if name == "files":  # имена файлов — не чужой текст, а содержимое документа — да
+        try:
+            return json.loads(arguments or "{}").get("action") == "read"
+        except ValueError:
+            return False
+    return name in UNTRUSTED_TOOLS
+
+
+def tainted_blocks(name: str, arguments: str) -> bool:
+    if name in TAINT_BLOCKED:
+        try:
+            a = json.loads(arguments or "{}")
+        except ValueError:
+            return True
+        # только чтение — можно: «какая громкость», «статус наушников», «что тормозит»
+        if name == "setting" and str(a.get("action", "")).endswith(("_get", "_status", "_list")):
+            return False
+        if name == "system" and a.get("command") in getattr(system, "INFO", {}):
+            return False
+        return True
+    if name == "files":
+        try:
+            return json.loads(arguments or "{}").get("action") in ("move", "trash")
+        except ValueError:
+            return True
+    return False
+
+
 SECRET_ARGS = ("password", "пароль")
 
 
@@ -1497,6 +1534,7 @@ class Ksenia:
         filler = asyncio.create_task(self._filler(speaker, queue)) if not internal else None
         self._stream_cut = False
         self._acked = None  # «Включаю» уже сказано в этом ходе
+        self._tainted = None  # каким инструментом в этом ходе прочитан чужой текст (страница, экран, письмо)
         spoken_all = []
         pending = []  # вызовы инструментов, на которые ещё нет ответа в истории
         budget = self.budget_for(user_text)  # динамический бюджет: болтовня 0, задача — больше
@@ -1529,6 +1567,11 @@ class Ksenia:
                         result = {"ok": False, "error": "говорит не Александр — действия выполняет только он"}
                     elif not asked_for(c["function"]["name"], self.recent_user_text()):
                         result = UNASKED_RESULT
+                    elif self._tainted and tainted_blocks(c["function"]["name"], c["function"].get("arguments") or "{}"):
+                        # после чужого текста в этом же ходе — ввод, напоминания, настройки только по прямой просьбе:
+                        # «впиши номер в форму» со страницы не должно исполниться (аудит Fable, B21)
+                        result = {"ok": False, "error": f"в этом ходе я прочитала чужой текст ({self._tainted}) — такое "
+                                                        f"действие сейчас не делаю; спроси Александра, сделать ли это"}
                     elif getattr(self, "_sandbox", False) and \
                             not sandbox_allows(c["function"]["name"], c["function"].get("arguments") or "{}"):
                         # автопроверка: фоновый поиск, напоминание или подтверждение потом пришли бы в настоящий разговор
@@ -1537,6 +1580,8 @@ class Ksenia:
                         result = await run_tool(c["function"]["name"], c["function"].get("arguments") or "{}", self.session)
                     if self._acked and self._acked["tool"] == c["function"]["name"] and isinstance(result, dict):
                         result = {**result, "already_said": f"ты уже сказала вслух «{self._acked['said']}» — не повторяй, скажи результат"}
+                    if result.get("ok") and untrusted_call(c["function"]["name"], c["function"].get("arguments") or "{}"):
+                        self._tainted = c["function"]["name"]
                     any_error = any_error or not result.get("ok", False)
                     timings.setdefault("tools", []).append({"name": c["function"]["name"], "ok": bool(result.get("ok"))})
                     log.info("Инструмент %s(%s) -> %s", c["function"]["name"],
