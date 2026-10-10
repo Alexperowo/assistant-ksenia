@@ -91,7 +91,12 @@ def test_step_collects_streamed_tool_calls(ks):
     assert calls[0]["function"] == {"name": "music_play", "arguments": "{\"query\": \"jazz\"}"}
     assert calls[1]["function"]["name"] == "music_status"
     body = reqs[0][1]["json"]
-    assert body["thinking_budget_tokens"] == 256 and body["stream"] is True
+    # в разговоре начало запроса неизменно: без размышлений, иначе шаблон меняет начало подсказки (пересчёт ~15 с)
+    if core.CONFIG.get("brain_reasoning_levels") and core.CONFIG.get("stable_prefix", True):
+        assert body["chat_template_kwargs"] == {"enable_thinking": False} and "reasoning_effort" not in body
+    else:
+        assert body["thinking_budget_tokens"] == 256
+    assert body["stream"] is True
     # рассуждения входят в max_tokens: ответу должно хватить места после бюджета
     assert body["max_tokens"] == core.CONFIG.get("max_tokens", 400) + 256
     assert body["messages"][0]["role"] == "system"

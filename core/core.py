@@ -976,6 +976,7 @@ ACTION_PATTERNS = [r"\bвключ", r"\bвыключ", r"\bпостав", r"\bп
                    r"\bновост", r"\bнайди", r"\bпоищи", r"\bузнай", r"\bвконтакт", r"\bвк\b", r"\bнаписал"]
 
 HISTORY_FILE = os.path.join(ROOT, "..", "data", "history.json")
+STABLE_TEMPLATE = {"chat_template_kwargs": {"enable_thinking": False}}  # как в обычном ходе без размышлений
 
 
 def prefix_file() -> str:
@@ -1205,18 +1206,8 @@ class Ksenia:
     def _window(self):
         """Окно истории для мозга. Гибридный Nex пересчитывает всё при любом изменении начала,
         поэтому окно не скользит каждую реплику, а изредка прыгает вперёд большим шагом."""
-        max_n = CONFIG.get("history_max", 120)
-        max_chars = CONFIG.get("history_max_chars", 40000)  # ~10–12 тыс. токенов: пересчёт после промаха — секунды
-        size = sum(len(str(m.get("content") or "")) for m in self.history[self.window_start:])
-        if len(self.history) - self.window_start > max_n or size > max_chars:
-            # прыжок: оставляем свежую половину по числу сообщений и по объёму
-            start, acc = len(self.history), 0
-            while start > self.window_start and len(self.history) - start < max_n // 2 and acc < max_chars // 2:
-                start -= 1
-                acc += len(str(self.history[start].get("content") or ""))
-            self.window_start = start
-            if not getattr(self, "_sandbox", False):
-                self.build_system()  # начало запроса и так меняется — заодно свежие память и дневник
+        if self.window_fill() > 1:
+            self._jump()
         # начало окна — на реплике пользователя (нельзя начинать с ответа инструмента)
         start = self.window_start
         while start < len(self.history) and self.history[start]["role"] != "user":
@@ -1227,6 +1218,51 @@ class Ksenia:
             start = users[-1] if users else self.window_start
         self.window_start = start
         return self.history[self.window_start:]
+
+    def window_fill(self) -> float:
+        """Насколько заполнено окно истории (1 — пора прыгать)."""
+        max_n = CONFIG.get("history_max", 160)
+        max_chars = CONFIG.get("history_max_chars", 60000)  # ~18 тыс. токенов
+        size = sum(len(str(m.get("content") or "")) for m in self.history[self.window_start:])
+        return max((len(self.history) - self.window_start) / max_n, size / max_chars)
+
+    def _jump(self):
+        """Прыжок окна: оставляем свежую половину по числу сообщений и по объёму. Это полный пересчёт у мозга —
+        поэтому он делается заранее, в тишине (rewindow_when_idle), а не посреди разговора."""
+        max_n = CONFIG.get("history_max", 160)
+        max_chars = CONFIG.get("history_max_chars", 60000)
+        start, acc = len(self.history), 0
+        while start > self.window_start and len(self.history) - start < max_n // 2 and acc < max_chars // 2:
+            start -= 1
+            acc += len(str(self.history[start].get("content") or ""))
+        self.window_start = start
+        if not getattr(self, "_sandbox", False):
+            self.build_system()  # начало запроса и так меняется — заодно свежие память и дневник
+
+    async def prewarm(self) -> bool:
+        """Посчитать в мозге начало следующего запроса (подсказка + окно до последней реплики Александра), пока
+        тихо: следующий настоящий ход обработает только новое (замер: 7 новых токенов вместо 2642)."""
+        win = self._window()
+        users = [i for i, m in enumerate(win) if m.get("role") == "user"]
+        if not users:
+            return False
+        msgs = [{"role": "system", "content": self.system}] + win[:users[-1] + 1]
+        hdr = {"Authorization": "Bearer " + BRAIN_KEY}
+        try:
+            async with self.session.post(CONFIG["brain_url"] + "/apply-template", headers=hdr,
+                                         json={"messages": msgs, "tools": TOOL_SCHEMAS, **STABLE_TEMPLATE},
+                                         timeout=aiohttp.ClientTimeout(total=20)) as r:
+                prompt = (await r.json(content_type=None))["prompt"]
+            async with self.session.post(CONFIG["brain_url"] + "/completion", headers=hdr,
+                                         json={"prompt": prompt, "n_predict": 0, "cache_prompt": True,
+                                               "id_slot": CONFIG.get("brain_slot", 0)},
+                                         timeout=aiohttp.ClientTimeout(total=180)) as r:
+                done = await r.json(content_type=None)
+            log.info("Мозг прогрет заранее: %s токенов", (done.get("timings") or {}).get("prompt_n"))
+            return True
+        except Exception as e:
+            log.warning("прогрев мозга не удался: %r", e)
+            return False
 
     def budget_for(self, text: str) -> int:
         """Динамический бюджет: болтовня — 0; реплика похожа на просьбу что-то сделать — немного подумать,
@@ -1456,6 +1492,12 @@ class Ksenia:
         # Nex этот выключатель игнорирует, но слушается бюджета — поэтому шлём оба.
         # Бюджет > 0 — уровень рассуждения как подсказка шаблону (low/medium/xhigh; «high» шаблон Bonsai не принимает),
         # а жёсткий потолок по-прежнему thinking_budget_tokens (одни уровни размышления не укорачивают).
+        if CONFIG.get("brain_reasoning_levels", False) and budget > 0 and not getattr(self, "_sandbox", False) \
+                and CONFIG.get("stable_prefix", True):
+            # «подумать» включает в шаблоне строку «Reasoning effort is set to …» в САМОМ НАЧАЛЕ подсказки: гибридный
+            # мозг пересчитывал из-за неё весь разговор (~15 с), и ещё раз — на следующей обычной реплике.
+            # В разговоре начало запроса всегда одно и то же, поэтому без размышлений (замер 2026-10-10)
+            budget = 0
         if CONFIG.get("brain_reasoning_levels", False):
             if budget <= 0:
                 body["chat_template_kwargs"] = {"enable_thinking": False}
@@ -3025,6 +3067,51 @@ async def startup_check():
         log.exception("не смогла сказать о проблеме при запуске")
 
 
+async def brain_slot_cold() -> bool:
+    """В ячейке разговора мозга пусто (мозг перезапускался) — /slots без n_prompt_tokens у ячейки 0."""
+    try:
+        async with ks.session.get(CONFIG["brain_url"] + "/slots", headers={"Authorization": "Bearer " + BRAIN_KEY},
+                                  timeout=aiohttp.ClientTimeout(total=5)) as r:
+            if r.status != 200:
+                return False
+            slots = await r.json(content_type=None)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        return False
+    slot = next((x for x in slots if isinstance(x, dict) and x.get("id") == CONFIG.get("brain_slot", 0)), None)
+    return bool(slot) and not slot.get("is_processing") and not slot.get("n_prompt_tokens")
+
+
+async def rewindow_when_idle():
+    """Окно истории почти полное, а разговор затих — прыгнуть сейчас и прогреть мозг, чтобы пересчёт (~15 с)
+    случился в тишине, а не посреди следующей реплики (аудит Fable, A1-8)."""
+    while True:
+        await asyncio.sleep(30)
+        try:
+            idle = time.time() - getattr(ks, "last_turn_t", 0.0)
+            if conv.active() or ks.lock.locked():
+                continue
+            if idle > 20 and ks.history and await brain_slot_cold():
+                # мозг перезапускался (после сна, сбоя, режима Nexus) и разговор забыл — первая реплика ждала бы ~15 с
+                async with ks.lock:
+                    if await ks.prewarm():
+                        ks._warm_at = len(ks.history)
+                continue
+            if idle < CONFIG.get("rewindow_idle_s", 180):
+                continue
+            fill = ks.window_fill()
+            if fill < CONFIG.get("rewindow_fill", 0.6) or getattr(ks, "_warm_at", None) == len(ks.history):
+                continue
+            async with ks.lock:
+                ks._jump()
+                if await ks.prewarm():
+                    ks._warm_at = len(ks.history)
+                    ks._save_prefix()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("прыжок окна в тишине")
+
+
 def slept_s(prev_wall: float, prev_mono: float, wall: float, mono: float) -> float:
     """Сколько компьютер спал между двумя замерами: во сне системные часы идут, а монотонные стоят."""
     return (wall - prev_wall) - (mono - prev_mono)
@@ -3111,7 +3198,8 @@ async def on_start(app):
     BACKGROUND.extend([asyncio.create_task(findings_loop()), asyncio.create_task(reminders_loop()),
                        asyncio.create_task(music.book_autosave_loop()), asyncio.create_task(warmup()),
                        asyncio.create_task(startup_check()), asyncio.create_task(diary_loop()),
-                       asyncio.create_task(watch_loop()), asyncio.create_task(resume_watch())])
+                       asyncio.create_task(watch_loop()), asyncio.create_task(resume_watch()),
+                       asyncio.create_task(rewindow_when_idle())])
     if CONFIG.get("headset_buttons", True):
         BACKGROUND.append(asyncio.create_task(buttons.run()))
 
