@@ -113,3 +113,11 @@ def test_question_names_typed_text(page):
     call("web_type", {"field": "Ответ", "text": "Согласен с автором"})
     r = call("web_click", {"text": "Опубликовать"})
     assert r["prepared"] and "Согласен с автором" in r["speak_verbatim"]
+
+
+def test_confirmed_click_refuses_if_page_rerendered_other_button(page):
+    pg = page("https://photos.example/1", [{"role": "button", "text": "Удалить", "label": "Удалить фото"}])
+    assert call("web_click", {"text": "Удалить"})["prepared"]
+    pg.elements = [{"role": "button", "text": "Удалить", "label": "Удалить страницу навсегда"}]
+    res = asyncio.run(confirm.take()["run"]())
+    assert res["ok"] is False and pg.log == []

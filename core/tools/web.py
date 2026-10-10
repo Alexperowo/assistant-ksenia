@@ -158,7 +158,7 @@ def _host(url):
     return urllib.parse.urlsplit(url or "").hostname or "странице"
 
 
-async def _click(pg, text, allow_risky=False, expect_url=None):
+async def _click(pg, text, allow_risky=False, expect_url=None, expect_label=None):
     """Нажать по тексту. Рискованность проверяется по НАЙДЕННОМУ элементу, а не только по словам модели:
     «ок» могло совпасть с кнопкой «Окончательно удалить». После «да» нажатие — только на той же странице."""
     if expect_url and pg.url != expect_url:
@@ -167,6 +167,9 @@ async def _click(pg, text, allow_risky=False, expect_url=None):
     if el is None:
         return {"ok": False, "error": f"не нашла на странице «{text}»"}
     label = await _label(el, text)
+    if expect_label is not None and label != expect_label:
+        # страница перерисовалась: Александр согласился на «Удалить фото», а нашлось «Удалить страницу навсегда»
+        return {"ok": False, "error": f"на странице теперь «{label}», а не «{expect_label}» — нажимать не стала"}
     if confirm.is_financial(text, label) or (FINANCE_URL.search(pg.url or "") and
                                              re.search(r"продолж|далее|подтверд|continue|next|confirm", label, re.I)):
         return dict(confirm.MONEY_REFUSAL)  # на странице оплаты и «Продолжить» — шаг к оплате
@@ -267,7 +270,7 @@ async def call(name, args, session):
             # что уйдёт вместе с нажатием: текст, вписанный перед этим на той же странице, — в вопрос целиком
             before = f" Перед этим я вписала: «{typed['text']}»." if typed and typed["url"] == url else ""
             return confirm.ask(f"нажать «{label}» на {_host(url)}",
-                               lambda: _click(pg, text, allow_risky=True, expect_url=url),
+                               lambda: _click(pg, text, allow_risky=True, expect_url=url, expect_label=label),
                                question=f"Нажать «{label}» на сайте {_host(url)}?{before}")
         return res
     if name == "web_type":
