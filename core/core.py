@@ -431,10 +431,16 @@ def clean_for_speech(text: str, verbatim: bool = False) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+ABBREV_END = re.compile(r"(?<![А-Яа-яЁё])(?:рт|ст|г|гг|н|э|т|е|д|др|пр|см|тыс|млн|млрд|руб|коп|ул|д|им|т\.е|т\.к|т\.д|т\.п|"
+                        r"мин|сек|ок|кв|рис|стр|гл|т\.н)\.$", re.I)
+
+
 def split_first_sentence(buf: str, min_len: int = 12):
     """Вернуть (первая_фраза, остаток) если в буфере есть законченная фраза."""
     for m in re.finditer(r"[.!?…]+[\"»)]?(\s|$)|\n", buf):
         end = m.end()
+        if m.group(0).startswith(".") and ABBREV_END.search(buf[:m.start() + 1]):
+            continue  # «745 мм рт. ст.», «в 1945 г. закончилась» — точка сокращения, не конец фразы (аудит Fable, A1-22)
         if len(buf[:end].strip()) >= min_len and (m.group(0).strip() == "" or end < len(buf)):
             return buf[:end].strip(), buf[end:]
     return None, buf
@@ -2528,6 +2534,15 @@ class LiveConversation(Conversation):
                        output=self.output)
             self.turns += 1
             await deliver_waiting()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # раньше задача умирала молча — полная тишина в живом режиме (аудит Fable, A1-14)
+            log.exception("Живой режим: ход упал")
+            try:
+                await say_notice(CONV_CRASH.replace("Нажми ещё раз", "Скажи ещё раз"), output=self.output)
+            except Exception:
+                pass
         finally:
             await music.duck(False)
 

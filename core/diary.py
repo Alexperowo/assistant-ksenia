@@ -41,6 +41,11 @@ def load():
     return {"entries": [], "upto": 0}
 
 
+def _fp(m) -> str:
+    import hashlib
+    return hashlib.sha1(json.dumps([m.get("role"), str(m.get("content"))], ensure_ascii=False).encode()).hexdigest()[:16]
+
+
 def save(d):
     os.makedirs(os.path.dirname(FILE), exist_ok=True)
     tmp = FILE + ".tmp"
@@ -55,10 +60,8 @@ def _when(date_s, today=None):
         d = dt.date.fromisoformat(date_s)
     except ValueError:
         return date_s
-    if d == today:
-        return "сегодня"
-    if d == today - dt.timedelta(days=1):
-        return "вчера"
+    # всегда числом: подсказка с дневником живёт в кэше мозга долго, и «сегодня» после полуночи стало бы неправдой
+    # (аудит Fable, A1-24); какой сегодня день, мозг знает из служебной пометки
     return f"{d.day} {MONTHS[d.month - 1]}"
 
 
@@ -114,13 +117,20 @@ async def summarize(session, history, brain_url, key, slot=1, min_turns=3):
     """Записать в дневник новый кусок разговора (если в нём хотя бы min_turns реплик Александра)."""
     d = load()
     upto = d.get("upto", 0)
+    if d.get("last_fp"):
+        # место — по отпечатку последней записанной реплики, а не по номеру: история на диске обрезается до 200
+        # сообщений, и после перезапуска номер указывал не туда — куски разговора терялись (аудит Fable, A1-24)
+        hit = next((i + 1 for i in range(len(history) - 1, -1, -1) if _fp(history[i]) == d["last_fp"]), None)
+        if hit is not None:
+            upto = hit
     if upto > len(history):  # историю очистили — начать с текущего конца
-        d["upto"] = len(history)
+        d["upto"], d["last_fp"] = len(history), _fp(history[-1]) if history else None
         save(d)
         return None
     if user_turns(history, upto) < min_turns:
         return None
-    text = dialogue_text(history, upto)
+    end = len(history)  # до запроса: реплики, пришедшие, пока мозг пишет, — в следующую запись, а не мимо
+    text = dialogue_text(history[:end], upto)
     body = {"messages": [{"role": "system", "content": PROMPT}, {"role": "user", "content": text}],
             "max_tokens": 250, "temperature": 0.3, "stream": False, "id_slot": slot,
             "chat_template_kwargs": {"enable_thinking": False}}
@@ -128,9 +138,13 @@ async def summarize(session, history, brain_url, key, slot=1, min_turns=3):
                             headers={"Authorization": "Bearer " + key} if key else {},
                             timeout=aiohttp.ClientTimeout(total=90)) as r:
         data = await r.json(content_type=None)
-    answer = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        status = r.status
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if status != 200 or not choices:
+        return None  # мозг ответил ошибкой («Loading model») — разговор не считаем записанным
+    answer = (choices[0].get("message") or {}).get("content") or ""
     entry = parse(answer)
-    d["upto"] = len(history)
+    d["upto"], d["last_fp"] = end, _fp(history[end - 1]) if end else None
     if entry and entry["summary"]:
         d["entries"] = (d["entries"] + [{"date": dt.date.today().isoformat(), **entry}])[-KEEP:]
         changed["flag"] = True

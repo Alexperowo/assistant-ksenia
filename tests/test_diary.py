@@ -38,7 +38,7 @@ def test_summarize_writes_entry_and_prompt_block():
     assert e["followup"] == "как прошёл приём?" and diary.changed["flag"]
     assert diary.load()["upto"] == len(H)
     block = diary.prompt_block(today=dt.date.today())
-    assert "сегодня: Александр завтра едет к врачу" in block and "можно спросить" in block
+    assert ": Александр завтра едет к врачу" in block and "можно спросить" in block
     # тот же кусок второй раз не записывается: реплик после upto нет
     assert asyncio.run(diary.summarize(s, H, "http://brain", "k")) is None
 
@@ -53,5 +53,45 @@ def test_short_or_cleared_history_is_skipped():
 
 def test_when_words():
     today = dt.date(2026, 10, 9)
-    assert diary._when("2026-10-09", today) == "сегодня" and diary._when("2026-10-08", today) == "вчера"
+    # числом всегда: подсказка живёт в кэше мозга, «сегодня» после полуночи стало бы неправдой
+    assert diary._when("2026-10-09", today) == "9 октября" and diary._when("2026-10-08", today) == "8 октября"
     assert diary._when("2026-10-01", today) == "1 октября"
+
+
+def test_position_survives_history_trim_and_brain_error(monkeypatch, tmp_path):
+    """После перезапуска история короче (на диске — последние 200), но место дневника находится по отпечатку;
+    ошибка мозга не помечает разговор записанным."""
+    import asyncio
+    monkeypatch.setattr(diary, "FILE", str(tmp_path / "diary.json"))
+    hist = [{"role": "user", "content": f"реплика {i}"} if i % 2 == 0 else {"role": "assistant", "content": f"ответ {i}"}
+            for i in range(20)]
+    diary.save({"entries": [], "upto": 18, "last_fp": diary._fp(hist[17])})
+    trimmed = hist[6:]  # «перезапуск»: первые 6 обрезаны
+
+    class R:
+        def __init__(self, status, data):
+            self.status, self.data = status, data
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def json(self, content_type=None):
+            return self.data
+
+    class S:
+        def __init__(self, resp):
+            self.resp = resp
+
+        def post(self, *a, **k):
+            return self.resp
+
+    trimmed += [{"role": "user", "content": f"новая {i}"} for i in range(4)]
+    asyncio.run(diary.summarize(S(R(503, {"error": "Loading model"})), trimmed, "u", "k", min_turns=3))
+    assert diary.load()["upto"] == 18  # ошибка — место не сдвинуто
+    ok = {"choices": [{"message": {"content": '{"summary": "говорили о новом", "followup": ""}'}}]}
+    asyncio.run(diary.summarize(S(R(200, ok)), trimmed, "u", "k", min_turns=3))
+    d = diary.load()
+    assert d["entries"][-1]["summary"] == "говорили о новом" and d["last_fp"] == diary._fp(trimmed[-1])

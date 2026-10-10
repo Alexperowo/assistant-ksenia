@@ -86,7 +86,7 @@ def test_pause_with_new_diary_entry_does_not_change_the_prompt(files, monkeypatc
     asyncio.run(k.respond("Привет", {"_t0": time.time()}))
     assert k.system == system
     note = k.history[-2]["content"]
-    assert "первый разговор за сегодня" in note and "вчера: Александр собирался в поездку" in note
+    assert "первый разговор за сегодня" in note and ": Александр собирался в поездку" in note
 
 
 def test_memory_added_elsewhere_arrives_as_a_note_once(files):
