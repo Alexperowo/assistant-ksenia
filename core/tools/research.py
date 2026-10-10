@@ -50,7 +50,8 @@ async def _read(url, slot):
         await pg.wait_for_timeout(1500)
         if not await asyncio.to_thread(web._public_url, pg.url):
             return None  # перенаправили в домашнюю сеть
-        page = await pg.evaluate(web.EXTRACT_JS)
+        # страница, зависшая после загрузки, держала вкладку помощника вечно (аудит Fable, B24)
+        page = await asyncio.wait_for(pg.evaluate(web.EXTRACT_JS), 15)
         return {"title": page["title"], "url": pg.url, "text": page["text"][:2500]}
     except Exception as e:
         log.info("research: не открылось %s: %r", url[:80], e)
@@ -116,6 +117,18 @@ async def _run(question, news, session, brain_url, brain_key, keywords=None, slo
 CTX = {}  # brain_url / brain_key выставляет ядро при старте
 
 
+async def _bounded(coro, question):
+    """Весь поиск — не дольше 4 минут: два зависших поиска занимали оба места, и дальше было только «помощники
+    заняты» до перезапуска (аудит Fable, B24)."""
+    try:
+        await asyncio.wait_for(coro, 240)
+    except asyncio.TimeoutError:
+        log.warning("фоновый поиск не уложился в 4 минуты: %s", question[:80])
+        _running.pop(question, None)
+        await findings.put({"question": question, "answer": "Фоновый поиск слишком затянулся — свежее найти не удалось.",
+                            "sources": []})
+
+
 async def call(name, args, session):
     if name != "research_background":
         return {"ok": False, "error": f"неизвестный инструмент {name}"}
@@ -131,8 +144,8 @@ async def call(name, args, session):
     news = args.get("news")
     if news is None:
         news = any(w in q.lower() for w in ("новост", "последн", "свеж", "сегодня", "вчера", "недавн"))
-    task = asyncio.create_task(_run(q, bool(news), session, CTX["brain_url"], CTX["brain_key"],
-                                    keywords=(args.get("keywords") or "").strip() or None, slot=free[0]))
+    task = asyncio.create_task(_bounded(_run(q, bool(news), session, CTX["brain_url"], CTX["brain_key"],
+                                             keywords=(args.get("keywords") or "").strip() or None, slot=free[0]), q))
     task.slot = free[0]
     _running[q] = task
     return {"ok": True, "started": True,

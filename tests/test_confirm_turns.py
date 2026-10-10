@@ -155,3 +155,19 @@ def test_expired_question_is_said_aloud(ks, monkeypatch):
     confirm.prepare("сообщение для Димы", lambda: None, ttl=-1)
     asyncio.run(core.announce_expired_question())
     assert said and "сообщение для Димы" in said[0] and confirm.peek() is None
+
+
+def test_vk_send_refuses_links_and_same_name_people(monkeypatch):
+    from tools import vk
+
+    async def open_list():
+        return None
+
+    async def find(pg, who):
+        return [{"name": "Дима", "peer": 1}, {"name": "Дима", "peer": 2}] if who == "Дима" else [{"name": "Мама", "peer": 3}]
+
+    monkeypatch.setattr(vk, "_open_list", open_list)
+    monkeypatch.setattr(vk, "_find", find)
+    assert asyncio.run(vk.call("vk_send", {"to": "Дима", "text": "привет"}, None))["ok"] is False
+    assert asyncio.run(vk.call("vk_send", {"to": "Мама", "text": "смотри bit.ly/x"}, None))["ok"] is False
+    assert asyncio.run(vk.call("vk_send", {"to": "Мама", "text": "буду в пять"}, None))["prepared"]

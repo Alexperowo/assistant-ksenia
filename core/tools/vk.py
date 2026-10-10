@@ -138,6 +138,10 @@ async def _send(peer, name, text):
             **({} if sent else {"error": "не увидела своё сообщение в переписке — проверь"})}
 
 
+LINK_OR_EMOJI = re.compile(r"https?://|www\.|\b[\w-]+\.(?:ru|com|ly|me|io|net|org|su|рф)\b|"
+                           r"[\U0001F300-\U0001FAFF\U00002600-\U000027BF\U0001F000-\U0001F2FF]", re.I)
+
+
 async def call(name, args, session):
     if name == "vk_unread":
         pg = await _open_list()
@@ -173,6 +177,14 @@ async def call(name, args, session):
         names = list(dict.fromkeys(f["name"] for f in found))
         if len(names) > 1:
             return {"ok": False, "error": "нашлось несколько — уточни у Александра", "candidates": names[:5]}
+        if len({f["peer"] for f in found}) > 1:
+            # два разных человека с одинаковым именем — раньше молча уходило первому (аудит Fable, B23)
+            return {"ok": False, "error": f"во ВКонтакте несколько собеседников с именем «{names[0]}» — "
+                                          f"уточни у Александра, кому именно (фамилия, чем отличаются)"}
+        if LINK_OR_EMOJI.search(text):
+            # в вопросе голосом ссылка звучит как «ссылка», смайлик не звучит вовсе — а ушли бы целиком
+            return {"ok": False, "error": "в тексте ссылка или смайлик — голосом их не проверить, такое не отправляю; "
+                                          "напиши словами, как сказал Александр"}
         peer, who = found[0]["peer"], found[0]["name"]
         # вопрос говорит ядро дословно: Александр слышит настоящего получателя и текст, а не пересказ модели
         return confirm.ask(f"сообщение ВКонтакте для {who}", lambda: _send(peer, who, text),
