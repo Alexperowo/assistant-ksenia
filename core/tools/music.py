@@ -298,8 +298,7 @@ async def _youtube(query, video):
     if not found:
         return {"ok": False, "error": f"на YouTube ничего не нашла по «{query}» (или не открылся — служба ksenia-unblock)"}
     title, dur, page, link = found
-    if video and not CONFIG_VIDEO["on"]:
-        video = False
+    if video and CONFIG_VIDEO["on"]:  # было «not» — «покажи видео» включало только звук (аудит Fable, C11)
         if _video["proc"] and _video["proc"].returncode is None:
             _video["proc"].terminate()
         await _pause_for_video()

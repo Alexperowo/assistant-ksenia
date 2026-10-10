@@ -243,8 +243,33 @@ EN_NUM_RE = re.compile(r"\b(?:(plus|minus)\s+)?(" + "|".join(sorted(EN_NUMS, key
                        r")(?:[\s-]+(one|two|three|four|five|six|seven|eight|nine))?\b", re.I)
 
 
+# частые оговорки 2-битного мозга, которые можно исправить без риска (живая автопроверка 2026-10-09)
+GRAMMAR_FIXES = [(re.compile(r"\b([Оо])бо (тебе|тебя|мне|нём|нем|ней)\b"), r"\1 \2")]
+
+
+def fix_grammar(text: str) -> str:
+    for rx, rep in GRAMMAR_FIXES:
+        text = rx.sub(rep, text)
+    return text
+
+
+_LATIN_WORD_BEFORE = re.compile(r"[A-Za-z][A-Za-z'’.]*[\s-]*$")
+_LATIN_WORD_AFTER = re.compile(r"^[\s-]*[A-Za-z]")
+
+
 def fix_english_numbers(text: str) -> str:
+    """Число английским словом посреди русской речи -> цифры. Не трогаем английские названия: «Twenty One
+    Pilots», «Nine Inch Nails», «Take Five», «One» группы Metallica (аудит Fable, FB2): рядом латинское слово,
+    кавычки или заглавная буква без «плюс/минус» — это название, а не число."""
     def rep(m):
+        before, after = text[:m.start()], text[m.end():]
+        if not m.group(1):
+            if _LATIN_WORD_BEFORE.search(before) or _LATIN_WORD_AFTER.search(after):
+                return m.group(0)
+            if m.group(2)[:1].isupper():
+                return m.group(0)
+            if before.count("«") > before.count("»") or before.count('"') % 2:
+                return m.group(0)
         n = EN_NUMS[m.group(2).lower()] + (EN_NUMS[m.group(3).lower()] if m.group(3) else 0)
         sign = {"plus": "плюс ", "minus": "минус "}.get((m.group(1) or "").lower(), "")
         return f"{sign}{n}"
@@ -260,29 +285,53 @@ FEM_ADJ = {"рад": "рада", "готов": "готова", "уверен": "
            "удивлен": "удивлена", "расстроен": "расстроена", "смущён": "смущена", "смущен": "смущена"}
 FEM_GAP = r"(?:(?:не|уже|ещё|еще|тоже|так|просто|только|бы|же|ведь|сейчас|сегодня|вчера|давно|точно|честно|" \
           r"тебе|тебя|ему|ей|им|вам|его|её|ее|это|тут|там|всё|все|очень|сразу|снова|опять|наконец),?\s+){0,2}"
-FEM_RE = re.compile(r"(\b[Яя]\s+" + FEM_GAP + r")([а-яё]+)\b")
+FEM_RE = re.compile(r"(\b[Яя]\s+" + FEM_GAP + r")([а-яё]+)\b(\s+[а-яё]+\b)?")
 
 
-def _feminine(word: str) -> str:
+try:
+    import pymorphy3
+    _MORPH = pymorphy3.MorphAnalyzer()
+except Exception:  # без словаря — только надёжный короткий список (FEM_ADJ), без угадывания по окончанию
+    _MORPH = None
+
+
+def _feminine(word: str):
+    """Женская форма слова о себе или None, если слово не про неё. Морфология, а не окончание: правило «-л»
+    превращало «Я футбол люблю» в «футбола», «канал переключу» — в «канала» (аудит Fable, FB3)."""
     low = word.lower()
-    if low in FEM_ADJ:
+    if low in FEM_ADJ and low != "один":  # проверенный словарь важнее разбора: «уверен» -> «уверена», не «уверенна»
         out = FEM_ADJ[low]
-    elif low in ("был", "жил", "пил", "ел", "мыл", "шил", "бил", "сел", "пел", "дал", "спал", "звал", "ждал", "брал",
-                 "врал", "гнал", "лил", "шил"):
-        out = low + "а"
-    elif low in ("мог", "смог", "помог", "сумел"):
-        out = {"мог": "могла", "смог": "смогла", "помог": "помогла", "сумел": "сумела"}[low]
-    elif re.search(r"[шч][её]л$", low):        # пошёл/нашёл/вышел/прочёл -> пошла/нашла/вышла/прочла
-        out = re.sub(r"[её]л$", "ла", low)
-    elif re.search(r"[аяеиыуо]л$", low) and len(low) > 3:   # сказал, понял, смотрел, был -> +а
-        out = low + "а"
+    elif _MORPH is not None:
+        p = _MORPH.parse(low)[0]
+        tag = p.tag
+        if not (("VERB" in tag and "past" in tag and "masc" in tag) or
+                (tag.POS in ("ADJS", "PRTS") and "masc" in tag)):
+            return None
+        f = p.inflect({"femn"})
+        if not f:
+            return None
+        out = f.word
     else:
-        return word
+        return None
     return out[0].upper() + out[1:] if word[0].isupper() else out
 
 
 def feminine(text: str) -> str:
-    return FEM_RE.sub(lambda m: m.group(1) + _feminine(m.group(2)), text)
+    """«я понял» -> «я поняла», «я вчера был занят» -> «я вчера была занята». Чужая речь в кавычках — как есть."""
+    def rep(m):
+        before = text[:m.start()]
+        if before.count("«") > before.count("»") or before.count('"') % 2 or before.count("„") > before.count("“"):
+            return m.group(0)
+        first = _feminine(m.group(2))
+        if first is None:
+            return m.group(0)
+        tail = m.group(3) or ""
+        if tail:  # второе слово подряд: «был занят», «был рад»
+            w = tail.strip()
+            f2 = _feminine(w)
+            tail = tail.replace(w, f2) if f2 else tail
+        return m.group(1) + first + tail
+    return FEM_RE.sub(rep, text)
 
 
 def clean_for_speech(text: str, verbatim: bool = False) -> str:
@@ -294,7 +343,7 @@ def clean_for_speech(text: str, verbatim: bool = False) -> str:
         t = m.group(1).strip().lower()
         return f"[{t}]" if t in ALLOWED_TAGS else ""
     if not verbatim:
-        text = feminine(fix_english_numbers(strip_thinking(text)))
+        text = feminine(fix_grammar(fix_english_numbers(strip_thinking(text))))
     text = speech_norm.normalize(text)  # «до н. э.», «°C», «м/с», «мм» — словами (голос читает их неправильно)
     if verbatim:
         text = re.sub(r"[\[\]]", " ", text)

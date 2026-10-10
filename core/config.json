@@ -11,7 +11,7 @@
   "budget_action": 0,
   "brain_reasoning_levels": true,
   "warmup": false,
-  "max_tokens": 400,
+  "max_tokens": 1200,
   "history_max": 60,
   "max_turns": 50,
   "max_steps": 12,

@@ -3,3 +3,5 @@ pytest>=8
 aiohttp>=3.9
 numpy
 pillow
+pymorphy3
+pymorphy3-dicts-ru
