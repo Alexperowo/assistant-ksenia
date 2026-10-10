@@ -770,6 +770,9 @@ class Speaker:
                         log.error("voice-out %s: %s", r.status, (await r.text())[:200])
                         self.failed = True
                         return 0
+                    if self.cancelled:
+                        # ответ голоса пришёл уже после «стоп»: новый плеер дал бы слышимый обрывок (аудит Fable, D11)
+                        return 1
                     await self._ensure_player()
                     if not written and not isinstance(self.player, ClientPlayer):
                         hub.emit({"type": "state", "state": "speaking", "where": "pc"})
@@ -911,7 +914,10 @@ class Speaker:
         cut = len(data) - len(data) % 2
         self._carry = data[cut:]
         x = np.frombuffer(data[:cut], dtype=np.int16)
-        return (x * self.gain).astype(np.int16).tobytes() if self.gain != 1.0 else data[:cut]
+        if self.gain == 1.0:
+            return data[:cut]
+        # с ограничением: при усилении > 1 громкие места переворачивались в треск (аудит Fable, D19)
+        return np.clip(x.astype(np.float32) * self.gain, -32768, 32767).astype(np.int16).tobytes()
 
     async def _fade_out(self, chunk: bytes):
         """Дописать в плеер начало следующего куска звука с затуханием до нуля и закрыть вход: pacat доиграет
@@ -2196,7 +2202,8 @@ class Conversation:
                     log.info("Тишина — разговор окончен (%s)", info)
                     return
                 speaker = heard.get("speaker") or {}
-                if speaker.get("owner") is False and voicectl.STATE["mode"] == "owner_only":
+                # «стоп» — всегда: если отпечаток ошибся, Александр не должен остаться без тормоза (аудит Fable, D13)
+                if speaker.get("owner") is False and voicectl.STATE["mode"] == "owner_only" and not is_stop(text):
                     log.info("Чужой голос (%.2f) — режим «только Александр», не отвечаю: %s", speaker.get("score", 0), text)
                     continue
                 note = agent_note(text)
@@ -2212,7 +2219,7 @@ class Conversation:
                     # при музыке «стоп» уходит мозгу — скорее всего, это про музыку
                     log.info("«%s» — разговор окончен", text)
                     return
-                if voicectl.STATE["enrolling"] > 0 and speaker.get("owner") is not False:
+                if voicectl.STATE["enrolling"] > 0:  # перезапись образца — как раз когда старый его не узнаёт (D13)
                     await self.enroll_step()
                 timings = {"_t0": time.time(), "listen": info}
                 await turn(text, timings, speaker=speaker)
@@ -2407,7 +2414,8 @@ class LiveConversation(Conversation):
             if early and not self.busy():
                 self.cur = asyncio.create_task(self.live_turn("продолжай", ev.get("timings") or {}, speaker, resume=True))
             return False
-        if speaker.get("owner") is False and voicectl.STATE["mode"] == "owner_only" and speaker.get("source") != "tablet":
+        if speaker.get("owner") is False and voicectl.STATE["mode"] == "owner_only" and speaker.get("source") != "tablet" \
+                and not is_stop(text):
             log.info("Чужой голос — режим «только Александр»: %s", text)
             await self.unduck()
             return False
@@ -2478,7 +2486,7 @@ class LiveConversation(Conversation):
             if self.busy() and self.speaking():
                 log.info("Александр перебил — Ксения замолкает")
             await self.cancel_turn()
-            if voicectl.STATE["enrolling"] > 0 and speaker.get("owner") is not False:
+            if voicectl.STATE["enrolling"] > 0:  # перезапись образца — как раз когда старый его не узнаёт (D13)
                 await self.enroll_step()
             self.last_utt = {"text": merged, "t": time.time()}
             acted = acted or "ответ"

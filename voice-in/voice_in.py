@@ -603,7 +603,8 @@ async def handle_listen(request):
         beep_sink = CONFIG.get("beep_sink") or None
         if card:
             prof = await asyncio.to_thread(card_profile, card)
-            if "bap-duplex" in await asyncio.to_thread(card_profiles, card):
+            profiles = await asyncio.to_thread(card_profiles, card)
+            if "bap-duplex" in profiles:
                 # LE Audio: звук и микрофон одновременно — ничего не переключаем, начало ответа не теряется
                 if prof != "bap-duplex":
                     await set_profile(card, "bap-duplex")
@@ -613,6 +614,13 @@ async def handle_listen(request):
                 restore = prof
                 await set_profile(card, CONFIG.get("hfp_profile", "headset-head-unit"))
                 await asyncio.sleep(CONFIG.get("hfp_settle_s", 0.6))
+            else:
+                # наушники уже в режиме гарнитуры — прошлую запись оборвали (перезапуск слуха): после этой записи
+                # вернуть хороший звук, иначе голос и музыка остались бы «телефонными» навсегда (аудит Fable, D10)
+                a2dp = [x for x in profiles if x.startswith("a2dp")]
+                best = ("ldac", "aptx_hd", "aptx", "aac", "sbc_xq", "sbc")
+                restore = min(a2dp, key=lambda x: next((i for i, c in enumerate(best) if c in x), len(best)),
+                              default=None)
             if not beep_sink:
                 beep_sink = await asyncio.to_thread(bt_node, card, "sinks") or \
                     "bluez_output." + card[len("bluez_card."):].replace("_", ":")
@@ -676,6 +684,9 @@ async def handle_vp(request):
         return web.json_response(ear.vp.save(CONFIG.get("enroll_min_phrases", 4)))
     if action == "clear":
         return web.json_response(ear.vp.clear())
+    if action == "begin":  # новая запись образца: обрывки прошлой, недописанной, не подмешиваем (аудит Fable, D13)
+        ear.vp.pending = []
+        return web.json_response({"ok": True, "collected": 0})
     return web.json_response({"ok": True, "enrolled": ear.vp.centroid is not None, "collected": len(ear.vp.pending)})
 
 

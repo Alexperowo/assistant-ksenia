@@ -72,6 +72,15 @@ class Voiceprint:
             return {"ok": False, "error": f"мало фраз: {len(self.pending)} из {min_phrases}"}
         c = np.mean(self.pending, 0)
         c = c / np.linalg.norm(c)
+        # фраза, совсем не похожая на остальные (чужой голос рядом, шум) — не в образец
+        keep = [v for v in self.pending if v @ c >= 0.45]
+        if len(keep) < min_phrases:
+            return {"ok": False, "error": f"фразы слишком разные ({len(keep)} похожих из {len(self.pending)}) — "
+                                          f"запишем ещё раз в тишине"}
+        if len(keep) != len(self.pending):
+            c = np.mean(keep, 0)
+            c = c / np.linalg.norm(c)
+        self.pending = keep
         spread = float(np.mean([v @ c for v in self.pending]))  # насколько фразы похожи между собой
         os.makedirs(os.path.dirname(FILE), exist_ok=True)
         tmp = FILE + ".tmp"

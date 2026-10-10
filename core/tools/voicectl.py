@@ -77,6 +77,10 @@ async def call(name, args, session):
     if name == "voice_enroll":
         a = args.get("action", "status")
         if a == "start":
+            try:
+                await _vp(session, "begin")
+            except Exception:
+                pass
             STATE["enrolling"] = ENROLL_PHRASES
             return {"ok": True, "started": True, "phrases": ENROLL_PHRASES,
                     "note": f"попроси Александра рассказать о чём-нибудь — следующие {ENROLL_PHRASES} его фраз станут образцом"}
