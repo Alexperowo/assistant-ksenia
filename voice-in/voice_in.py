@@ -181,6 +181,17 @@ def turn_policy(p: float, text: str, ctx: dict, cfg: dict, fast: bool = False):
     return "wait", cfg.get("turn_wait_ms", 2000)
 
 
+_BG = set()
+
+
+def spawn_bg(coro):
+    """Фоновая задача со ссылкой: цикл событий держит задачи слабо (аудит Fable, D21)."""
+    t = asyncio.get_running_loop().create_task(coro)
+    _BG.add(t)
+    t.add_done_callback(_BG.discard)
+    return t
+
+
 async def infer(fn, *args):
     """Распознавание/отпечаток в отдельном потоке, но не дольше 15 с. Зависшая CUDA (после сна) держала замок
     слуха навсегда — «Я ещё дослушиваю» без конца; сломанная — 500 на каждую реплику при живом процессе.
@@ -854,7 +865,7 @@ async def _stream(ws, push):
                 log.warning("Живой режим: микрофон оборвался: %r", e)
                 await ws.send_json({"type": "error", "reason": "push_lost" if push else "mic_lost"})
                 if headset and not push:  # канал LE Audio мог не подняться — проверить и починить в фоне
-                    asyncio.create_task(headset.check_and_recover("микрофон оборвался"))
+                    spawn_bg(headset.check_and_recover("микрофон оборвался"))
                 break
             try:
                 await _live_event(ws, seg, partial, send_partial, np.frombuffer(buf, dtype=np.int16))

@@ -27,6 +27,7 @@ async def run(*argv, input_text=None, timeout=20):
         out, _ = await asyncio.wait_for(p.communicate(input_text.encode() if input_text else None), timeout)
     except asyncio.TimeoutError:
         p.kill()
+        await p.wait()  # не оставлять зомби (аудит Fable, D21)
         return -1, "timeout"
     return p.returncode, out.decode("utf-8", "replace")
 
@@ -46,7 +47,7 @@ async def find_mac(config_mac="auto"):
 
 
 async def info(mac):
-    rc, out = await run("bluetoothctl", "info", mac)
+    rc, out = await run("bluetoothctl", "info", mac, timeout=5)
     st = {"connected": False, "le": False, "bredr": False}
     for line in out.splitlines():
         s = line.strip()
@@ -126,7 +127,10 @@ async def probe(mac):
 
 
 async def _wait_connected(mac, want_profile=None, timeout=15):
-    for _ in range(int(timeout * 2)):
+    # по часам, а не по числу попыток: если bluetoothd не вернулся, каждый вызов bluetoothctl ждал свои 20 с,
+    # и «15 секунд» растягивались на 10 минут (аудит Fable, D14)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
         st = await info(mac)
         prof = await card_profile(mac) if st["connected"] else None
         if st["connected"] and prof and prof != "off" and (want_profile is None or prof.startswith(want_profile)):
@@ -203,11 +207,18 @@ class Headset:
                     if ok:
                         self.last = {"time": time.strftime("%H:%M:%S"), "result": f"починила: {name}"}
                         log.info("Наушники: канал восстановлен (%s)", name)
+                        self._told_fail = False
                         if self.say:
                             await self.say("Наушники переподключила, всё работает.")
                         return {"ok": True, "fixed_by": name}
             self.last = {"time": time.strftime("%H:%M:%S"), "result": "не удалось: " + ", ".join(steps)}
             log.error("Наушники: восстановить канал не удалось (%s)", why)
+            self._backoff_until = time.time() + 600  # не перезапускать Bluetooth каждую минуту по кругу
+            # по просьбе (инструмент, переключение режима) итог скажет сама Ксения — здесь только при само-починке
+            if self.say and reason not in ("просьба ядра", "после переключения", "проверка") \
+                    and not getattr(self, "_told_fail", False):
+                self._told_fail = True  # сказать один раз, а не при каждой неудаче
+                await self.say("Не получается наладить звук в наушниках. Выключи их и включи снова, пожалуйста.")
             return {"ok": False, "error": "канал звука наушников не поднимается",
                     "tried": steps, "advice": "выключить и включить наушники"}
 
@@ -239,10 +250,14 @@ class Headset:
                     "journalctl", "--user", "-f", "-n", "0", "-o", "cat", "-t", "wireplumber",
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
                 async for raw in p.stdout:
-                    if FAIL_MARK in raw.decode("utf-8", "replace") and time.time() - self._last_fail > 60:
+                    if FAIL_MARK in raw.decode("utf-8", "replace") and time.time() - self._last_fail > 60 \
+                            and time.time() > getattr(self, "_backoff_until", 0):
                         self._last_fail = time.time()
                         await asyncio.sleep(2)  # пусть WirePlumber закончит свою попытку
-                        asyncio.create_task(self.check_and_recover("сбой транспорта в журнале"))
+                        t = asyncio.create_task(self.check_and_recover("сбой транспорта в журнале"))
+                        self._tasks = getattr(self, "_tasks", set())
+                        self._tasks.add(t)
+                        t.add_done_callback(self._tasks.discard)
             except asyncio.CancelledError:
                 raise
             except Exception as e:

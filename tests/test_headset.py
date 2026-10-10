@@ -76,3 +76,10 @@ def test_gives_up_honestly(monkeypatch):
 def test_classic_mode_is_not_probed(monkeypatch):
     h, calls, said = make(monkeypatch, [], profile="a2dp-sink")
     assert asyncio.run(h.check_and_recover())["mode"] == "music" and calls == []
+
+
+def test_self_repair_failure_is_said_once_and_backs_off(monkeypatch):
+    h, calls, said = make(monkeypatch, [(False, "a"), (False, "b"), (False, "c")] * 2)
+    asyncio.run(h.check_and_recover("сбой транспорта в журнале"))
+    asyncio.run(h.check_and_recover("сбой транспорта в журнале"))
+    assert len(said) == 1 and "Выключи их и включи" in said[0] and h._backoff_until > 0
