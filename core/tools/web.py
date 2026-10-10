@@ -194,12 +194,29 @@ def _field_candidates(pg, field):
     return [pg.get_by_role("searchbox"), pg.get_by_role("textbox")]
 
 
+SENSITIVE_JS = """el => {
+  const t = (el.type || '').toLowerCase(), ac = (el.autocomplete || '').toLowerCase();
+  const name = [el.name, el.id, el.placeholder, el.getAttribute('aria-label')].join(' ').toLowerCase();
+  if (t === 'password' || /password|парол/.test(name) || ac.includes('password')) return 'пароля';
+  if (ac.startsWith('cc-') || /card|карт|cvv|cvc|expir|срок действ/.test(name)) return 'банковской карты';
+  if (t === 'tel' || ac.startsWith('tel') || /phone|телефон/.test(name)) return 'телефона';
+  return '';
+}"""
+
+
 async def _type(pg, field, text, enter, expect_url=None):
     if expect_url and pg.url != expect_url:
         return {"ok": False, "error": "страница уже другая — ничего не вписала, спроси Александра заново"}
     el = await _first(_field_candidates(pg, field))
     if el is None:
         return {"ok": False, "error": f"не нашла поле «{field}»" if field else "не нашла поле для ввода"}
+    try:
+        kind = await el.evaluate(SENSITIVE_JS)
+    except Exception:
+        kind = ""
+    if kind:
+        # пароли, карты, телефоны Ксения в сайты не вписывает: это мог попросить сам сайт (аудит Fable, B18)
+        return {"ok": False, "error": f"это поле для {kind} — такое я на сайтах не вписываю; Александр введёт сам"}
     try:
         await el.fill(text, timeout=5000)
         if enter:

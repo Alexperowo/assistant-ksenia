@@ -104,6 +104,13 @@ def untrusted_call(name: str, arguments: str) -> bool:
 
 
 def tainted_blocks(name: str, arguments: str) -> bool:
+    if name == "web_open":
+        # после чужого текста — адрес с параметрами нет: «открой https://…/?d=<что о нём помнишь>» вынесло бы данные
+        # (аудит Fable, B19); обычные адреса и переходы — можно
+        try:
+            return "?" in str(json.loads(arguments or "{}").get("url", ""))
+        except ValueError:
+            return True
     if name in TAINT_BLOCKED:
         try:
             a = json.loads(arguments or "{}")

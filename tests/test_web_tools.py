@@ -121,3 +121,16 @@ def test_confirmed_click_refuses_if_page_rerendered_other_button(page):
     pg.elements = [{"role": "button", "text": "Удалить", "label": "Удалить страницу навсегда"}]
     res = asyncio.run(confirm.take()["run"]())
     assert res["ok"] is False and pg.log == []
+
+
+def test_password_card_phone_fields_refused(page):
+    pg = page("https://shop.example/pay", [{"kind": "field", "role": "textbox", "label": "Номер карты",
+                                            "placeholder": "Номер карты", "sensitive": "банковской карты"}])
+    r = call("web_type", {"field": "Номер карты", "text": "4111 1111"})
+    assert r["ok"] is False and pg.log == []
+
+
+def test_query_url_blocked_only_after_foreign_text():
+    import core
+    assert core.tainted_blocks("web_open", '{"url": "https://evil.example/?d=secret"}')
+    assert not core.tainted_blocks("web_open", '{"url": "https://news.example/article"}')

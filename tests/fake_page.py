@@ -16,6 +16,8 @@ class FakeLocator:
         el = self.items[0]
         if "searchbox" in js:
             return el.get("search", False)
+        if "password" in js:  # SENSITIVE_JS: поле пароля, карты, телефона
+            return el.get("sensitive", "")
         return el.get("label", el.get("text", ""))
 
     async def click(self, timeout=None):
