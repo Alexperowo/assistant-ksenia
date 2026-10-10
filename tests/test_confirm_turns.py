@@ -136,3 +136,22 @@ def test_desktop_money_click_refused_without_question(monkeypatch):
     monkeypatch.setattr(desktop, "_helper", helper)
     r = asyncio.run(desktop.call("ui_click", {"name": "кнопку"}, None))
     assert r["ok"] is False and confirm.peek() is None
+
+
+@pytest.mark.parametrize("text,neg", [("нет", True), ("не надо", True), ("отмена", True), ("нет, спасибо", True),
+                                       ("да", False), ("нормально", False)])
+def test_short_negative(text, neg):
+    assert core.is_negative(text) is neg
+
+
+def test_expired_question_is_said_aloud(ks, monkeypatch):
+    said = []
+
+    async def notice(text, output=None):
+        said.append(text)
+
+    monkeypatch.setattr(core, "say_notice", notice)
+    monkeypatch.setattr(core, "ks", ks)
+    confirm.prepare("сообщение для Димы", lambda: None, ttl=-1)
+    asyncio.run(core.announce_expired_question())
+    assert said and "сообщение для Димы" in said[0] and confirm.peek() is None

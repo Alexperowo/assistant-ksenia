@@ -1567,7 +1567,8 @@ class Ksenia:
                 await speaker.cancel()
                 worker.cancel()
             asked = confirm.peek()
-            if asked and asked["turn"] == turn_no and (speaker.cancelled or getattr(speaker, "failed", False)):
+            if asked and asked["turn"] == turn_no and not asked.get("heard") and \
+                    (speaker.cancelled or getattr(speaker, "failed", False)):
                 # вопрос «Отправить?» не прозвучал целиком (перебили, голос не работал): подтверждать нечего
                 confirm.cancel("unheard")
                 log.info("Вопрос «%s» не прозвучал — действие отменено", asked["question"])
@@ -2167,6 +2168,15 @@ AFFIRM = {"да", "ага", "угу", "отправляй", "отправь", "�
 AFFIRM_FILLER = {"ну", "так", "ксения", "пожалуйста", "же", "уж"}
 
 
+NEGATIVE = {"нет", "не", "не надо", "отмена", "отмени", "не отправляй", "не нужно", "стоп", "погоди", "подожди", "нельзя"}
+
+
+def is_negative(text: str) -> bool:
+    """Короткий отказ на вопрос: «нет», «не надо», «отмена» (до трёх слов)."""
+    t = _words(text)
+    return bool(t) and len(t.split()) <= 3 and (t in NEGATIVE or t.split()[0] in ("нет", "отмена", "отмени"))
+
+
 def is_affirmative(text: str) -> bool:
     """Ясное согласие на рискованное действие: короткая реплика ТОЛЬКО из слов согласия («да», «да, отправляй»,
     «ну давай», «конечно, пожалуйста»). Всё остальное — не «да»: «давай заново», «отправь Маше» (это другое
@@ -2540,7 +2550,13 @@ class LiveConversation(Conversation):
             ctx.state, ctx.interrupted = "speaking", True  # решаем, как если бы она ещё говорила
         recent = self.last_utt and time.time() - self.last_utt["t"] < CONFIG.get("live_merge_s", 8)
         q = live_intent.quick(text, ctx)
-        if ctx.state == "thinking" and recent and not early and \
+        pending = confirm.peek()
+        if pending and (is_affirmative(text) or is_negative(text)):
+            # открыт вопрос «Отправить?», а он коротко ответил, пока Ксения договаривала: это ответ, а не
+            # поддакивание (раньше «да» терялось как «продолжай», вопрос молча истекал — аудит Fable, B20)
+            pending["heard"] = True  # раз отвечает — вопрос он услышал
+            d = live_intent.Decision("request", True, why="ответ на открытый вопрос")
+        elif ctx.state == "thinking" and recent and not early and \
                 q.kind not in ("hold", "stop", "aside", "goodbye", "noise"):
             # она ещё ничего не сказала, а он продолжает: это продолжение его же фразы («…и про Карфаген»)
             d = live_intent.Decision("request", True, why="договаривает, пока Ксения думает")
@@ -2824,6 +2840,17 @@ async def deliver_when_idle():
         await music.duck(False)
 
 
+async def announce_expired_question():
+    """Вопрос «Отправить?» истёк без ответа — сказать вслух: раньше знал только планшет, а Александр мог думать,
+    что сообщение ушло (аудит Fable, B20)."""
+    p = confirm._pending.get("item")
+    if not p or time.time() <= p["expires"] or ks.lock.locked():
+        return
+    confirm.current()  # убирает просроченное и сообщает планшету
+    log.info("Вопрос истёк без ответа: %s", p["label"])
+    await say_notice(f"Ответа я не услышала, поэтому «{p['label']}» не сделала.")
+
+
 async def reminders_loop():
     """Напоминания и находки помощников: уведомление на экране и голосом (через служебную реплику,
     чтобы Ксения сказала по-живому). Цикл не должен умирать от одной ошибки — иначе напоминания пропадут молча."""
@@ -2834,6 +2861,7 @@ async def reminders_loop():
             pass
         waiting_event.clear()
         try:
+            await announce_expired_question()
             for r in daily.due():
                 daily.notify(r["text"])
                 log.info("Напоминание: %s", r["text"])
