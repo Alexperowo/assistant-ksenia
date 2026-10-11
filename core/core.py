@@ -1253,8 +1253,8 @@ INTERNAL_NO_TOOLS = {"ok": False, "error": "в служебной реплике
                                         "если нужно действие — предложи его Александру и дождись его ответа"}
 CANCELLED_RESULT = {"ok": False, "error": "отменено: Александр перебил, инструмент не выполнен или выполнен не до конца"}
 # Александр не видит экран и не чинит службы — никаких «проверь сервис» (аудит Fable, FA8)
-BRAIN_FAIL_PHRASE = "[sigh] Ой, у меня что-то с головой — мозг не ответил. Спроси ещё раз, пожалуйста."
-BRAIN_HUNG_PHRASE = "[sigh] Мой мозг завис. Перезапускаю его — это около минуты, потом спроси ещё раз."
+BRAIN_FAIL_PHRASE = "[sigh] Не получилось ответить. Попробуй ещё раз, пожалуйста."
+BRAIN_HUNG_PHRASE = "[sigh] Я пока не отвечаю. Позови меня примерно через минуту."
 BRAIN_LOADING_PHRASE = "[sigh] Я ещё просыпаюсь — подожди полминуты и спроси снова."
 
 
@@ -2110,10 +2110,10 @@ async def handle_control_act(request):
         if a == "voice_enroll":
             voicectl.STATE["enrolling"] = voicectl.ENROLL_PHRASES
             await say_notice("Запишу твой голос. Нажми «Говорить» и расскажи мне что-нибудь — пять фраз.")
-            return web.json_response({"ok": True, "say": "Запись образца начата: скажи пять обычных фраз."})
+            return web.json_response({"ok": True, "say": "Начинаю записывать твой голос: скажи пять обычных фраз."})
         if a == "voice_clear":
             await _voice_in("/voiceprint/clear", "POST", 10)
-            return web.json_response({"ok": True, "say": "Образец голоса удалён."})
+            return web.json_response({"ok": True, "say": "Я удалила запись твоего голоса."})
         if a == "volume":
             step = d.get("step")
             act = {"up": "volume_up", "down": "volume_down", "mute": "mute", "unmute": "unmute"}.get(step)
@@ -2136,7 +2136,7 @@ async def handle_control_act(request):
                 raise ValueError("такого факта нет")
             memory._save(keep)
             memory.changed["flag"] = True
-            return web.json_response({"ok": True, "say": "Забыла."})
+            return web.json_response({"ok": True, "say": "Убрала это из памяти."})
         if a == "memory_add":
             fact = " ".join(str(d.get("fact") or "").split())[:300]
             if not fact:
@@ -2147,13 +2147,13 @@ async def handle_control_act(request):
             res = await watch.call("watch_rule", {"action": "add" if a == "rule_add" else "remove",
                                                   "who": d.get("who"), "remind": bool(d.get("remind", True)),
                                                   "_from_control": True}, None)  # нажал сам Александр
-            return web.json_response({"ok": bool(res.get("ok")), "say": "Правило добавлено." if a == "rule_add"
-                                      else "Правило убрано." if res.get("ok") else res.get("error", "Не получилось.")})
+            return web.json_response({"ok": bool(res.get("ok")), "say": "Хорошо, буду говорить сразу." if a == "rule_add"
+                                      else "Убрала это правило." if res.get("ok") else res.get("error", "Не получилось.")})
         if a == "reminder_cancel":
             items = daily._load()
             keep = [r for r in items if r.get("id") != d.get("id")]
             daily._save(keep)
-            return web.json_response({"ok": len(keep) != len(items), "say": "Напоминание отменено."})
+            return web.json_response({"ok": len(keep) != len(items), "say": "Убрала напоминание." if len(keep) != len(items) else "Не нашла это напоминание."})
         if a == "diary_clear":
             diary.save({"entries": [], "upto": len(ks.history)})
             diary.changed["flag"] = True
@@ -2164,7 +2164,7 @@ async def handle_control_act(request):
             return web.json_response({"ok": True, "say": "Заметки убраны в архив."})
         if a == "restart":
             ok = await control.restart_service(d.get("unit"))
-            return web.json_response({"ok": ok, "say": "Перезапускаю." if ok else "Не получилось перезапустить."})
+            return web.json_response({"ok": ok, "say": "Перезапускаю." if ok else "Не смогла перезапустить. Попробуй ещё раз."})
         if a == "selfcheck":
             res = await selfcheck.call("self_check", {}, ks.session)
             probs = res.get("problems") or []
@@ -2181,8 +2181,8 @@ async def handle_control_act(request):
         return web.json_response({"ok": False, "say": f"Не получилось: {e}."}, status=400)
     except Exception as e:
         log.exception("центр управления: %s", a)
-        return web.json_response({"ok": False, "say": "Что-то пошло не так, подробности — в журнале."}, status=500)
-    return web.json_response({"ok": False, "say": "Неизвестное действие."}, status=400)
+        return web.json_response({"ok": False, "say": "Не получилось. Попробуй ещё раз; если повторится, скажи мне."}, status=500)
+    return web.json_response({"ok": False, "say": "Не поняла, что нужно сделать."}, status=400)
 
 
 async def handle_look(request):
@@ -2396,15 +2396,15 @@ def is_goodbye(text: str) -> bool:
 
 
 LISTEN_FAIL = {
-    "no_microphone": "[sigh] Не слышу микрофон. Наушники подключены?",
+    "no_microphone": "[sigh] Я тебя не слышу. Наушники включены?",
     "mic_lost": "[sigh] Микрофон пропал посреди фразы. Повтори, пожалуйста.",
-    "busy": "[sigh] Я ещё дослушиваю прошлую фразу. Нажми ещё раз через пару секунд.",
-    "http 409": "[sigh] Я ещё дослушиваю прошлую фразу. Нажми ещё раз через пару секунд.",
-    "restarting": "[sigh] Мой слух завис. Перезапускаю его — это секунд двадцать, потом позови меня ещё раз.",
+    "busy": "[sigh] Я ещё слушаю. Повтори через пару секунд.",
+    "http 409": "[sigh] Я ещё слушаю. Повтори через пару секунд.",
+    "restarting": "[sigh] Я тебя не слышу. Пытаюсь восстановить связь — позови через полминуты.",
 }
 # Александр не видит экран и не чинит службы: «проверь сервис» ему ничего не даёт (аудит Fable, FA8)
-LISTEN_DOWN = "[sigh] Я тебя не слышу: слух не отвечает. Перезапускаю его — позови меня через полминуты."
-CONV_CRASH = "[sigh] Ой, у меня что-то сломалось. Нажми ещё раз, пожалуйста."
+LISTEN_DOWN = "[sigh] Я тебя не слышу. Пытаюсь восстановить связь — позови через полминуты."
+CONV_CRASH = "[sigh] Не получилось ответить. Попробуй ещё раз, пожалуйста."
 
 
 class Conversation:
@@ -2713,7 +2713,7 @@ class LiveConversation(Conversation):
         early, self.early = self.early, None
         if stop_listening(text):
             log.info("Живой режим: просят не слушать — выключаю микрофон")
-            await say_notice("Хорошо, не слушаю. Позови касанием или клавишами.", output=self.output)
+            await say_notice("Хорошо, выключаю микрофон. Вернёшь меня касанием наушников или сочетанием клавиш «Контрол, Альт, К».", output=self.output)
             return True
         if self.dozing:
             # разговор окончен: откликаться только на имя — как человек, которого позвали
@@ -2882,7 +2882,7 @@ class LiveConversation(Conversation):
                     if msg.type != aiohttp.WSMsgType.TEXT:
                         log.warning("Живой режим: слух закрыл поток (%s)", msg.type)
                         # раньше — молча: живой режим просто кончался (аудит Fable, D5)
-                        await say_notice("[sigh] Мой слух отключился, живой разговор прервался. Позови меня ещё раз.")
+                        await say_notice("[sigh] Я потеряла связь с микрофоном и закончила слушать. Позови меня ещё раз.")
                         return
                     ev = json.loads(msg.data)
                     kind = ev.get("type")
@@ -3377,7 +3377,7 @@ class HeadsetButtons:
         """Повторить последний ответ — мимо истории и мозга (история только дописывается, повтор в неё не идёт)."""
         text = last_reply()
         if not text:
-            await say_notice("Я пока ничего не говорила.")
+            await say_notice("Пока нечего повторять.")
             return
         async with ks.lock:
             sp = Speaker(ks.session)

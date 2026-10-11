@@ -165,7 +165,7 @@ def test_triple_tap_repeats_last_reply_without_touching_history(env, monkeypatch
 def test_repeat_with_empty_history(env, monkeypatch):
     monkeypatch.setattr(core.ks, "history", [])
     press("Previous", IDLE, monkeypatch)
-    assert env == [("say", "Я пока ничего не говорила.")]
+    assert env == [("say", "Пока нечего повторять.")]
 
 
 def test_player_status_follows_ksenia_and_music(monkeypatch):

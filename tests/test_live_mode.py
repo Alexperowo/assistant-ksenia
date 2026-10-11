@@ -240,7 +240,7 @@ def test_after_dialog_ends_she_answers_only_to_her_name(live_env, monkeypatch):
     turns, said = live_env([{"type": "ready"}, utt("Привет."), 0.5, utt("Какая погода?"), 0.1,
                             utt("Ксения, который час?"), 0.15, utt("А завтра?"), 0.15, utt("Не слушай.")])
     assert turns == ["Привет.", "который час?", "А завтра?"]
-    assert any("не слушаю" in x for x in said)
+    assert any("выключаю микрофон" in x for x in said)
 
 
 def test_name_alone_gets_a_short_reply(live_env, monkeypatch):

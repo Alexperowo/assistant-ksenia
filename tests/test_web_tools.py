@@ -57,7 +57,7 @@ def test_confirmed_click_refuses_on_another_page(page):
 def test_payment_is_refused_by_element_label(page):
     pg = page("https://shop.example/checkout", [{"role": "button", "text": "Далее", "label": "Оплатить 990 ₽"}])
     r = call("web_click", {"text": "Далее"})
-    assert r["ok"] is False and "оплату" in r["error"] and pg.log == [] and confirm.current() is None
+    assert r["ok"] is False and "с деньгами" in r["error"] and pg.log == [] and confirm.current() is None
 
 
 def test_enter_in_message_field_needs_confirmation(page):

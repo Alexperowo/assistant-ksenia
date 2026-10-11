@@ -30,7 +30,7 @@ def is_financial(*texts) -> bool:
     return any(t and FINANCE.search(t) for t in texts)
 
 
-MONEY_REFUSAL = {"ok": False, "error": "оплату, покупки и переводы денег я не делаю — это может только Александр сам"}
+MONEY_REFUSAL = {"ok": False, "error": "с деньгами я не помогаю: оплатить или перевести деньги можешь только ты сам"}
 
 _pending = {}
 _listeners = []
@@ -75,7 +75,7 @@ def ask(label: str, run, question: str, *, limit: float = 60, background: bool =
             return {"ok": True, "prepared": True, "already_asked": True, "confirm_id": cur["id"], **extra,
                     "note": "этот вопрос уже прозвучал — НЕ вызывай инструмент снова и не повторяй вопрос, просто жди ответа"}
         # другой вопрос в том же ходе: одно «да» решило бы только последний, а прозвучали бы оба
-        return {"ok": False, "error": "сначала дождись ответа Александра на прошлый вопрос — одно действие за раз",
+        return {"ok": False, "error": "сначала пусть Александр ответит на мой прошлый вопрос — одно действие за раз; скажи ему: «сначала ответь на прошлый вопрос»",
                 "pending_question": cur["question"]}
     cid = prepare(label, run, question=question, limit=limit, background=background, timeout_error=timeout_error)
     return {"ok": True, "prepared": True, "confirm_id": cid, "speak_verbatim": question, **extra,

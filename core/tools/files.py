@@ -183,7 +183,7 @@ async def _trash(path):
                                              stderr=asyncio.subprocess.PIPE)
     _, err = await p.communicate()
     return {"ok": p.returncode == 0, "trashed": os.path.basename(path),
-            **({} if p.returncode == 0 else {"error": "в корзину убрать не получилось",
+            **({} if p.returncode == 0 else {"error": "не смогла убрать файл в корзину",
                                              "detail": err.decode("utf-8", "replace")[:200]})}
 
 
