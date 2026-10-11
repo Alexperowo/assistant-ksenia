@@ -438,7 +438,7 @@ async def call(name, args, session):
             if TERMINAL_RE.search(window):
                 return {"ok": False, "error": "в окно терминала не печатаю — там текст стал бы командой компьютеру"}
             return confirm.ask(f"напечатать в «{window}» и нажать Enter", lambda: _dictate(text, True, window),
-                               question=f"Печатаю в окне «{window}»: «{text}». И нажимаю Enter. Отправить?")
+                               question=f"В окне «{window}» пишу: «{text}» — и отправляю. Да?")
         return await _dictate(text, False)
     if name == "app_menu":
         # при спящем мониторе Plasma ждёт видеокарту и не отвечает на D-Bus (живой тест 2026-10-08) — будим;

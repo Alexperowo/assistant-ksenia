@@ -68,7 +68,7 @@ async def call(name, args, session):
         if mode == "guest" and STATE["mode"] == "owner_only" and not args.get("_confirmed"):
             # ослабить защиту — только после «да»: иначе чужой текст (страница, сообщение) снимал бы её молча
             return confirm.ask("включить гостевой режим", lambda: call(name, {**args, "_confirmed": True}, session),
-                               question="Включить гостевой режим? Чужие голоса я снова буду слышать.")
+                               question="Пустить гостей? Тогда я снова буду слышать чужие голоса.")
         STATE["mode"] = mode
         _save_mode(mode)
         st = await _vp(session, "status")
@@ -92,7 +92,7 @@ async def call(name, args, session):
                 return await _vp(session, "clear")
             # без образца «да» и «стоп» принимаются от любого голоса — только после «да» (аудит Fable, B11)
             return confirm.ask("стереть образец голоса Александра", clear,
-                               question="Стереть образец твоего голоса? Пока не запишем новый, я не отличу тебя от гостей.")
+                               question="Стереть запись твоего голоса? Пока не запишем новую, я тебя от гостей не отличу.")
         st = await _vp(session, "status")
         meaning = {"guest": "гостевой: с ЧУЖИМИ голосами Ксения говорит, но действий для них не выполняет; Александру — всё как обычно",
                    "owner_only": "только Александр: чужие голоса Ксения не слушает"}[STATE["mode"]]

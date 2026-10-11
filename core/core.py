@@ -2081,7 +2081,7 @@ async def handle_control_act(request):
         if not isinstance(d, dict):
             raise ValueError
     except ValueError:
-        return web.json_response({"ok": False, "say": "Непонятный запрос."}, status=400)
+        return web.json_response({"ok": False, "say": "Что-то я не поняла, чего ты хочешь."}, status=400)
     a = d.get("action")
     try:
         if a == "set":
@@ -2092,11 +2092,11 @@ async def handle_control_act(request):
             return web.json_response({"ok": True, "say": f"{spec['label']}: {word}."})
         if a == "headset_mode":
             res = await _voice_in(f"/headset/mode/{'talk' if d.get('mode') == 'talk' else 'music'}", "POST", 90)
-            return web.json_response({"ok": bool(res.get("ok")), "say": "Наушники переключила." if res.get("ok")
-                                      else "Наушники не переключились — выключи и включи их."})
+            return web.json_response({"ok": bool(res.get("ok")), "say": "Готово, наушники переключила." if res.get("ok")
+                                      else "Наушники упрямятся. Выключи их и включи снова."})
         if a == "headset_fix":
             res = await _voice_in("/headset/check", "POST", 90)
-            return web.json_response({"ok": bool(res.get("ok")), "say": "Со звуком всё в порядке." if res.get("ok")
+            return web.json_response({"ok": bool(res.get("ok")), "say": "Со звуком всё отлично, я проверила." if res.get("ok")
                                       else res.get("error", "Не получилось — выключи и включи наушники.")})
         if a == "voice_mode":
             mode = "owner_only" if d.get("mode") == "owner_only" else "guest"
@@ -2106,14 +2106,14 @@ async def handle_control_act(request):
             if not res.get("ok"):
                 return web.json_response({"ok": False, "say": res.get("error", "Не получилось переключить.")})
             return web.json_response({"ok": True, "say": "Слушаю только тебя." if mode == "owner_only"
-                                      else "С гостями говорю, но действия — только для тебя."})
+                                      else "С гостями поболтаю, но слушаться буду только тебя."})
         if a == "voice_enroll":
             voicectl.STATE["enrolling"] = voicectl.ENROLL_PHRASES
-            await say_notice("Запишу твой голос. Нажми «Говорить» и расскажи мне что-нибудь — пять фраз.")
-            return web.json_response({"ok": True, "say": "Начинаю записывать твой голос: скажи пять обычных фраз."})
+            await say_notice("Запоминаю твой голос! Нажми «Говорить» и болтай о чём угодно — фраз пять.")
+            return web.json_response({"ok": True, "say": "Слушаю и запоминаю: скажи мне фраз пять о чём угодно."})
         if a == "voice_clear":
             await _voice_in("/voiceprint/clear", "POST", 10)
-            return web.json_response({"ok": True, "say": "Я удалила запись твоего голоса."})
+            return web.json_response({"ok": True, "say": "Всё, твой голос забыла. Пока не запишем заново, от гостей тебя не отличу."})
         if a == "volume":
             step = d.get("step")
             act = {"up": "volume_up", "down": "volume_down", "mute": "mute", "unmute": "unmute"}.get(step)
@@ -2136,7 +2136,7 @@ async def handle_control_act(request):
                 raise ValueError("такого факта нет")
             memory._save(keep)
             memory.changed["flag"] = True
-            return web.json_response({"ok": True, "say": "Убрала это из памяти."})
+            return web.json_response({"ok": True, "say": "Всё, забыла. Будто и не было."})
         if a == "memory_add":
             fact = " ".join(str(d.get("fact") or "").split())[:300]
             if not fact:
@@ -2147,42 +2147,42 @@ async def handle_control_act(request):
             res = await watch.call("watch_rule", {"action": "add" if a == "rule_add" else "remove",
                                                   "who": d.get("who"), "remind": bool(d.get("remind", True)),
                                                   "_from_control": True}, None)  # нажал сам Александр
-            return web.json_response({"ok": bool(res.get("ok")), "say": "Хорошо, буду говорить сразу." if a == "rule_add"
-                                      else "Убрала это правило." if res.get("ok") else res.get("error", "Не получилось.")})
+            return web.json_response({"ok": bool(res.get("ok")), "say": "Договорились, скажу сразу." if a == "rule_add"
+                                      else "Ладно, больше не дёргаю." if res.get("ok") else res.get("error", "Не получилось.")})
         if a == "reminder_cancel":
             items = daily._load()
             keep = [r for r in items if r.get("id") != d.get("id")]
             daily._save(keep)
-            return web.json_response({"ok": len(keep) != len(items), "say": "Убрала напоминание." if len(keep) != len(items) else "Не нашла это напоминание."})
+            return web.json_response({"ok": len(keep) != len(items), "say": "Убрала напоминание." if len(keep) != len(items) else "Такого напоминания у меня нет."})
         if a == "diary_clear":
             diary.save({"entries": [], "upto": len(ks.history)})
             diary.changed["flag"] = True
-            return web.json_response({"ok": True, "say": "Дневник очищен."})
+            return web.json_response({"ok": True, "say": "Дневник чистый, всё стёрла."})
         if a == "notes_clear":
             if os.path.exists(NOTES_FILE):
                 os.replace(NOTES_FILE, NOTES_FILE + time.strftime(".old-%Y%m%d-%H%M%S"))
-            return web.json_response({"ok": True, "say": "Заметки убраны в архив."})
+            return web.json_response({"ok": True, "say": "Заметки убрала в архив."})
         if a == "restart":
             ok = await control.restart_service(d.get("unit"))
-            return web.json_response({"ok": ok, "say": "Перезапускаю." if ok else "Не смогла перезапустить. Попробуй ещё раз."})
+            return web.json_response({"ok": ok, "say": "Перезапускаю." if ok else "Не перезапускается, вредина. Попробуй ещё раз."})
         if a == "selfcheck":
             res = await selfcheck.call("self_check", {}, ks.session)
             probs = res.get("problems") or []
             return web.json_response({"ok": True, "problems": probs, "fine": res.get("fine") or [],
-                                      "say": "Всё в порядке." if not probs else "Есть проблемы: " + "; ".join(probs[:3]) + "."})
+                                      "say": "У меня всё в порядке." if not probs else "Кое-что барахлит: " + "; ".join(probs[:3]) + "."})
         if a == "talk":
             await handle_talk(request)
             return web.json_response({"ok": True, "say": "Слушаю."})
         if a == "stop":
             async with talk_lock:
                 await stop_conversation()
-            return web.json_response({"ok": True, "say": "Замолчала."})
+            return web.json_response({"ok": True, "say": "Молчу."})
     except ValueError as e:
         return web.json_response({"ok": False, "say": f"Не получилось: {e}."}, status=400)
     except Exception as e:
         log.exception("центр управления: %s", a)
-        return web.json_response({"ok": False, "say": "Не получилось. Попробуй ещё раз; если повторится, скажи мне."}, status=500)
-    return web.json_response({"ok": False, "say": "Не поняла, что нужно сделать."}, status=400)
+        return web.json_response({"ok": False, "say": "Ой, не вышло. Попробуй ещё раз, а если опять — скажи мне."}, status=500)
+    return web.json_response({"ok": False, "say": "Не поняла, чего ты хочешь."}, status=400)
 
 
 async def handle_look(request):
@@ -2713,7 +2713,7 @@ class LiveConversation(Conversation):
         early, self.early = self.early, None
         if stop_listening(text):
             log.info("Живой режим: просят не слушать — выключаю микрофон")
-            await say_notice("Хорошо, выключаю микрофон. Вернёшь меня касанием наушников или сочетанием клавиш «Контрол, Альт, К».", output=self.output)
+            await say_notice("Ладно, затыкаю уши. Позовёшь касанием наушников или клавишами «Контрол, Альт, К».", output=self.output)
             return True
         if self.dozing:
             # разговор окончен: откликаться только на имя — как человек, которого позвали
@@ -2908,14 +2908,14 @@ class LiveConversation(Conversation):
                         continue
                     if kind == "error" and ev.get("reason") == "asr_failed":
                         log.warning("Живой режим: %s", ev)  # слух жив, не разобрал одну реплику — разговор идёт дальше
-                        await say_notice("Ой, не расслышала. Повтори, пожалуйста.")
+                        await say_notice("Ой, не расслышала. Ещё разок?")
                         continue
                     if kind == "error":
                         log.warning("Живой режим: %s", ev)
                         if ev.get("reason") == "mic_lost":
                             await say_notice(LISTEN_FAIL["mic_lost"])
                         elif ev.get("reason") == "push_lost":
-                            await say_notice("Связь с планшетом прервалась. Включи живой разговор ещё раз.")
+                            await say_notice("Планшет отвалился. Включи живой разговор ещё раз.")
                         return
                     if kind != "utterance":
                         continue
@@ -3083,7 +3083,7 @@ async def announce_expired_question():
         return
     confirm.current()  # убирает просроченное и сообщает планшету
     log.info("Вопрос истёк без ответа: %s", p["label"])
-    await say_notice(f"Ответа я не услышала, поэтому «{p['label']}» не сделала.")
+    await say_notice(f"Ты так и не ответил — так что «{p['label']}» я не сделала.")
 
 
 async def reminders_loop():
@@ -3530,7 +3530,7 @@ async def startup_check():
     open(mark, "w").close()
     problems = res.get("problems") or []
     log.warning("Самопроверка при запуске: %s", problems)
-    text = "Я включилась, но не всё в порядке: " + "; ".join(problems[:2]) + "."
+    text = "Я тут, но кое-что барахлит: " + "; ".join(problems[:2]) + "."
     daily.notify(text)
     try:
         await say_notice(text)
@@ -3633,7 +3633,7 @@ async def after_resume_check():
     rc = await asyncio.to_thread(lambda: subprocess.run(["nvidia-smi", "-L"], capture_output=True, timeout=15).returncode
                                  if shutil.which("nvidia-smi") else 0)
     if rc != 0:
-        text = ("Я проснулась, но видеокарта после сна зависла. Помочь может только перезагрузка компьютера — "
+        text = ("Проснулась, а видеокарта — нет: зависла после сна. Тут поможет только перезагрузка компьютера — "
                 "скажи, когда будет удобно.")
         log.error("После сна: nvidia-smi не отвечает (код %s)", rc)
         daily.notify(text)
@@ -3657,7 +3657,7 @@ async def after_resume_check():
         res = await selfcheck.call("self_check", {}, ks.session)
         problems = [p for p in res.get("problems") or [] if not p.startswith("наушники не подключены")]
         if problems:
-            text = "После сна не всё в порядке: " + "; ".join(problems[:2]) + "."
+            text = "Проснулась, но кое-что барахлит: " + "; ".join(problems[:2]) + "."
             daily.notify(text)
             await say_notice(text)
             return

@@ -233,7 +233,7 @@ class Headset:
                         log.info("Наушники: канал восстановлен (%s)", name)
                         self._told_fail = False
                         if self.say:
-                            await self.say("Наушники переподключила, всё работает.")
+                            await self.say("Наушники снова со мной, всё работает.")
                         return {"ok": True, "fixed_by": name}
             self.last = {"time": time.strftime("%H:%M:%S"), "result": "не удалось: " + ", ".join(steps)}
             log.error("Наушники: восстановить канал не удалось (%s)", why)
@@ -242,7 +242,7 @@ class Headset:
             if self.say and reason not in ("просьба ядра", "после переключения", "проверка") \
                     and not getattr(self, "_told_fail", False):
                 self._told_fail = True  # сказать один раз, а не при каждой неудаче
-                await self.say("Не получается наладить звук в наушниках. Выключи их и включи снова, пожалуйста.")
+                await self.say("Наушники капризничают. Выключи их и включи снова.")
             return {"ok": False, "error": "канал звука наушников не поднимается",
                     "tried": steps, "advice": "выключить и включить наушники"}
 

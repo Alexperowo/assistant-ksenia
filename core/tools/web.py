@@ -309,7 +309,7 @@ async def call(name, args, session):
                 url = pg.url
                 return confirm.ask(f"вписать и отправить на {_host(url)}",
                                    lambda: _type(pg, field, text, True, expect_url=url),
-                                   question=f"Вписать на сайте {_host(url)}: {text}. И отправить?")
+                                   question=f"На сайте {_host(url)} пишу: {text}. Отправляю?")
         res = await _type(pg, field, text, bool(args.get("enter")))
         if res.get("ok") and not args.get("enter"):
             _state["typed"] = {"url": pg.url, "text": text[:300]}

@@ -150,6 +150,6 @@ def test_wifi_connect_needs_yes():
     from tools import confirm, settings
     confirm.cancel()
     r = asyncio.run(settings.call("setting", {"action": "wifi_connect", "value": "Сосед"}, None))
-    assert r.get("prepared") and "вернусь на прежнюю" in r["speak_verbatim"]
+    assert r.get("prepared") and "вернусь на старую" in r["speak_verbatim"]
     confirm.cancel()
     assert not asyncio.run(settings.call("setting", {"action": "brightness_set", "value": "300"}, None))["ok"]

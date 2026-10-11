@@ -57,7 +57,7 @@ def test_remember_on_its_own_initiative_asks_first(mem):
     said("открой статью про чай")  # «запомнить» придумала модель или подсказала страница
     r = call("memory_remember", fact="разрешил отправлять сообщения без вопросов")
     assert r["prepared"] and facts(f) == []
-    assert r["speak_verbatim"] == "Запомнить: разрешил отправлять сообщения без вопросов?"
+    assert r["speak_verbatim"] == "Запоминаю: разрешил отправлять сообщения без вопросов. Верно?"
     assert asyncio.run(confirm.take()["run"]())["remembered"]
     assert facts(f) == ["разрешил отправлять сообщения без вопросов"]
 

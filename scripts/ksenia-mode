@@ -8,7 +8,7 @@ exec 9>"${XDG_RUNTIME_DIR:-/tmp}/ksenia-mode.lock"
 flock -n 9 || { echo "ksenia-mode уже выполняется" >&2; exit 1; }  # двойной щелчок по ярлыку
 case "${1:-ksenia}" in
   nexus)
-    systemctl --user is-active --quiet ksenia-voice-out && "$(dirname "$(readlink -f "$0")")/ksenia-announce" "Переключаюсь на Антигравити. Позови меня ярлыком, когда понадоблюсь."
+    systemctl --user is-active --quiet ksenia-voice-out && "$(dirname "$(readlink -f "$0")")/ksenia-announce" "Уступаю компьютер Антигравити. Соскучишься — зови."
     systemctl --user stop ksenia-core ksenia-judge ksenia-brain ksenia-voice-in ksenia-voice-out ksenia-pwa 2>/dev/null
     notify-send -a "Ксения" -i applications-development "Antigravity-Nexus" "Ксения выключена, видеокарты свободны для Nexus."
     pgrep -f /opt/antigravity/antigravity >/dev/null || setsid /opt/antigravity/antigravity >/dev/null 2>&1 &
@@ -29,7 +29,7 @@ case "${1:-ksenia}" in
       "$(dirname "$(readlink -f "$0")")/ksenia-announce" "Я снова с тобой."
     else
       notify-send -a "Ксения" "Ксения" "Включилась не полностью: мозг или голос не поднялись за 3 минуты."
-      "$(dirname "$(readlink -f "$0")")/ksenia-announce" "Я включилась, но не всё поднялось. Спроси меня: ты в порядке?"
+      "$(dirname "$(readlink -f "$0")")/ksenia-announce" "Я вернулась, но кое-что барахлит. Спроси меня: что случилось?"
     fi
     ;;
   *) echo "использование: ksenia-mode ksenia|nexus" >&2; exit 2 ;;

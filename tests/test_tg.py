@@ -24,6 +24,6 @@ def test_send_prepares_question_and_refuses_links(monkeypatch):
     monkeypatch.setattr(tg, "_find", find)
     confirm.cancel()
     r = asyncio.run(tg.call("tg_send", {"to": "Избранное", "text": "проверка"}, None))
-    assert r["speak_verbatim"] == "Пишу в Telegram, Избранное: проверка. Отправить?" and confirm.peek()
+    assert r["speak_verbatim"] == "В Телеграм, Избранное: проверка. Отправляю?" and confirm.peek()
     confirm.cancel()
     assert asyncio.run(tg.call("tg_send", {"to": "Избранное", "text": "смотри t.me/x"}, None))["ok"] is False

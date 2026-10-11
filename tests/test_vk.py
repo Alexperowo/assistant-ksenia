@@ -51,7 +51,7 @@ def test_send_is_prepared_and_question_is_exact(vk_env):
     r = asyncio.run(vk.call("vk_send", {"to": "Дима", "text": "привет\nкак дела"}, None))
     assert r["prepared"] and vk_env.log == []
     # одной строкой: Enter в поле ВК отправил бы первую строку отдельно
-    assert r["speak_verbatim"] == "Пишу Дима Петров: привет как дела. Отправить?"
+    assert r["speak_verbatim"] == "Во ВКонтакте, Дима Петров: привет как дела. Отправляю?"
 
 
 def test_send_clears_draft_before_typing(vk_env):

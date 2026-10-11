@@ -211,7 +211,7 @@ async def call(name, args, session):
         if who.lower() == "saved messages":
             who = "Избранное"  # вслух — по-русски
         return confirm.ask(f"сообщение в Telegram для {who}", lambda: _send(peer, who, text),
-                           question=f"Пишу в Telegram, {who}: {text}. Отправить?", to=who, text=text, limit=90,
+                           question=f"В Телеграм, {who}: {text}. Отправляю?", to=who, text=text, limit=90,
                            timeout_error="отправка затянулась — я не уверена, ушло ли сообщение; НЕ отправляй снова, "
                                          "сначала прочитай чат (tg_read)")
     return {"ok": False, "error": f"неизвестный инструмент {name}"}

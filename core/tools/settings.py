@@ -298,6 +298,6 @@ async def call(name, args, session):
             return {"ok": False, "error": "к какой сети?"}
         pw = args.get("password") or ""
         return confirm.ask(f"переключить Wi-Fi на «{ssid}»", lambda: _wifi_connect(ssid, pw),
-                           question=f"Переключаю Wi-Fi на «{ssid}». Связь пропадёт на полминуты; если интернета не будет — "
-                                    f"вернусь на прежнюю сеть. Переключить?")
+                           question=f"Перехожу на сеть «{ssid}». Интернет пропадёт на полминуты; если не появится — вернусь на старую. "
+                                    f"Переключаю?")
     return {"ok": False, "error": f"неизвестная настройка {a}"}
