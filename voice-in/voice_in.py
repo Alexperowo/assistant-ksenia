@@ -646,6 +646,8 @@ async def handle_listen(request):
                     "bluez_output." + card[len("bluez_card."):].replace("_", ":")
         source = await asyncio.to_thread(find_source, card)
         if not source:
+            if restore:  # профиль уже переключили — вернуть музыку, иначе осталась бы «телефонной» (Codex, тесты)
+                await restore_a2dp(card, restore)
             return web.json_response({"error": "no_microphone"}, status=503)
         timings["mic_ready_s"] = round(time.time() - t0, 2)
         restore_task = None
