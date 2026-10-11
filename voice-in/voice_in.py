@@ -931,7 +931,7 @@ async def _live_event(ws, seg, partial, send_partial, frame):
         partial["utt"] += 1  # опоздавшие частичные результаты этой реплики больше не нужны
         pcm, info = seg.utterance()
         t1 = time.time()
-        ear._save_debug([pcm])
+        spawn_bg(asyncio.to_thread(ear._save_debug, [pcm]))  # запись для разбора — фоном, не перед распознаванием
         spk = asyncio.create_task(infer(ear.vp.check, pcm)) if ear.vp else None
         text, sure = await infer(ear.transcribe_sure, pcm)
         info["stt_s"] = round(time.time() - t1, 2)

@@ -1088,7 +1088,7 @@ class Speaker:
 
     async def finish(self):
         try:
-            self.save_recording()
+            await asyncio.to_thread(self.save_recording)  # запись WAV и уборка — не в цикле ядра (Codex №2)
         except OSError as e:
             log.warning("запись ответа не сохранена: %s", e)
         if self._play_task is not None and not self._play_task.done():

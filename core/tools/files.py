@@ -5,6 +5,7 @@
 Перенос и корзина — только после «да» (ядро); удаления насовсем нет — только в корзину, откуда можно вернуть.
 """
 import asyncio
+import functools
 import os
 import re
 import shutil
@@ -40,7 +41,10 @@ SCHEMAS = [
 TIMEOUTS = {"files": 60}
 
 
+@functools.lru_cache(maxsize=None)
 def _dir(xdg, fallback):
+    # папки XDG не меняются на ходу: xdg-user-dir — один раз, а не синхронно на каждый запрос, пока ядро
+    # стоит (анализ Codex №2: «что нового в файлах» замораживал ядро до 9 с при зависшей команде)
     try:
         p = subprocess.run(["xdg-user-dir", xdg], capture_output=True, text=True, timeout=3).stdout.strip()
         return p or os.path.join(HOME, fallback)
