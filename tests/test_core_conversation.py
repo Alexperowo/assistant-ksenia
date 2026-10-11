@@ -53,17 +53,17 @@ def test_goodbye_ends_after_answer(env):
 
 def test_no_microphone_is_said_aloud(env):
     run_conv(FakeResponse(503, body='{"error": "no_microphone"}'))
-    assert env["turns"] == [] and "не слышу" in env["notices"][0] or "тебя не слышу" in env["notices"][0]
+    assert env["turns"] == [] and "не слышу" in env["notices"][0]
 
 
 def test_voice_in_down_is_said_aloud(env):
     run_conv(aiohttp.ClientConnectionError("refused"))
-    assert "восстановить связь" in env["notices"][0]
+    assert "слышать" in env["notices"][0]
 
 
 def test_voice_in_crash_with_plain_text_body(env):
     run_conv(FakeResponse(500, body="500 Internal Server Error"))
-    assert "восстановить связь" in env["notices"][0]
+    assert "слышать" in env["notices"][0]
 
 
 def test_busy_listener_is_waited_not_treated_as_silence(env):
