@@ -2120,7 +2120,25 @@ async def handle_control_act(request):
             if not act:
                 raise ValueError("громче/тише")
             res = await settings.call("setting", {"action": act}, None)
+            if not res.get("ok"):  # раньше центр говорил «Громкость 50» и при неудаче (анализ Codex, 2.2)
+                return web.json_response({"ok": False, "say": "Громкость не меняется, упрямая. Попробуй ещё раз."})
             return web.json_response({"ok": True, "say": f"Громкость {res.get('volume_percent', '')}".strip() + "."})
+        if a == "computer":
+            # настройки компьютера, которые раньше были только голосом (анализ Codex, 3.2): яркость, колонки, тема, ночь
+            do = {"brightness_up": ("brightness_up", ""), "brightness_down": ("brightness_down", ""),
+                  "speakers_up": ("speakers_up", ""), "speakers_down": ("speakers_down", ""),
+                  "theme_dark": ("theme", "dark"), "theme_light": ("theme", "light"),
+                  "night_on": ("night_light", "on"), "night_off": ("night_light", "off")}.get(d.get("do"))
+            if not do:
+                raise ValueError("такого действия нет")
+            res = await settings.call("setting", {"action": do[0], "value": do[1]}, None)
+            if not res.get("ok"):
+                return web.json_response({"ok": False, "say": "Не вышло. " + str(res.get("error") or "Попробуй ещё раз.")})
+            say = {"brightness": lambda: f"Яркость {res.get('brightness')}%.", "speakers": lambda: f"Колонки на {res.get('speakers')}%.",
+                   "theme": lambda: "Тёмная тема — глазам легче." if do[1] == "dark" else "Светлая тема.",
+                   "night_light": lambda: "Тёплый экран включила." if do[1] == "on" else "Тёплый экран выключила."}
+            key = next(k for k in say if do[0].startswith(k))
+            return web.json_response({"ok": True, "say": say[key]()})
         if a == "music":
             act = d.get("do")
             if act not in ("pause", "resume", "stop", "volume_up", "volume_down"):

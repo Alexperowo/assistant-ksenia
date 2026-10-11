@@ -5,6 +5,11 @@ Description=Ксения: ядро (разговор, характер, озву
 After=ksenia-brain.service ksenia-voice-out.service ksenia-voice-in.service graphical-session.target
 
 [Service]
+# Вывод pactl, nmcli, bluetoothctl, apt разбирается по английским словам («Active Profile», «connected»).
+# Русские переводы этих программ (language-pack-ru, чистая установка Kubuntu) сломали бы разбор — сообщения
+# программ всегда по-английски; язык Ксении от этого не зависит (2026-10-11)
+Environment=LC_MESSAGES=C.UTF-8
+Environment=LANGUAGE=
 Type=simple
 WorkingDirectory=/home/user/Agents/Ksenia/core
 ExecStart=/home/user/Agents/Ksenia/.venv/bin/python core.py

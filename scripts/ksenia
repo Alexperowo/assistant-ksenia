@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Управление Ксенией: ksenia talk | stop | say "текст" | status. На talk висит Ctrl+Alt+K.
+# Раньше при выключенной Ксении клавиши молчали — Александр не видит экран и не понимал, что случилось
+# (2026-10-11). Теперь она говорит, что выключена; второе нажатие за 15 с — включиться.
+HERE="$(dirname "$(readlink -f "$0")")"
+CORE=http://127.0.0.1:18130
+MARK="${XDG_RUNTIME_DIR:-/tmp}/ksenia-wake-press"
+
+core_up() { curl -s -m 2 "$CORE/status" >/dev/null 2>&1; }
+
+case "${1:-talk}" in
+  talk)
+    if core_up; then
+      curl -s -m 120 -X POST "$CORE/talk" > /dev/null &
+    elif pgrep -f "[k]senia-mode ksenia" >/dev/null; then
+      "$HERE/ksenia-announce" "Я уже просыпаюсь, ещё чуть-чуть." &
+    elif [ -f "$MARK" ] && [ $(( $(date +%s) - $(stat -c %Y "$MARK") )) -lt 15 ]; then
+      rm -f "$MARK"
+      "$HERE/ksenia-announce" "Иду! Дай мне минуту-другую."
+      setsid "$HERE/ksenia-mode" ksenia >/dev/null 2>&1 &
+    else
+      touch "$MARK"
+      if systemctl --user is-active --quiet nexus-llama nexus-tinfield nexus-nex nexus-ornith 2>/dev/null; then
+        "$HERE/ksenia-announce" "Я сейчас выключена — видеокарты у Антигравити. Нажми ещё раз, и я вернусь." &
+      else
+        "$HERE/ksenia-announce" "Я сейчас выключена. Нажми ещё раз, и я вернусь." &
+      fi
+    fi ;;
+  stop)   curl -s -m 5 -X POST "$CORE/stop" > /dev/null ;;
+  say)    shift; python3 -c 'import json,sys;print(json.dumps({"text":" ".join(sys.argv[1:])}))' "$@" | curl -s -m 120 -X POST -H 'Content-Type: application/json' --data-binary @- "$CORE/say" ;;
+  status) curl -s "$CORE/status"; echo ;;
+esac
