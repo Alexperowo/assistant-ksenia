@@ -229,6 +229,9 @@ async def call(name, args, session):
         text = " ".join((args.get("text") or "").split())
         if not text:
             return {"ok": False, "error": "не сказано, о чём напомнить"}
+        if args.get("in_minutes") and args.get("at"):
+            # оба сразу — молча брали минуты, и напоминание звучало не тогда (анализ Codex 2026-10-11, п. 2.4)
+            return {"ok": False, "error": "дано и «через сколько минут», и «во сколько» — выбери одно"}
         if args.get("in_minutes"):
             try:
                 minutes = float(args["in_minutes"])

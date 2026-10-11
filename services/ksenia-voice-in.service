@@ -1,5 +1,5 @@
 [Unit]
-Description=Ксения: слух (Whisper large-v3-turbo на RTX 2080 Ti, :18120)
+Description=Ксения: слух (GigaAM v3 на RTX 2080 Ti, :18120)
 
 [Service]
 Type=simple

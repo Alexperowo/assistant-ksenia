@@ -31,13 +31,13 @@ from aiohttp import web
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-from tools import confirm, daily, desktop, files, guide, headphones, tg, watch, memory, music, research, screen, selfcheck, settings, system, vk, voicectl  # noqa: E402  (инструменты — отдельные модули в core/tools)
+from tools import confirm, daily, desktop, files, guide, headphones, tg, watch, memory, music, prefs, research, screen, selfcheck, settings, system, vk, voicectl  # noqa: E402  (инструменты — отдельные модули в core/tools)
 from tools import web as webtool  # noqa: E402  (не путать с aiohttp.web)
 import speech_norm  # noqa: E402
 import diary  # noqa: E402
 import live_intent  # noqa: E402  (что значит реплика во время речи Ксении)
 
-TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research, daily, voicectl, system, settings, selfcheck, headphones, files, watch, guide, tg]
+TOOL_MODULES = [music, screen, vk, webtool, desktop, memory, research, daily, voicectl, system, settings, prefs, selfcheck, headphones, files, watch, guide, tg]
 TOOL_SCHEMAS = [sch for m in TOOL_MODULES for sch in m.SCHEMAS]
 TOOL_INDEX = {sch["function"]["name"]: m for m in TOOL_MODULES for sch in m.SCHEMAS}
 
@@ -93,7 +93,7 @@ UNTRUSTED_TOOLS = {"web_open", "web_outline", "web_search", "screen_read", "scre
                    "cursor_look", "files"}
 # После них в том же ходе не выполняются: ввод текста, напоминания, настройки, перенос и удаление файлов.
 TAINT_BLOCKED = {"dictate", "ui_type", "web_type", "remind_set", "remind_cancel", "setting", "memory_remember",
-                 "memory_forget", "watch_rule", "voice_mode", "voice_enroll", "system"}
+                 "memory_forget", "watch_rule", "voice_mode", "voice_enroll", "system", "ksenia_setting"}
 
 
 def untrusted_call(name: str, arguments: str) -> bool:
@@ -2100,7 +2100,11 @@ async def handle_control_act(request):
                                       else res.get("error", "Не получилось — выключи и включи наушники.")})
         if a == "voice_mode":
             mode = "owner_only" if d.get("mode") == "owner_only" else "guest"
-            await voicectl.call("voice_mode", {"mode": mode}, ks.session)
+            # нажатие в центре (вход по коду) — это и есть согласие Александра; без _confirmed вопрос «Включить
+            # гостевой режим?» готовился, но никто его не произносил, а центр уже писал «переключила» (Codex, 3.4)
+            res = await voicectl.call("voice_mode", {"mode": mode, "_confirmed": True}, ks.session)
+            if not res.get("ok"):
+                return web.json_response({"ok": False, "say": res.get("error", "Не получилось переключить.")})
             return web.json_response({"ok": True, "say": "Слушаю только тебя." if mode == "owner_only"
                                       else "С гостями говорю, но действия — только для тебя."})
         if a == "voice_enroll":
@@ -2587,6 +2591,7 @@ class LiveConversation(Conversation):
         self.prejudge = None
         self.ctx_sent = None
         self.last_bc = 0.0
+        self.auto_failed = False  # «жду имени» не включился сам (слух был занят) — повторить при следующем опросе
         self.music_back = False  # позвали касанием в режиме музыки: после разговора — обратно к музыке, без дрёмы
 
     def can_doze(self):
@@ -2850,7 +2855,8 @@ class LiveConversation(Conversation):
                 if first.get("type") != "ready":
                     await ws.close()
                     if self.dozing:  # включался сам («жду имени») — обычный разговор с сигналом тут не к месту
-                        log.info("Живой режим недоступен (%s) — жду имени не получится", first)
+                        log.info("Живой режим недоступен (%s) — попробую снова через несколько секунд", first)
+                        self.auto_failed = True  # headset_auto_live повторит: иначе тишина до переподключения
                         return
                     log.info("Живой режим недоступен (%s) — обычный разговор", first)
                     return await Conversation.run(self)
@@ -3144,9 +3150,12 @@ async def headset_auto_live():
             last_try = time.time()
             spawn(_quiet_reconnect())
         # и при запуске ядра, если наушники уже подключены (was ещё None), — не только при переходе
-        if now_on and was is not True and not conv.active() and CONFIG.get("live_mode", True) \
+        # и повтор, если прошлое включение сорвалось (слух был занят) — иначе Ксения молчала бы до
+        # переподключения наушников (анализ Codex 2026-10-11, п. 1.2)
+        if now_on and (was is not True or live.auto_failed) and not conv.active() and CONFIG.get("live_mode", True) \
                 and CONFIG.get("live_doze", True):
             log.info("Наушники подключились — живой разговор: жду, когда позовут по имени")
+            live.auto_failed = False
             await start_talk(doze=True)
         was = now_on
 
@@ -3661,6 +3670,7 @@ async def on_start(app):
     ks.session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True))
     # «звук в колонки/в наушники» голосом — это и голос Ксении, а не только системный выход по умолчанию
     settings.VOICE_OUTPUT_HOOK["set"] = lambda v: control.set_setting(CONFIG, "voice_output", v)
+    prefs.CONFIG = CONFIG
     spawn(asyncio.to_thread(silero_model))  # запасной голос — заранее, а не в момент поломки основного
     research.CTX.update({"brain_url": CONFIG["brain_url"], "brain_key": BRAIN_KEY})
     # ссылки на фоновые задачи храним: цикл событий держит задачи только слабыми ссылками

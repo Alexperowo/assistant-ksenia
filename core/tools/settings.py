@@ -201,8 +201,12 @@ async def call(name, args, session):
         vol0, _ = await _volume()
         if a == "volume_down" and vol0 is not None and vol0 <= MIN_VOLUME:
             return {"ok": True, "volume_percent": vol0, "note": "уже самый тихий уровень, при котором ты меня слышишь"}
-        await _run("wpctl", "set-volume", "-l", "1.5", "@DEFAULT_AUDIO_SINK@", "10%+" if a == "volume_up" else "10%-")
+        rc, _ = await _run("wpctl", "set-volume", "-l", "1.5", "@DEFAULT_AUDIO_SINK@", "10%+" if a == "volume_up" else "10%-")
         vol, muted = await _volume()
+        if a == "volume_up" and vol0 is not None and vol0 >= 150 and vol == vol0:
+            return {"ok": True, "volume_percent": vol, "note": "уже самая большая громкость"}
+        if rc != 0 or vol is None or vol == vol0:  # не «сделала», если звук не изменился (Codex, 2.2)
+            return {"ok": False, "volume_percent": vol, "error": "громкость не изменилась"}
         return {"ok": True, "volume_percent": vol, "muted": muted}
     if a == "volume_set":
         if not v.isdigit() or not 0 <= int(v) <= 150:
