@@ -226,6 +226,7 @@ def test_own_echo_from_speakers_is_recognized():
     import time as t
     import core
     core.SPOKEN.clear()
+    core.PLAY_END["t"] = t.time() + 1  # её голос ещё звучит
     core.SPOKEN.append((t.time(), core.live_intent.norm("Опять про кота? Ну ладно, раз хочешь — расскажу по-другому.").split()))
     assert core.is_own_echo("Ну ладно, раз хочешь.") and core.is_own_echo("Опять про кота.")
     assert not core.is_own_echo("Расскажи про собаку") and not core.is_own_echo("Который час?")
@@ -270,6 +271,7 @@ def test_users_words_sharing_common_words_with_her_are_not_echo():
     import time as t
     import core
     core.SPOKEN.clear()
+    core.PLAY_END["t"] = t.time() + 1
     core.SPOKEN.append((t.time(), core.live_intent.norm("Что именно? Самодиагностику, пожалуйста, уточни.").split()))
     assert not core.is_own_echo("Проведи, пожалуйста, самодиагностику. Что?")
     assert core.is_own_echo("Что именно? Самодиагностику уточни.")
@@ -288,7 +290,33 @@ def test_echo_partial_does_not_stop_her(monkeypatch):
         stopped.append(1)
     monkeypatch.setattr(lc, "cancel_turn", cancel)
     core.SPOKEN.clear()
+    core.PLAY_END["t"] = t.time() + 1
     core.SPOKEN.append((t.time(), core.live_intent.norm("Слышу тебя как обычно — я же живу в твоём компьютере.").split()))
     asyncio.run(lc.on_partial("Слышу тебя как обычно. Я жжу."))
     assert stopped == [] and lc.early is None
     core.SPOKEN.clear()
+
+
+def test_answer_with_her_word_after_she_finished_is_not_echo():
+    """«Чай или кофе?» — «Кофе»: она уже замолчала, значит это он, а не эхо (анализ Codex №6)."""
+    import time as t
+    import core
+    core.SPOKEN.clear()
+    core.SPOKEN.append((t.time() - 4, core.live_intent.norm("Тебе чай или кофе?").split()))
+    core.PLAY_END["t"] = t.time() - 3
+    assert not core.is_own_echo("Кофе.")
+    core.PLAY_END["t"] = t.time() + 1
+    assert core.is_own_echo("Кофе.")  # пока звучит — может быть эхом
+    core.SPOKEN.clear()
+    core.PLAY_END["t"] = 0.0
+
+
+def test_echo_with_one_misrecognized_word_is_still_echo():
+    import time as t
+    import core
+    core.SPOKEN.clear()
+    core.PLAY_END["t"] = t.time() + 1
+    core.SPOKEN.append((t.time(), core.live_intent.norm("Сегодня солнечно, ветер слабый, дождя не будет.").split()))
+    assert core.is_own_echo("Сегодня солнечно, ветер слабый, дождика не будет.")
+    core.SPOKEN.clear()
+    core.PLAY_END["t"] = 0.0

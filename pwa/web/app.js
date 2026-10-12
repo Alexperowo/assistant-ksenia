@@ -56,7 +56,7 @@
   // ---------- состояние ----------
   const LABEL = { idle: 'Готова', live: 'Слушаю', listening: 'Слушаю', thinking: 'Думаю', speaking: 'Говорю', offline: 'Нет связи с компьютером',
     pc_listening: 'Слушаю в наушниках', pc_speaking: 'Говорю в наушниках', unheard: 'Не расслышала' };
-  const SUB = { idle: 'Нажми «Говорить» или скажи «Ксения» в наушники', live: 'Живой разговор: говори как с человеком, можно перебивать',
+  const SUB = { idle: 'Нажми «Говорить» или «Живой разговор»', live: 'Живой разговор: говори как с человеком, можно перебивать',
     listening: 'Говори, я слушаю',
     thinking: 'Секунду…', speaking: 'Можно перебить — просто начни говорить', offline: 'Подключусь сама, как только компьютер ответит',
     pc_listening: 'Разговор идёт через наушники у компьютера', pc_speaking: 'Разговор идёт через наушники у компьютера',
@@ -198,7 +198,9 @@
       // Уровень тишины — по минимуму, а не по среднему: раньше, если Александр начинал говорить сразу после сигнала,
       // «тишиной» считался его голос, порог уходил выше речи, и через 8 с — «не расслышала» (тест 2026-10-12).
       if (this.noise === null) this.noise = Math.min(rms, 0.01);
-      this.noise = rms < this.noise ? rms : Math.min(this.noise * 1.002 + 0.00002, 0.02);
+      // во время речи уровень тишины не трогаем: иначе он дорастал до тихого голоса и обрывал фразу (анализ Codex №6)
+      const quiet = !this.started || rms < Math.max(this.noise * 2, 0.007);
+      if (quiet) this.noise = rms < this.noise ? rms : Math.min(this.noise * 1.002 + 0.00002, 0.02);
       if (!this.started) {
         const thr = Math.max(this.noise * 3, 0.01);
         this.win.push(rms > thr);
@@ -253,7 +255,7 @@
 
   // ---------- живой разговор: микрофон открыт всё время, звук потоком на компьютер ----------
   const liveMode = {
-    on: false, ws: null, stream: null, src: null, node: null,
+    on: false, ws: null, stream: null, src: null, node: null, early: [],
     async start() {
       const ctx = audio();
       try {
@@ -264,6 +266,7 @@
       this.node = new AudioWorkletNode(ctx, 'recorder');
       const mute = ctx.createGain(); mute.gain.value = 0;
       this.src.connect(this.node).connect(mute).connect(ctx.destination);
+      this.early = [];
       this.ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/live`);
       this.ws.binaryType = 'arraybuffer';
       this.node.port.onmessage = (e) => {
@@ -271,7 +274,10 @@
         let sum = 0;
         for (let i = 0; i < pcm.length; i += 4) { const v = pcm[i] / 32768; sum += v * v; }
         if (!player.active()) level.set(Math.sqrt(sum / (pcm.length / 4)) * 6);
-        if (this.ws && this.ws.readyState === 1) this.ws.send(pcm.buffer);
+        if (this.ws && this.ws.readyState === 1) {
+          while (this.early.length) this.ws.send(this.early.shift());
+          this.ws.send(pcm.buffer);
+        } else if (this.early.length < 100) this.early.push(pcm.buffer); // пока соединение открывается — до 2 с не терять
       };
       // живой разговор закончил компьютер (тишина, «пока», слух перезапустился) — кнопку погасить и микрофон
       // выключить; раньше это делалось только при ошибке, и звук шёл в пустоту (проверка Fable, b4)

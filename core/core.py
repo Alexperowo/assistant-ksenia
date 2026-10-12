@@ -756,9 +756,14 @@ def is_own_echo(text: str, window_s: float = 20) -> bool:
         return False
     # считаем по значимым словам: «Проведи, пожалуйста, самодиагностику. Что?» сошлось с её фразой по «пожалуйста»,
     # «что» и «самодиагностику» и пропало как эхо — Александру пришлось повторять (тест с планшета 2026-10-12)
-    content = [w for w in words if len(w) > 3 and w not in ECHO_STOP] or words
-    need = len(content) if len(content) <= 4 else round(len(content) * 0.8)
     now = time.time()
+    # эхо бывает, только пока её голос звучит и чуть после: раньше её фраза полминуты назад «съедала» его ответ тем же
+    # словом («кофе» на «чай или кофе?») — анализ Codex №6
+    if now - PLAY_END["t"] > CONFIG.get("echo_tail_s", 2.5):
+        return False
+    content = [w for w in words if len(w) > 3 and w not in ECHO_STOP] or words
+    # одно-два значимых слова — только все; три и больше — допускаем одну ошибку распознавания
+    need = len(content) if len(content) <= 2 else max(2, len(content) - 1, round(len(content) * 0.8))
     for t, said in reversed(SPOKEN):
         if now - t > window_s:
             break
@@ -767,6 +772,7 @@ def is_own_echo(text: str, window_s: float = 20) -> bool:
     return False
 
 
+PLAY_END = {"t": 0.0}  # когда доиграет последний звук Ксении (в колонках, наушниках или на планшете)
 ECHO_STOP = {"пожалуйста", "только", "сейчас", "можно", "тебя", "меня", "тебе", "мне", "давай", "просто", "вообще",
              "очень", "этот", "эта", "это", "того", "тоже", "ладно", "хорошо", "конечно", "спасибо", "когда", "потом"}
 
@@ -811,6 +817,7 @@ class Speaker:
         now = time.time() if now is None else now
         dur = nbytes / self.BYTES_PER_S
         self._play_end = max(self._play_end, now) + dur
+        PLAY_END["t"] = max(PLAY_END["t"], self._play_end)
         self.audio_s += dur
 
     def played_s(self, now: float = None) -> float:
@@ -2706,8 +2713,12 @@ class LiveConversation(Conversation):
         ctx = self.context(partial=True)
         d = live_intent.quick(text, ctx)
         words = live_intent.norm(text).split()
+        # где её голос слышен в микрофоне (динамик планшета, колонки) — по началу фразы замолкать только на явные
+        # «стоп», «погоди»: вопрос или просьба из трёх слов чаще оказывались её же эхом (анализ Codex №6)
+        echo_prone = self.source == "push" or CONFIG.get("voice_output", "auto") == "monitor"
         early = d.sure and (d.kind in ("hold", "stop", "aside") or
-                            (d.kind in ("question", "request", "correction", "goodbye") and len(words) >= 3))
+                            (not echo_prone and d.kind in ("question", "request", "correction", "goodbye")
+                             and len(words) >= 3))
         if early:
             log.info("По началу фразы «%s» — %s: Ксения замолкает", text, d.kind)
             live_intent.log_decision(text, ctx, d, acted="замолчала по началу фразы")
