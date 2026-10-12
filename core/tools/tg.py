@@ -26,6 +26,7 @@ SCHEMAS = [
                         "to — название чата, как в Telegram («Мама», «Дима»). Чат станет прочитанным."),
         "parameters": {"type": "object", "properties": {
             "to": {"type": "string"},
+            "which": {"type": "integer", "description": "номер из candidates, если чатов с таким названием несколько"},
             "count": {"type": "integer", "description": "сколько последних сообщений (по умолчанию 5)"}},
             "required": ["to"]}}},
     {"type": "function", "function": {
@@ -34,7 +35,8 @@ SCHEMAS = [
                         "текст, как сказал Александр, без твоих добавлений. Сообщение НЕ уходит сразу: вопрос «Отправить?» "
                         "ядро произнесёт само, отправит после его «да»."),
         "parameters": {"type": "object", "properties": {
-            "to": {"type": "string"}, "text": {"type": "string"}},
+            "to": {"type": "string"}, "text": {"type": "string"},
+            "which": {"type": "integer", "description": "номер из candidates, если чатов с таким названием несколько"}},
             "required": ["to", "text"]}}},
 ]
 TIMEOUTS = {"tg_unread": 60, "tg_read": 60, "tg_send": 60}
@@ -89,6 +91,29 @@ async def _page():
         raise
     await pg.wait_for_timeout(800)
     return pg
+
+
+def _kind(peer) -> str:
+    """Telegram Web K: у людей номер чата положительный, у групп и каналов — отрицательный."""
+    return "группа или канал" if str(peer).startswith("-") else "личный чат"
+
+
+def _same_name(found, which, args_to):
+    """Несколько чатов с одним названием (2026-10-12: две «Дамиры»): раньше — только «уточни, какой», и мозг выдумывал
+    варианты. Теперь — список с видом чата и последним сообщением, выбор — номером which."""
+    peers = list(dict.fromkeys(f["peer"] for f in found))
+    if len(peers) <= 1:
+        return found[0], None
+    byp = {f["peer"]: f for f in found}
+    if which and 1 <= int(which) <= len(peers):
+        return byp[peers[int(which) - 1]], None
+    personal = [p for p in peers if _kind(p) == "личный чат"]
+    return None, {"ok": False, "error": f"в Telegram несколько чатов «{args_to}» — спроси Александра, какой",
+                  "candidates": [{"n": i + 1, "name": byp[p]["name"], "kind": _kind(p),
+                                  "last": byp[p]["preview"][:80]} for i, p in enumerate(peers)][:5],
+                  "note": "назови варианты коротко (личный чат или группа, о чём последнее сообщение) и повтори вызов "
+                          "с which — номером выбранного" + (" ; личный один — если речь о человеке, бери его"
+                                                            if len(personal) == 1 else "")}
 
 
 def _uniq(items):
@@ -200,6 +225,10 @@ async def _call(name, args, session):
             return {"ok": False, "error": f"не нашла в Telegram чат «{args.get('to')}»"}
         if len({f["name"] for f in found}) > 1:
             return {"ok": False, "error": "нашлось несколько", "candidates": [f["name"] for f in found[:5]]}
+        chat, ask = _same_name(found, args.get("which"), args.get("to", ""))
+        if ask:
+            return ask
+        found = [chat]
         await _open(pg, found[0]["peer"], found[0]["name"])
         msgs = await pg.evaluate(MSG_JS, max(1, min(int(args.get("count") or 5), 20)))
         lines = []
@@ -221,13 +250,18 @@ async def _call(name, args, session):
         names = list(dict.fromkeys(f["name"] for f in found))
         if len(names) > 1:
             return {"ok": False, "error": "нашлось несколько — уточни у Александра", "candidates": names[:5]}
-        if len({f["peer"] for f in found}) > 1:
-            return {"ok": False, "error": f"в Telegram несколько чатов с названием «{names[0]}» — уточни, какой"}
+        dup = len({f["peer"] for f in found}) > 1
+        chat, ask = _same_name(found, args.get("which"), names[0])
+        if ask:
+            return ask
+        found = [chat]
         if LINK_OR_EMOJI.search(text):
             return {"ok": False, "error": "в тексте ссылка или смайлик — голосом их не проверить, такое не отправляю"}
         peer, who = found[0]["peer"], found[0]["name"]
         if who.lower() == "saved messages":
             who = "Избранное"  # вслух — по-русски
+        if dup:
+            who += f" ({_kind(peer)})"  # две «Дамиры» — по вопросу должно быть ясно, какая
         return confirm.ask(f"сообщение в Telegram для {who}", lambda: _send(peer, who, text),
                            question=f"В Телеграм, {who}: {text}. Отправляю?", to=who, text=text, limit=90,
                            timeout_error="отправка затянулась — я не уверена, ушло ли сообщение; НЕ отправляй снова, "

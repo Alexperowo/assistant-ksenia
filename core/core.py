@@ -234,6 +234,37 @@ MONTHS = ["января", "февраля", "марта", "апреля", "ма�
 WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
 
 
+DEV_NOTES = os.path.join(ROOT, "..", "data", "dev-notes.md")
+DEV_NOTE_RE = re.compile(r"^(?:ксени[яю],?\s*)?(?:замет(?:ка|ку|очка)\b[\s,.:—-]*|.{0,40}?\bв заметк\w*\b[\s,.:—-]*)(.*)$",
+                         re.I | re.S)
+
+
+EMPTY_KEYS = ("options", "results", "files", "items", "tracks", "books", "found", "networks")
+
+
+def looks_empty(result: dict) -> bool:
+    """Инструмент сработал, но ничего не нашёл: пустой список результатов или «(пусто)»."""
+    if str(result.get("output", "")).strip() == "(пусто)":
+        return True
+    return any(k in result and isinstance(result[k], list) and not result[k] for k in EMPTY_KEYS)
+
+
+def save_dev_note(text: str) -> bool:
+    """«Заметка: живой разговор через планшет обрывается» — Александр диктует это разработчику, а не Ксении
+    (тест 2026-10-12: она переспрашивала «что ты хочешь записать?»). Ядро пишет дословно в data/dev-notes.md."""
+    m = DEV_NOTE_RE.match((text or "").strip())
+    if not m or len(m.group(0).split()) < 3:
+        return False
+    try:
+        with open(DEV_NOTES, "a", encoding="utf-8") as f:
+            f.write(f"- {datetime.datetime.now():%Y-%m-%d %H:%M} — {text.strip()}\n")
+    except OSError as e:
+        log.warning("заметка не записана: %s", e)
+        return False
+    log.info("Заметка для разработчика: %s", text.strip()[:200])
+    return True
+
+
 def now_context():
     n = datetime.datetime.now()
     night = n.hour >= CONFIG.get("night_from", 23) or n.hour < CONFIG.get("night_to", 7)  # те же часы, что у тихого голоса
@@ -1614,6 +1645,9 @@ class Ksenia:
                      "тему (через research_background, не по памяти)")
         if not internal and not guest and not getattr(self, "_sandbox", False):
             note += self.news_note(first_today and not user_text.startswith("(служебно"))
+            if save_dev_note(user_text):
+                note += ("; это заметка Александра для разработчика (Claude), ядро уже записало её в файл — скажи "
+                         "одним-двумя словами по-своему, что записала; ничего не переспрашивай и не выполняй")
         self.history.append({"role": "user", "content": f"{user_text}\n\n(служебно: {now_context()}{note})"})
         if not internal:
             hub.emit({"type": "user", "text": user_text})
@@ -1663,7 +1697,7 @@ class Ksenia:
                 pending = list(calls)
                 if not calls or speaker.cancelled:
                     break
-                any_error = False
+                any_error = any_empty = False
                 for c in calls:
                     if speaker.cancelled:  # «стоп» посреди цепочки — остальные вызовы не исполняем
                         break
@@ -1688,6 +1722,12 @@ class Ksenia:
                         result = {**result, "already_said": f"ты уже сказала вслух «{self._acked['said']}» — не повторяй, скажи результат"}
                     if result.get("ok") and untrusted_call(c["function"]["name"], c["function"].get("arguments") or "{}"):
                         self._tainted = c["function"]["name"]
+                    if result.get("ok") and looks_empty(result):
+                        # «ничего не нашлось» — не повод сдаваться и переспрашивать (тест 2026-10-12: «Синамон»,
+                        # «ЛитРПГ» — один неудачный поиск, и «уточни, пожалуйста»): подумать и попробовать иначе
+                        result = {**result, "retry_hint": "ничего не нашлось — прежде чем переспрашивать, попробуй "
+                                  "сама ещё раз иначе: другое написание, латиницей или кириллицей, синоним, короче"}
+                        any_empty = True
                     any_error = any_error or not result.get("ok", False)
                     timings.setdefault("tools", []).append({"name": c["function"]["name"], "ok": bool(result.get("ok"))})
                     log.info("Инструмент %s(%s) -> %s", c["function"]["name"],
@@ -1703,7 +1743,8 @@ class Ksenia:
                 if speaker.cancelled:
                     break
                 # после инструмента — подумать чуть больше; после ошибки — ещё больше
-                budget = CONFIG.get("budget_hard", 4096) if any_error else CONFIG.get("budget_task", 512)
+                budget = CONFIG.get("budget_hard", 4096) if any_error else \
+                    CONFIG.get("budget_retry", 512) if any_empty else CONFIG.get("budget_task", 512)
             await queue.put(None)
             await worker
         finally:

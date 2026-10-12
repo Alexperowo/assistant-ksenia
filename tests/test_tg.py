@@ -38,3 +38,24 @@ def test_no_vpn_is_explained(monkeypatch):
     monkeypatch.setattr(tg, "_page", boom)
     r = asyncio.run(tg.call("tg_unread", {}, None))
     assert not r["ok"] and "VPN" in r["error"]
+
+
+def test_same_name_chats_offer_candidates_and_which_picks(monkeypatch):
+    """2026-10-12: две «Дамиры» — раньше только «уточни, какой», и мозг выдумывал варианты."""
+    import asyncio
+    from tools import confirm, tg
+    items = [{"peer": "-100", "name": "Дамира", "unread": "", "muted": True, "preview": "Группа: встреча в пятницу"},
+             {"peer": "555", "name": "Дамира", "unread": "", "muted": False, "preview": "Ок, до завтра"}]
+
+    async def page():
+        class P:
+            async def evaluate(self, js, *a):
+                return items
+        return P()
+    monkeypatch.setattr(tg, "_page", page)
+    r = asyncio.run(tg.call("tg_send", {"to": "Дамира", "text": "привет"}, None))
+    assert not r["ok"] and [c["kind"] for c in r["candidates"]] == ["группа или канал", "личный чат"]
+    assert "личный один" in r["note"]
+    r = asyncio.run(tg.call("tg_send", {"to": "Дамира", "text": "привет", "which": 2}, None))
+    assert r["prepared"] and "личный чат" in r["speak_verbatim"]
+    confirm.cancel("тест")
