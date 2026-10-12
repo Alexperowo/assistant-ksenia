@@ -180,6 +180,7 @@ async def run_tool(name, arguments, session):
 
 
 CONFIG = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
+import recap  # noqa: E402  краткое содержание выпавшей части разговора
 import control  # noqa: E402  центр управления: настройки человека поверх config.json (data/settings.json)
 control.apply_user_settings(CONFIG)
 PERSONA = open(os.path.join(ROOT, "prompts", "persona.md"), encoding="utf-8").read()
@@ -1321,6 +1322,7 @@ class Ksenia:
     def __init__(self):
         self.history = self._load_history()
         self.window_start = 0
+        self._recap_from = None  # окно прыгнуло посреди разговора — выпавшее ещё не в кратком содержании
         self.build_system()
         self._needs_prewarm = not self._restore_prefix()
         if not self._needs_prewarm:
@@ -1368,7 +1370,7 @@ class Ksenia:
         или память изменились, — а дневник пишется после каждых 10 минут тишины, и почти каждый разговор после
         перерыва начинался с пересчёта всей истории (~13 с тишины). Новое в памяти и дневнике теперь приходит
         служебной пометкой в реплике (news_note) — история только дописывается."""
-        self.system = PERSONA + memory.prompt_block() + diary.prompt_block()
+        self.system = PERSONA + memory.prompt_block() + diary.prompt_block() + recap.prompt_block()
         self.facts_seen = [f["fact"] for f in memory._load()]
         memory.changed["flag"] = diary.changed["flag"] = False
 
@@ -1502,18 +1504,46 @@ class Ksenia:
         size = sum(len(str(m.get("content") or "")) for m in self.history[self.window_start:])
         return max((len(self.history) - self.window_start) / max_n, size / max_chars)
 
-    def _jump(self):
-        """Прыжок окна: оставляем свежую половину по числу сообщений и по объёму. Это полный пересчёт у мозга —
-        поэтому он делается заранее, в тишине (rewindow_when_idle), а не посреди разговора."""
-        max_n = CONFIG.get("history_max", 160)
-        max_chars = CONFIG.get("history_max_chars", 60000)
+    def _jump_point(self, keep_n: int = None, keep_chars: int = None) -> int:
+        """Откуда начнётся окно после прыжка: свежая половина по числу сообщений и по объёму."""
+        keep_n = keep_n or CONFIG.get("history_max", 160) // 2
+        keep_chars = keep_chars or CONFIG.get("history_max_chars", 60000) // 2
         start, acc = len(self.history), 0
-        while start > self.window_start and len(self.history) - start < max_n // 2 and acc < max_chars // 2:
+        while start > self.window_start and len(self.history) - start < keep_n and acc < keep_chars:
             start -= 1
             acc += len(str(self.history[start].get("content") or ""))
+        return start
+
+    def _jump(self):
+        """Прыжок окна посреди разговора (окно переполнилось раньше, чем наступила тишина). Краткое содержание
+        выпавшего допишется потом, в тишине (rewindow_when_idle) — здесь ждать мозг нельзя."""
+        start = self._jump_point()
+        if start > self.window_start and not getattr(self, "_sandbox", False) and getattr(self, "_recap_from", None) is None:
+            self._recap_from = self.window_start
         self.window_start = start
         if not getattr(self, "_sandbox", False):
             self.build_system()  # начало запроса и так меняется — заодно свежие память и дневник
+
+    async def jump_with_recap(self, keep_n: int = None) -> bool:
+        """Прыжок окна в тишине: выпадающее сначала уходит в краткое содержание (recap), потом окно сдвигается.
+        Как живой человек, Ксения помнит, с чего начинали, хотя дословно — только свежее (2026-10-12)."""
+        start = self._jump_point(keep_n=keep_n)
+        frm = self._recap_from if self._recap_from is not None else self.window_start
+        if start <= frm and getattr(self, "_recap_from", None) is None:
+            return False
+        try:
+            ok = await recap.update(self.session, self.history[frm:max(start, self.window_start)], CONFIG["brain_url"],
+                                    BRAIN_KEY, slot=CONFIG.get("diary_slot", 1))
+        except Exception as e:
+            log.warning("краткое содержание разговора не обновлено: %r", e)
+            ok = False
+        if ok:
+            self._recap_from = None
+            log.info("Краткое содержание разговора обновлено (%d сообщений ушли из дословной памяти)",
+                     max(start, self.window_start) - frm)
+        self.window_start = max(start, self.window_start)
+        self.build_system()
+        return True
 
     async def prewarm(self) -> bool:
         """Посчитать в мозге начало следующего запроса (подсказка + окно до последней реплики Александра), пока
@@ -3472,6 +3502,26 @@ class HeadsetButtons:
 buttons = HeadsetButtons()
 
 
+async def handle_rewindow(request):
+    """POST /rewindow {"keep": N} — сжать всё, кроме N последних сообщений, в краткое содержание и прогреть мозг
+    (для обслуживания: например, убрать из дословной памяти тестовую болтовню). Только с этого компьютера."""
+    try:
+        keep = int((await request.json()).get("keep", 20))
+    except Exception:
+        keep = 20
+    if conv.active() and not getattr(live, "dozing", False):
+        return web.json_response({"ok": False, "error": "идёт разговор"}, status=409)
+    async with ks.lock:
+        before = ks.window_start
+        await ks.jump_with_recap(keep_n=max(4, keep))
+        warm = await ks.prewarm()
+        if warm:
+            ks._warm_at = len(ks.history)
+            ks._save_prefix()
+    return web.json_response({"ok": True, "window_from": before, "window_to": ks.window_start, "warm": warm,
+                              "recap": recap.load().get("text", "")})
+
+
 async def handle_status(request):
     return web.json_response({"busy": ks.lock.locked(), "conversation": conv.active(), "turns": conv.turns,
                               "history": len(ks.history), "sink": await asyncio.to_thread(pick_output_sink),
@@ -3651,10 +3701,11 @@ async def rewindow_when_idle():
             if idle < CONFIG.get("rewindow_idle_s", 180):
                 continue
             fill = ks.window_fill()
-            if fill < CONFIG.get("rewindow_fill", 0.6) or getattr(ks, "_warm_at", None) == len(ks.history):
+            if getattr(ks, "_recap_from", None) is None and (fill < CONFIG.get("rewindow_fill", 0.6)
+                                           or getattr(ks, "_warm_at", None) == len(ks.history)):
                 continue
             async with ks.lock:
-                ks._jump()
+                await ks.jump_with_recap()
                 if await ks.prewarm():
                     ks._warm_at = len(ks.history)
                     ks._save_prefix()
@@ -3772,7 +3823,7 @@ def main():
     app.on_startup.append(on_start)
     app.on_cleanup.append(on_cleanup)
     app.add_routes([web.post("/say", handle_say), web.post("/talk", handle_talk),
-                    web.post("/stop", handle_stop), web.get("/status", handle_status),
+                    web.post("/stop", handle_stop), web.get("/status", handle_status), web.post("/rewindow", handle_rewindow),
                     web.get("/client", handle_client), web.post("/notice", handle_notice),
                     web.get("/control/state", handle_control_state), web.post("/control/act", handle_control_act),
                     web.post("/look", handle_look),
