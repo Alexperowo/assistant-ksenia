@@ -103,9 +103,49 @@
       level.analyser.fftSize = 1024;
       level.buf = new Float32Array(level.analyser.fftSize);
       level.analyser.connect(actx.destination);
+      aec.setup();
     }
     return level.analyser || (actx && actx.destination);
   }
+
+  // ---------- эхоподавление: голос Ксении — через WebRTC, а не прямо из Web Audio ----------
+  // Chrome гасит в микрофоне только звук, пришедший по WebRTC; голос из Web Audio он не знает и не вычитает —
+  // поэтому в живом разговоре с планшета её голос из динамика возвращался в микрофон, и она «говорила сама с собой»
+  // (тест 2026-10-12). Известный приём: прогнать звук через пару RTCPeerConnection внутри страницы и играть его
+  // элементом <audio>. Переключаемся, только когда соединение установилось, иначе — без звука (Neurons-AI, issue 20).
+  const aec = {
+    state: 'off', el: null,
+    async setup() {
+      if (this.state !== 'off' || !actx || !window.RTCPeerConnection || !actx.createMediaStreamDestination) return;
+      this.state = 'starting';
+      try {
+        const dest = actx.createMediaStreamDestination();
+        const a = new RTCPeerConnection(), b = new RTCPeerConnection();
+        a.onicecandidate = (e) => { if (e.candidate) b.addIceCandidate(e.candidate).catch(() => {}); };
+        b.onicecandidate = (e) => { if (e.candidate) a.addIceCandidate(e.candidate).catch(() => {}); };
+        const got = new Promise((ok) => { b.ontrack = (e) => ok(e.streams[0] || new MediaStream([e.track])); });
+        dest.stream.getAudioTracks().forEach((t) => a.addTrack(t, dest.stream));
+        // голос, а не телефон: Opus с высоким битрейтом
+        const hq = (d) => ({ type: d.type, sdp: d.sdp.replace(/(a=fmtp:\d+ [^\r\n]*)/g, '$1;maxaveragebitrate=128000;stereo=0') });
+        const offer = await a.createOffer(); await a.setLocalDescription(offer); await b.setRemoteDescription(hq(offer));
+        const answer = await b.createAnswer(); await b.setLocalDescription(answer); await a.setRemoteDescription(hq(answer));
+        const stream = await Promise.race([got, new Promise((_, no) => setTimeout(() => no(new Error('нет дорожки')), 4000))]);
+        await new Promise((ok, no) => {
+          const t = setTimeout(() => no(new Error('нет соединения')), 4000);
+          const check = () => { if (b.connectionState === 'connected' || b.iceConnectionState === 'connected' || b.iceConnectionState === 'completed') { clearTimeout(t); ok(); } };
+          b.onconnectionstatechange = check; b.oniceconnectionstatechange = check; check();
+        });
+        this.el = new Audio(); this.el.autoplay = true; this.el.srcObject = stream;
+        await this.el.play();
+        level.analyser.disconnect(); level.analyser.connect(dest);
+        this.state = 'on';
+      } catch (e) {
+        this.state = 'failed';
+      }
+      const tr = this.state === 'on' ? '' : ' (' + this.state + ')';
+      api('/api/diag', { aec: this.state === 'on' ? 'webrtc-loopback' : 'web-audio' + tr });
+    },
+  };
 
   // ---------- сервер ----------
   async function api(path, body) {

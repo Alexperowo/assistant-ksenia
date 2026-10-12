@@ -1,6 +1,6 @@
 // Ксения: офлайн-оболочка приложения. Сначала сеть (всегда свежая версия), из кэша — только если сети нет.
 // API, WebSocket и звук никогда не кэшируются.
-const CACHE = 'ksenia-pwa-v6';  // v6: порог тишины не растёт во время речи; живой режим не теряет первые кадры
+const CACHE = 'ksenia-pwa-v7';  // v7: голос через WebRTC-петлю — Chrome вычитает его эхо из микрофона
 const SHELL = ['/', '/app.js', '/control.js', '/styles.css', '/recorder-worklet.js', '/manifest.webmanifest',
   '/icon-192x192.png', '/icon-512x512.png', '/icon.svg'];
 

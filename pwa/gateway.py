@@ -574,6 +574,15 @@ class Gateway:
             return web.json_response({"ok": False})
         return web.json_response({"ok": True})
 
+    async def h_diag(self, request):
+        """Короткие сведения от планшета для разбора (например, включилось ли эхоподавление) — только в журнал."""
+        try:
+            d = await request.json()
+            log.info("Планшет сообщает: %s", json.dumps(d, ensure_ascii=False)[:300])
+        except Exception:
+            pass
+        return web.json_response({"ok": True})
+
     # ----- сборка -----
 
     def app(self):
@@ -584,7 +593,7 @@ class Gateway:
             web.get("/api/ws", self.h_ws), web.get("/api/live", self.h_live), web.post("/api/look", self.h_look),
             web.post("/api/utterance", self.h_utterance),
             web.post("/api/text", self.h_text), web.post("/api/stop", self.h_stop),
-            web.post("/api/listening", self.h_listening),
+            web.post("/api/listening", self.h_listening), web.post("/api/diag", self.h_diag),
             web.get("/api/control/state", self.h_control_state), web.post("/api/control/act", self.h_control_act)])
         app.on_startup.append(self._start)
         app.on_cleanup.append(self._stop)
