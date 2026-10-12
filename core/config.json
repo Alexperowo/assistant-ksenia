@@ -11,6 +11,7 @@
   "budget_action": 256,
   "budget_retry": 512,
   "brain_reasoning_levels": true,
+  "brain_stable_thinking": true,
   "warmup": false,
   "max_tokens": 1200,
   "history_max": 160,

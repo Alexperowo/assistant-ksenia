@@ -92,7 +92,11 @@ def test_step_collects_streamed_tool_calls(ks):
     assert calls[1]["function"]["name"] == "music_status"
     body = reqs[0][1]["json"]
     # в разговоре начало запроса неизменно: без размышлений, иначе шаблон меняет начало подсказки (пересчёт ~15 с)
-    if core.CONFIG.get("brain_reasoning_levels") and core.CONFIG.get("stable_prefix", True):
+    if core.CONFIG.get("brain_stable_thinking"):
+        # свой шаблон мозга не трогает начало подсказки: размышление — только концом, уровень не передаётся
+        assert body["chat_template_kwargs"] == {"enable_thinking": True} and "reasoning_effort" not in body
+        assert body["thinking_budget_tokens"] == 256
+    elif core.CONFIG.get("brain_reasoning_levels") and core.CONFIG.get("stable_prefix", True):
         assert body["chat_template_kwargs"] == {"enable_thinking": False} and "reasoning_effort" not in body
     else:
         assert body["thinking_budget_tokens"] == 256

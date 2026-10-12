@@ -14,6 +14,6 @@ exec /home/user/backend/llama.cpp-prism/src/build/bin/llama-server \
     --host 127.0.0.1 --port 18100 \
     -c 131072 -np 2 -ngl 99 -fa on -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 -t 6 \
     --spec-type draft-mtp --spec-draft-n-max 2 \
-    --jinja --reasoning-format deepseek \
+    --jinja --chat-template-file /home/user/Agents/Ksenia/brain/chat-template-stable.jinja --reasoning-format deepseek \
     --reasoning-budget-message "Conclude reasoning immediately and output the final answer now." \
     --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0 --presence-penalty 1.5

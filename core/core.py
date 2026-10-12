@@ -234,11 +234,6 @@ MONTHS = ["января", "февраля", "марта", "апреля", "ма�
 WEEKDAYS = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
 
 
-DEV_NOTES = os.path.join(ROOT, "..", "data", "dev-notes.md")
-DEV_NOTE_RE = re.compile(r"^(?:ксени[яю],?\s*)?(?:замет(?:ка|ку|очка)\b[\s,.:—-]*|.{0,40}?\bв заметк\w*\b[\s,.:—-]*)(.*)$",
-                         re.I | re.S)
-
-
 EMPTY_KEYS = ("options", "results", "files", "items", "tracks", "books", "found", "networks")
 
 
@@ -247,22 +242,6 @@ def looks_empty(result: dict) -> bool:
     if str(result.get("output", "")).strip() == "(пусто)":
         return True
     return any(k in result and isinstance(result[k], list) and not result[k] for k in EMPTY_KEYS)
-
-
-def save_dev_note(text: str) -> bool:
-    """«Заметка: живой разговор через планшет обрывается» — Александр диктует это разработчику, а не Ксении
-    (тест 2026-10-12: она переспрашивала «что ты хочешь записать?»). Ядро пишет дословно в data/dev-notes.md."""
-    m = DEV_NOTE_RE.match((text or "").strip())
-    if not m or len(m.group(0).split()) < 3:
-        return False
-    try:
-        with open(DEV_NOTES, "a", encoding="utf-8") as f:
-            f.write(f"- {datetime.datetime.now():%Y-%m-%d %H:%M} — {text.strip()}\n")
-    except OSError as e:
-        log.warning("заметка не записана: %s", e)
-        return False
-    log.info("Заметка для разработчика: %s", text.strip()[:200])
-    return True
 
 
 def now_context():
@@ -1645,7 +1624,11 @@ class Ksenia:
                      "тему (через research_background, не по памяти)")
         if not internal and not guest and not getattr(self, "_sandbox", False):
             note += self.news_note(first_today and not user_text.startswith("(служебно"))
-            if save_dev_note(user_text):
+            dev = agent_note(user_text)
+            if dev is not None:
+                # с планшета («Говорить») заметка шла в мозг, и Ксения переспрашивала «что ты хочешь записать?» —
+                # гарнитура и живой режим ловят её раньше (agent_note), а этот путь — нет (тест 2026-10-12)
+                save_agent_note(dev, last_reply())
                 note += ("; это заметка Александра для разработчика (Claude), ядро уже записало её в файл — скажи "
                          "одним-двумя словами по-своему, что записала; ничего не переспрашивай и не выполняй")
         self.history.append({"role": "user", "content": f"{user_text}\n\n(служебно: {now_context()}{note})"})
@@ -1697,7 +1680,7 @@ class Ksenia:
                 pending = list(calls)
                 if not calls or speaker.cancelled:
                     break
-                any_error = any_empty = False
+                any_error = any_empty = asked_verbatim = False
                 for c in calls:
                     if speaker.cancelled:  # «стоп» посреди цепочки — остальные вызовы не исполняем
                         break
@@ -1733,6 +1716,8 @@ class Ksenia:
                     log.info("Инструмент %s(%s) -> %s", c["function"]["name"],
                              redact_calls([c])[0]["function"].get("arguments"),
                              {k: (v[:200] + "…" if isinstance(v, str) and len(v) > 200 else v) for k, v in result.items()})
+                    if result.get("prepared") and result.get("speak_verbatim"):
+                        asked_verbatim = True
                     if result.get("speak_verbatim") and not speaker.cancelled:
                         # дословное чтение: текст идёт прямо в голос кусками по предложениям, без пересказа мозгом
                         for part in split_for_reading(result["speak_verbatim"]):
@@ -1741,6 +1726,12 @@ class Ksenia:
                                          "content": json.dumps(result, ensure_ascii=False)})
                     pending.remove(c)
                 if speaker.cancelled:
+                    break
+                if asked_verbatim and not pending:
+                    # вопрос «…Отправляю?» уже прозвучал дословно — следующий шаг мозга лишь пересказывал его
+                    # («Готово, подготовлено. Жду твоего «да»», тест 2026-10-12, анализ Codex №7): ход окончен,
+                    # как у человека, который спросил и ждёт ответа
+                    self.history.append({"role": "assistant", "content": ""})
                     break
                 # после инструмента — подумать чуть больше; после ошибки — ещё больше
                 budget = CONFIG.get("budget_hard", 4096) if any_error else \
@@ -1813,7 +1804,7 @@ class Ksenia:
         # Бюджет > 0 — уровень рассуждения как подсказка шаблону (low/medium/xhigh; «high» шаблон Bonsai не принимает),
         # а жёсткий потолок по-прежнему thinking_budget_tokens (одни уровни размышления не укорачивают).
         if CONFIG.get("brain_reasoning_levels", False) and budget > 0 and not getattr(self, "_sandbox", False) \
-                and CONFIG.get("stable_prefix", True):
+                and CONFIG.get("stable_prefix", True) and not CONFIG.get("brain_stable_thinking", False):
             # «подумать» включает в шаблоне строку «Reasoning effort is set to …» в САМОМ НАЧАЛЕ подсказки: гибридный
             # мозг пересчитывал из-за неё весь разговор (~15 с), и ещё раз — на следующей обычной реплике.
             # В разговоре начало запроса всегда одно и то же, поэтому без размышлений (замер 2026-10-10)
@@ -1823,6 +1814,10 @@ class Ksenia:
                 body["chat_template_kwargs"] = {"enable_thinking": False}
                 # без бюджета: иначе сервер вставляет фразу-«стоп размышлений» прямо в ответ
                 body.pop("thinking_budget_tokens", None)
+            elif CONFIG.get("brain_stable_thinking", False):
+                # свой шаблон мозга (brain/chat-template-stable.jinja) не пишет уровень в начало подсказки: размышление
+                # включает только её конец, начало разговора и кэш те же; глубина — thinking_budget_tokens (2026-10-12)
+                body["chat_template_kwargs"] = {"enable_thinking": True}
             else:
                 body["reasoning_effort"] = "low" if budget <= 512 else ("medium" if budget <= 2048 else "xhigh")
         full, buf, first_sent = "", "", False
