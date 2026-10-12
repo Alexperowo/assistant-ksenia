@@ -754,13 +754,21 @@ def is_own_echo(text: str, window_s: float = 20) -> bool:
     words = [w for w in live_intent.norm(text).split() if len(w) > 1]
     if not words:
         return False
+    # считаем по значимым словам: «Проведи, пожалуйста, самодиагностику. Что?» сошлось с её фразой по «пожалуйста»,
+    # «что» и «самодиагностику» и пропало как эхо — Александру пришлось повторять (тест с планшета 2026-10-12)
+    content = [w for w in words if len(w) > 3 and w not in ECHO_STOP] or words
+    need = len(content) if len(content) <= 4 else round(len(content) * 0.8)
     now = time.time()
     for t, said in reversed(SPOKEN):
         if now - t > window_s:
             break
-        if said and sum(w in said for w in words) >= max(1, round(len(words) * 0.8)):
+        if said and sum(w in said for w in content) >= max(1, need):
             return True
     return False
+
+
+ECHO_STOP = {"пожалуйста", "только", "сейчас", "можно", "тебя", "меня", "тебе", "мне", "давай", "просто", "вообще",
+             "очень", "этот", "эта", "это", "того", "тоже", "ладно", "хорошо", "конечно", "спасибо", "когда", "потом"}
 
 
 class Speaker:
@@ -2690,6 +2698,10 @@ class LiveConversation(Conversation):
         """Начало его фразы, пока он ещё говорит: ясное «подожди…», «стоп», вопрос — замолчать сразу.
         Голос уверенно чужой (есть образец и не совпал) — не останавливаться по началу фразы."""
         if not self.busy() or self.early or not text or owner is False:
+            return
+        if is_own_echo(text):
+            # её же голос из динамика планшета или колонок: раньше начало эха останавливало её на полуслове, и она
+            # «разговаривала сама с собой» (тест с планшета 2026-10-12) — эхо проверялось только по концу фразы
             return
         ctx = self.context(partial=True)
         d = live_intent.quick(text, ctx)

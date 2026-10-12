@@ -157,6 +157,7 @@
 
   // ---------- запись: AudioWorklet -> 16 кГц -> WAV ----------
   // MediaRecorder в Chrome пишет только WebM/MP4, а слух (voice-in) читает WAV: собираем WAV сами.
+  const SETTLE_MS = 1500; // сколько тишины значит «договорил» в режиме касания
   const rec = {
     stream: null, node: null, src: null, frames: [], active: false, started: false, silentMs: 0, noise: null,
     win: [], t0: 0, workletReady: false, mode: 'tap',
@@ -194,9 +195,11 @@
       const elapsed = this.frames.length * 20;
       if (this.mode === 'hold') { if (elapsed > 60000) this.finish(); return; }
       if (elapsed < 300) return; // хвост сигнала «слушаю» ещё звучит
-      if (this.noise === null) this.noise = rms;
+      // Уровень тишины — по минимуму, а не по среднему: раньше, если Александр начинал говорить сразу после сигнала,
+      // «тишиной» считался его голос, порог уходил выше речи, и через 8 с — «не расслышала» (тест 2026-10-12).
+      if (this.noise === null) this.noise = Math.min(rms, 0.01);
+      this.noise = rms < this.noise ? rms : Math.min(this.noise * 1.002 + 0.00002, 0.02);
       if (!this.started) {
-        this.noise = 0.95 * this.noise + 0.05 * rms;
         const thr = Math.max(this.noise * 3, 0.01);
         this.win.push(rms > thr);
         if (this.win.length > 15) this.win.shift();
@@ -205,7 +208,8 @@
       } else {
         const thr = Math.max(this.noise * 2, 0.007);
         this.silentMs = rms < thr ? this.silentMs + 20 : 0;
-        if (this.silentMs >= 800 || elapsed > 30000) this.finish();
+        // 0,8 с паузы обрывали посреди мысли — приходилось говорить короткими фразами (тест 2026-10-12)
+        if (this.silentMs >= SETTLE_MS || elapsed > 45000) this.finish();
       }
     },
     release() {

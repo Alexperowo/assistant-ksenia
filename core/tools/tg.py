@@ -163,7 +163,25 @@ async def _send(peer, name, text):
                                          "чат (tg_read)"})}
 
 
+NET_FAIL = ("ERR_TUNNEL_CONNECTION_FAILED", "ERR_PROXY", "ERR_CONNECTION", "ERR_NAME_NOT_RESOLVED", "ERR_TIMED_OUT",
+            "ERR_NETWORK", "ERR_ADDRESS_UNREACHABLE")
+
+
 async def call(name, args, session):
+    try:
+        return await _call(name, args, session)
+    except Exception as e:
+        if any(code in str(e) for code in NET_FAIL):
+            # раньше — «внутри что-то сломалось», и Ксения советовала перезапустить приложение на планшете
+            # (тест 2026-10-12); на деле Telegram в России открывается только через VPN
+            return {"ok": False, "error": "Телеграм не открывается — похоже, на компьютере выключен VPN Happ",
+                    "advice": "скажи по-своему: включи VPN Happ на компьютере, и я посмотрю снова"}
+        if isinstance(e, RuntimeError) and "вход в Telegram" in str(e):
+            return {"ok": False, "error": str(e)}
+        raise
+
+
+async def _call(name, args, session):
     if name == "tg_unread":
         pg = await _page()
         items = [i for i in await pg.evaluate(LIST_JS) if _count(i["unread"])]

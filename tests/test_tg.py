@@ -27,3 +27,14 @@ def test_send_prepares_question_and_refuses_links(monkeypatch):
     assert r["speak_verbatim"] == "В Телеграм, Избранное: проверка. Отправляю?" and confirm.peek()
     confirm.cancel()
     assert asyncio.run(tg.call("tg_send", {"to": "Избранное", "text": "смотри t.me/x"}, None))["ok"] is False
+
+
+def test_no_vpn_is_explained(monkeypatch):
+    import asyncio
+    from tools import tg
+
+    async def boom():
+        raise Exception("Page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://web.telegram.org/k/")
+    monkeypatch.setattr(tg, "_page", boom)
+    r = asyncio.run(tg.call("tg_unread", {}, None))
+    assert not r["ok"] and "VPN" in r["error"]

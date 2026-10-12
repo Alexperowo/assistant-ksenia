@@ -263,3 +263,32 @@ def test_started_by_headset_waits_for_name(live_env, monkeypatch):
     turns, said = live_env([{"type": "ready"}, utt("Какая погода?"), 0.1, utt("Ксения, какая погода?"), 0.15,
                             utt("Не слушай.")])
     assert turns == ["какая погода?"]
+
+
+def test_users_words_sharing_common_words_with_her_are_not_echo():
+    """Тест с планшета 2026-10-12: «Проведи, пожалуйста, самодиагностику. Что?» пропало как эхо её фразы."""
+    import time as t
+    import core
+    core.SPOKEN.clear()
+    core.SPOKEN.append((t.time(), core.live_intent.norm("Что именно? Самодиагностику, пожалуйста, уточни.").split()))
+    assert not core.is_own_echo("Проведи, пожалуйста, самодиагностику. Что?")
+    assert core.is_own_echo("Что именно? Самодиагностику уточни.")
+    core.SPOKEN.clear()
+
+
+def test_echo_partial_does_not_stop_her(monkeypatch):
+    import asyncio
+    import time as t
+    import core
+    lc = core.LiveConversation()
+    monkeypatch.setattr(lc, "busy", lambda: True)
+    stopped = []
+
+    async def cancel():
+        stopped.append(1)
+    monkeypatch.setattr(lc, "cancel_turn", cancel)
+    core.SPOKEN.clear()
+    core.SPOKEN.append((t.time(), core.live_intent.norm("Слышу тебя как обычно — я же живу в твоём компьютере.").split()))
+    asyncio.run(lc.on_partial("Слышу тебя как обычно. Я жжу."))
+    assert stopped == [] and lc.early is None
+    core.SPOKEN.clear()
