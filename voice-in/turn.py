@@ -9,7 +9,8 @@ import os
 
 import numpy as np
 
-MODEL = "/home/user/Models/Speech/turn/smart-turn-v3.2-cpu.onnx"
+# модели — где скажет config/paths.env (KSENIA_MODELS; служба читает его как EnvironmentFile)
+MODEL = os.path.join(os.environ.get("KSENIA_MODELS", os.path.expanduser("~/Models")), "Speech/turn/smart-turn-v3.2-cpu.onnx")
 RATE = 16000
 N_SAMPLES = 8 * RATE
 

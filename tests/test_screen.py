@@ -63,24 +63,23 @@ def test_ocr_cleanup_keeps_short_words_and_numbers():
 def test_clipboard_text_or_picture(monkeypatch, stdout, ok):
     seen = []
 
-    def fake_run(*args, timeout=20):
-        seen.append(args)
-        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
+    def fake_get(primary=False):
+        seen.append(primary)
+        return stdout.encode("utf-8", errors="surrogateescape")
 
-    monkeypatch.setattr(screen, "_run", fake_run)
+    monkeypatch.setattr(screen.de, "clip_get", fake_get)
     r = asyncio.run(screen.call("clipboard_read", {"source": "clipboard"}, None))
     assert r["ok"] is ok
-    assert "--primary" not in seen[0]
+    assert seen == [False]  # буфер обмена, а не выделение
     if not ok:
         assert "не текст" in r["error"]
 
 
 def test_selection_uses_primary(monkeypatch):
     seen = []
-    monkeypatch.setattr(screen, "_run", lambda *a, timeout=20: seen.append(a) or
-                        subprocess.CompletedProcess(a, 1, stdout="", stderr=""))
+    monkeypatch.setattr(screen.de, "clip_get", lambda primary=False: seen.append(primary) or b"")
     r = asyncio.run(screen.call("clipboard_read", {"source": "selection"}, None))
-    assert "--primary" in seen[0] and r == {"ok": False, "error": "выделенного текста нет"}
+    assert seen == [True] and r == {"ok": False, "error": "выделенного текста нет"}
 
 
 def test_run_decodes_bad_bytes_without_crash():

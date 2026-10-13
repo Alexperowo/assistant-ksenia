@@ -4,6 +4,8 @@ Description=Ксения: запасной мозг Nex-N2.5-mini (RTX 5060 Ti, 
 Conflicts=ksenia-brain.service nexus-llama.service nexus-tinfield.service nexus-ornith.service nexus-nex.service
 
 [Service]
+# пути к моделям и движкам — одно место (config/paths.env, переезд 2026-10-13)
+EnvironmentFile=%h/Agents/Ksenia/config/paths.env
 Type=simple
 ExecStart=/home/user/Agents/Ksenia/brain/run_brain_nex.sh
 # always: и после внешнего kill с кодом 0 (аудит Fable, FA15); stop и Conflicts= по-прежнему останавливают

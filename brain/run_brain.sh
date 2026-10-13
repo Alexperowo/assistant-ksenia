@@ -6,8 +6,11 @@ export CUDA_VISIBLE_DEVICES=0
 export PATH=/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 "$(dirname "$0")/../scripts/wait-gpu.sh" 0 || exit 1  # драйвер после загрузки системы ещё не готов
-M=/home/user/Models/Bonsai-2-27B
-exec /home/user/backend/llama.cpp-prism/src/build/bin/llama-server \
+. "$(dirname "$(readlink -f "$0")")/../config/paths.env"  # KSENIA_MODELS, KSENIA_BACKEND
+M=$KSENIA_MODELS/Bonsai-2-27B
+# движок собран со старым путём к своим библиотекам (RUNPATH /home/user/backend/…) — указываем новый
+export LD_LIBRARY_PATH=$KSENIA_BACKEND/llama.cpp-prism/src/build/bin:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+exec $KSENIA_BACKEND/llama.cpp-prism/src/build/bin/llama-server \
     -m "$M/Bonsai-2-27B-PQ2_0-MTP.gguf" \
     --mmproj "$M/Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf" --image-max-tokens 2048 \
     --api-key-file /home/user/Agents/Ksenia/brain/api_key \

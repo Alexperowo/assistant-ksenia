@@ -12,7 +12,7 @@ import time
 import numpy as np
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-MODEL = "/home/user/Models/Speech/speaker/wespeaker-resnet34.onnx"
+MODEL = os.path.join(os.environ.get("KSENIA_MODELS", os.path.expanduser("~/Models")), "Speech/speaker/wespeaker-resnet34.onnx")
 FILE = os.path.normpath(os.path.join(ROOT, "..", "data", "voiceprint.json"))
 
 

@@ -2,6 +2,8 @@
 Description=Ксения: судья реплик живого режима (NeoHorse-1-4B на RTX 2080 Ti, :18150)
 
 [Service]
+# пути к моделям и движкам — одно место (config/paths.env, переезд 2026-10-13)
+EnvironmentFile=%h/Agents/Ksenia/config/paths.env
 Type=simple
 ExecStart=/home/user/Agents/Ksenia/brain/run_judge.sh
 # always: и после внешнего kill с кодом 0 (аудит Fable, FA15); stop и Conflicts= по-прежнему останавливают

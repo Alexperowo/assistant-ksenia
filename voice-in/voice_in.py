@@ -37,6 +37,12 @@ def sh(*args, timeout=5):
     return subprocess.run(args, capture_output=True, text=True, timeout=timeout).stdout
 
 
+def models_path(p: str) -> str:
+    """«$KSENIA_MODELS/…» из конфига — путь к моделям из config/paths.env (по умолчанию ~/Models)."""
+    os.environ.setdefault("KSENIA_MODELS", os.path.expanduser("~/Models"))
+    return os.path.expanduser(os.path.expandvars(p))
+
+
 def find_bt_card():
     """Первая подключённая Bluetooth-карта с профилем гарнитуры."""
     for line in sh("pactl", "list", "cards", "short").splitlines():
@@ -240,7 +246,7 @@ class Ear:
                 self.model.recognize(np.zeros(RATE, dtype=np.float32), sample_rate=RATE)
             self.model_ts = self.model.with_timestamps()  # та же модель, плюс уверенность по слогам
         else:
-            self.model = WhisperModel(CONFIG["model_dir"], device="cuda", compute_type=CONFIG.get("compute_type", "int8_float16"))
+            self.model = WhisperModel(models_path(CONFIG["model_dir"]), device="cuda", compute_type=CONFIG.get("compute_type", "int8_float16"))
         log.info("Распознавание (%s) загружено за %.1f с", self.engine, time.time() - t0)
         try:
             from voiceprint import Voiceprint

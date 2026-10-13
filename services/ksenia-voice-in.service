@@ -2,6 +2,8 @@
 Description=Ксения: слух (GigaAM v3 на RTX 2080 Ti, :18120)
 
 [Service]
+# пути к моделям и движкам — одно место (config/paths.env, переезд 2026-10-13)
+EnvironmentFile=%h/Agents/Ksenia/config/paths.env
 # Вывод pactl, nmcli, bluetoothctl, apt разбирается по английским словам («Active Profile», «connected»).
 # Русские переводы этих программ (language-pack-ru, чистая установка Kubuntu) сломали бы разбор — сообщения
 # программ всегда по-английски; язык Ксении от этого не зависит (2026-10-11)

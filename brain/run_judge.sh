@@ -6,8 +6,10 @@
 "$(dirname "$0")/../scripts/wait-gpu.sh" 1 || exit 1  # драйвер после загрузки системы ещё не готов
 export CUDA_DEVICE_ORDER=PCI_BUS_ID  # как у остальных: 1 — RTX 2080 Ti по шине (аудит Fable, FA17)
 export CUDA_VISIBLE_DEVICES=1
-MODEL="${JUDGE_MODEL:-$HOME/Models/judge/NeoHorse-1-4B-Q4_K_M.gguf}"
-exec "$HOME/backend/llama.cpp-mainline/build/bin/llama-server" \
+. "$(dirname "$(readlink -f "$0")")/../config/paths.env"  # KSENIA_MODELS, KSENIA_BACKEND
+MODEL="${JUDGE_MODEL:-$KSENIA_MODELS/judge/NeoHorse-1-4B-Q4_K_M.gguf}"
+export LD_LIBRARY_PATH=$KSENIA_BACKEND/llama.cpp-mainline/build/bin:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+exec "$KSENIA_BACKEND/llama.cpp-mainline/build/bin/llama-server" \
   -m "$MODEL" --device CUDA0 -ngl 99 -c 4096 -np 1 --host 127.0.0.1 --port "${JUDGE_PORT:-18150}" \
   -fa on --cache-reuse 256 --jinja --reasoning off \
   --no-webui --log-disable

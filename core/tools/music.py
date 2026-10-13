@@ -305,7 +305,7 @@ async def _youtube(query, video):
         try:  # спящий монитор — разбудить, видео же смотрят
             from tools import screen
             if await asyncio.to_thread(screen._dpms_is_off):
-                await asyncio.to_thread(screen._run, "kscreen-doctor", "--dpms", "on", timeout=5)
+                await asyncio.to_thread(screen.de.dpms, True)
         except Exception:
             pass
         # картинка и звук у YouTube — раздельные потоки: прокси для них задаётся на уровне сетевого модуля

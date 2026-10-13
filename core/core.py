@@ -494,7 +494,8 @@ def split_for_reading(text: str, max_len: int = 220):
 
 
 FALLBACK_VOICE = "/usr/bin/RHVoice-test"  # последний рубеж: робот, но без зависимостей
-SILERO_MODEL = os.path.expanduser(CONFIG.get("fallback_silero", "~/Models/Speech/silero/v5_5_ru.pt"))
+os.environ.setdefault("KSENIA_MODELS", os.path.expanduser("~/Models"))  # config/paths.env, если служба его не дала
+SILERO_MODEL = os.path.expanduser(os.path.expandvars(CONFIG.get("fallback_silero", "$KSENIA_MODELS/Speech/silero/v5_5_ru.pt")))
 _SILERO = {"model": None, "failed": False}
 
 
@@ -639,10 +640,10 @@ _WOKE = {"by_us": False}
 def wake_monitor_for_sound() -> bool:
     """Разбудить спящий монитор ради звука. True — проснулся и HDMI-выход появился (до 3 с)."""
     try:
-        from tools import screen
+        from tools import de, screen
         if not screen._dpms_is_off():
             return False
-        subprocess.run(["kscreen-doctor", "--dpms", "on"], capture_output=True, timeout=5)
+        de.dpms(True)
         for _ in range(30):
             out = subprocess.run(["pactl", "list", "sinks", "short"], capture_output=True, text=True, timeout=3).stdout
             if "hdmi" in out:
@@ -662,7 +663,8 @@ async def sleep_monitor_if_woken():
         return
     _WOKE["by_us"] = False
     await asyncio.sleep(CONFIG.get("monitor_sleep_after_s", 3))
-    await asyncio.to_thread(subprocess.run, ["kscreen-doctor", "--dpms", "off"], capture_output=True, timeout=5)
+    from tools import de
+    await asyncio.to_thread(de.dpms, False)
 
 
 class ClientHub:

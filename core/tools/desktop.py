@@ -15,7 +15,7 @@ import re
 import subprocess
 import time
 
-from tools import confirm, screen
+from tools import confirm, de, screen
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 HELPER = os.path.join(ROOT, "atspi_helper.py")
@@ -107,18 +107,19 @@ def _norm(s):
     return " ".join((s or "").lower().replace("ё", "е").split())
 
 
-ALIASES = {"настройки": "systemsettings", "параметры": "systemsettings", "параметры системы": "systemsettings",
-           "текстовый редактор": "org.kde.kate", "редактор": "org.kde.kate", "блокнот": "org.kde.kate",
-           "файлы": "org.kde.dolphin", "проводник": "org.kde.dolphin", "файловый менеджер": "org.kde.dolphin",
-           "терминал": "org.kde.konsole", "консоль": "org.kde.konsole", "калькулятор": "org.kde.kcalc",
+# Cinnamon (с 2026-10-13); KDE-имена — запасные, _find_app берёт первое существующее
+ALIASES = {"настройки": "cinnamon-settings", "параметры": "cinnamon-settings", "параметры системы": "cinnamon-settings",
+           "текстовый редактор": "org.gnome.gedit", "редактор": "org.gnome.gedit", "блокнот": "org.gnome.gedit",
+           "файлы": "nemo", "проводник": "nemo", "файловый менеджер": "nemo",
+           "терминал": "org.gnome.Terminal", "консоль": "org.gnome.Terminal", "калькулятор": "org.gnome.Calculator",
            "хром": "google-chrome", "гугл хром": "google-chrome", "гугл": "google-chrome",
-           "фаерфокс": "firefox_firefox", "файрфокс": "firefox_firefox", "лиса": "firefox_firefox",
+           "фаерфокс": "firefox", "файрфокс": "firefox", "лиса": "firefox", "телеграм": "org.telegram.desktop",
            "браузер": None}  # None — браузер по умолчанию
 
 
 def _desktop_ok(e):
-    """Только то, что показывается в KDE (у Александра параллельно стоит Cinnamon для пробы)."""
-    desk = os.environ.get("XDG_CURRENT_DESKTOP", "KDE").split(":")
+    """Только то, что показывается в нынешней оболочке (Cinnamon с 2026-10-13)."""
+    desk = os.environ.get("XDG_CURRENT_DESKTOP", "X-Cinnamon").split(":")
     only = [x for x in e.get("OnlyShowIn", "").split(";") if x]
     notin = [x for x in e.get("NotShowIn", "").split(";") if x]
     return (not only or any(d in only for d in desk)) and not any(d in notin for d in desk)
@@ -133,7 +134,7 @@ def _find_app(query):
                 app_id = subprocess.run(["xdg-settings", "get", "default-web-browser"], capture_output=True,
                                         text=True, timeout=5).stdout.strip().removesuffix(".desktop")
             except Exception:
-                app_id = "firefox_firefox"
+                app_id = "firefox"
         for d in APP_DIRS:
             if os.path.exists(os.path.join(d, app_id + ".desktop")):
                 return app_id, query
@@ -195,8 +196,10 @@ _KWIN_CURSOR_JS = os.path.join(ROOT, "..", "..", "data", "kwin-cursor.js")
 
 
 async def _cursor():
-    """Где курсор (логические координаты KWin). Скрипт KWin печатает в журнал строку с меткой этого замера —
-    берём только её (иначе можно прочитать позицию из предыдущего замера)."""
+    """Где курсор. X11 (Cinnamon) — xdotool, в тех же точках, что и снимок экрана. KDE (Wayland) — логические
+    координаты KWin: скрипт KWin печатает в журнал строку с меткой этого замера — берём только её."""
+    if not de.kde():
+        return await asyncio.to_thread(de.cursor_pos)
     nonce = f"{time.time_ns() % 10**9}"
     os.makedirs(os.path.dirname(_KWIN_CURSOR_JS), exist_ok=True)
     with open(_KWIN_CURSOR_JS, "w") as f:
@@ -222,7 +225,7 @@ _flat = {"done": False}
 async def _ensure_flat_pointer():
     """Ускорение указателя для виртуальной мыши ydotool — выключить (1:1), иначе сдвиг 100 становится 183.
     Сохранено и в kcminputrc (переживает перезагрузку); здесь — на случай, если устройство пересоздано."""
-    if _flat["done"]:
+    if _flat["done"] or not de.kde():  # в X11 мышь ставится сразу в точку (xdotool), ускорение не мешает
         return
     rc, out = await _sh("qdbus6", "org.kde.KWin")
     for path in re.findall(r"/org/kde/KWin/InputDevice/event\d+", out.decode()):
@@ -234,6 +237,10 @@ async def _ensure_flat_pointer():
 
 
 async def _move_to(x, y, tries=4):
+    if not de.kde():
+        await asyncio.to_thread(de.mouse_to, x, y)
+        cur = await _cursor()
+        return cur is not None and abs(cur[0] - x) <= 3 and abs(cur[1] - y) <= 3
     await _ensure_flat_pointer()
     for _ in range(tries):
         cur = await _cursor()
@@ -249,6 +256,8 @@ async def _move_to(x, y, tries=4):
 
 
 def _screen_scale():
+    if not de.kde():
+        return 1.0  # X11: и снимок, и указатель — в настоящих пикселях
     p = subprocess.run(["kscreen-doctor", "-o"], capture_output=True, text=True, timeout=5).stdout
     m = re.search(r"Scale:\S*\s*([\d.]+)", re.sub(r"\x1b\[[0-9;]*m", "", p))
     return float(m.group(1)) if m else 1.0
@@ -365,8 +374,8 @@ async def _dictate(text: str, enter: bool, expect_window: str = None):
         return {"ok": False, "error": "в окно терминала не печатаю — там текст стал бы командой компьютеру"}
     if expect_window is not None and window != expect_window:
         return {"ok": False, "error": f"окно уже другое («{window}») — печатать не стала, скажи ещё раз"}
-    rc, old = await _sh("wl-paste", "--no-newline")
-    await _sh("wl-copy", input_bytes=text.encode("utf-8"))
+    old = await asyncio.to_thread(de.clip_get)
+    await asyncio.to_thread(de.clip_set, text.encode("utf-8"))
     await asyncio.sleep(0.15)
     keys = [f"{KEY_CTRL}:1", f"{KEY_V}:1", f"{KEY_V}:0", f"{KEY_CTRL}:0"]
     rc, _ = await _sh("ydotool", "key", *keys)
@@ -375,7 +384,7 @@ async def _dictate(text: str, enter: bool, expect_window: str = None):
         await _sh("ydotool", "key", f"{KEY_ENTER}:1", f"{KEY_ENTER}:0")
     await asyncio.sleep(0.4)
     if old:
-        await _sh("wl-copy", input_bytes=old)
+        await asyncio.to_thread(de.clip_set, old)
     if rc != 0:
         return {"ok": False, "error": "не получилось нажать клавиши (ydotool)"}
     return {"ok": True, "typed": len(text), "window": window, **({"sent": True} if enter else {})}
@@ -411,16 +420,12 @@ async def call(name, args, session):
     if name == "ui_type":
         return await _helper("type", {"field": args.get("field", ""), "text": args.get("text", "")})
     if name == "window_action":
-        shortcut = {"close": "Window Close", "minimize": "Window Minimize", "maximize": "Window Maximize"}.get(args.get("action"))
-        if not shortcut:
+        if args.get("action") not in ("close", "minimize", "maximize"):
             return {"ok": False, "error": "неизвестное действие с окном"}
         before = (await _helper("focused")).get("window", "")
-        p = await asyncio.create_subprocess_exec("qdbus6", "org.kde.kglobalaccel", "/component/kwin",
-                                                 "org.kde.kglobalaccel.Component.invokeShortcut", shortcut,
-                                                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        await p.wait()
+        ok = await asyncio.to_thread(de.window_action, args.get("action"))
         await asyncio.sleep(0.6)
-        return {"ok": p.returncode == 0, "action": args.get("action"), "window": before}
+        return {"ok": ok, "action": args.get("action"), "window": before}
     if name == "screen_click":
         return await _screen_click(args.get("text", ""), max(1, int(args.get("nth") or 1)))
     if name == "cursor_look":
@@ -444,17 +449,11 @@ async def call(name, args, session):
         # при спящем мониторе Plasma ждёт видеокарту и не отвечает на D-Bus (живой тест 2026-10-08) — будим;
         # меню открывают, чтобы им пользоваться, поэтому монитор обратно не усыпляем
         if await asyncio.to_thread(screen._dpms_is_off):
-            await asyncio.to_thread(screen._run, "kscreen-doctor", "--dpms", "on", timeout=5)
+            await asyncio.to_thread(de.dpms, True)
             await asyncio.sleep(1.5)
-        p = await asyncio.create_subprocess_exec("qdbus6", "org.kde.plasmashell", "/PlasmaShell",
-                                                 "org.kde.PlasmaShell.activateLauncherMenu",
-                                                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-        try:
-            await asyncio.wait_for(p.wait(), 6)
-        except asyncio.TimeoutError:
-            p.kill()
-            return {"ok": False, "error": "панель Plasma не ответила"}
-        return {"ok": p.returncode == 0, "note": "меню открыто, в нём сразу поиск: можно вписать название (ui_type)"}
+        if not await asyncio.to_thread(de.app_menu):
+            return {"ok": False, "error": "меню не открылось"}
+        return {"ok": True, "note": "меню открыто, в нём сразу поиск: можно вписать название (ui_type)"}
     if name == "window_read":
         res = await _helper("read")
         text = (res.get("text") or "").strip() if res.get("ok") else ""

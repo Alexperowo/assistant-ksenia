@@ -3,6 +3,8 @@ Description=Ксения: шлюз планшета (PWA, HTTPS :18140 в дом
 After=ksenia-core.service ksenia-voice-in.service network-online.target
 
 [Service]
+# пути к моделям и движкам — одно место (config/paths.env, переезд 2026-10-13)
+EnvironmentFile=%h/Agents/Ksenia/config/paths.env
 Type=simple
 ExecStart=/home/user/Agents/Ksenia/pwa/run_pwa.sh
 # always: и после внешнего kill с кодом 0 (аудит Fable, FA15); stop и Conflicts= по-прежнему останавливают

@@ -2,6 +2,8 @@
 Description=Ксения: обход замедления YouTube только для её инструментов (byedpi + мостик, 127.0.0.1:10801/10802)
 
 [Service]
+# пути к моделям и движкам — одно место (config/paths.env, переезд 2026-10-13)
+EnvironmentFile=%h/Agents/Ksenia/config/paths.env
 Type=simple
 ExecStart=/usr/bin/python3 /home/user/Agents/Ksenia/net/unblock.py
 # always: и после внешнего kill с кодом 0 (аудит Fable, FA15); stop и Conflicts= по-прежнему останавливают

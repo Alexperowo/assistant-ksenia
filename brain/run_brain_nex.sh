@@ -7,9 +7,11 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES=0
 export PATH=/usr/local/cuda-13.1/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda-13.1/lib64:$LD_LIBRARY_PATH
-M=/home/user/Models/Nex-N2.5-mini
+. "$(dirname "$(readlink -f "$0")")/../config/paths.env"  # KSENIA_MODELS, KSENIA_BACKEND
+M=$KSENIA_MODELS/Nex-N2.5-mini
+export LD_LIBRARY_PATH=$KSENIA_BACKEND/ik_llama-fresh/build/src:$KSENIA_BACKEND/ik_llama-fresh/build/ggml/src:$KSENIA_BACKEND/ik_llama-fresh/build/examples/mtmd:/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 "$(dirname "$0")/../scripts/wait-gpu.sh" 0 || exit 1  # драйвер после загрузки системы ещё не готов
-exec /home/user/backend/ik_llama-fresh/build/bin/llama-server \
+exec $KSENIA_BACKEND/ik_llama-fresh/build/bin/llama-server \
     -m "$M/nex-agi_Nex-N2.5-mini-IQ4_XS.gguf" \
     --mmproj "$M/mmproj-nex-agi_Nex-N2.5-mini-f16.gguf" --image-max-tokens 2048 \
     --api-key-file /home/user/Agents/Ksenia/brain/api_key \

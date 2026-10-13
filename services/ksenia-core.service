@@ -1,10 +1,12 @@
 [Unit]
 Description=Ксения: ядро (разговор, характер, озвучка, :18130)
-# после рабочего стола: иначе у ядра нет WAYLAND_DISPLAY — снимки экрана, буфер обмена, видео не работали бы
+# после рабочего стола: иначе у ядра нет DISPLAY (Cinnamon, X11; раньше WAYLAND_DISPLAY в KDE) — снимки экрана, буфер обмена, видео не работали бы
 # до первого перезапуска (2026-10-10: ядро стартовало на 11 с раньше graphical-session.target)
 After=ksenia-brain.service ksenia-voice-out.service ksenia-voice-in.service graphical-session.target
 
 [Service]
+# пути к моделям и движкам — одно место (config/paths.env, переезд 2026-10-13)
+EnvironmentFile=%h/Agents/Ksenia/config/paths.env
 # Вывод pactl, nmcli, bluetoothctl, apt разбирается по английским словам («Active Profile», «connected»).
 # Русские переводы этих программ (language-pack-ru, чистая установка Kubuntu) сломали бы разбор — сообщения
 # программ всегда по-английски; язык Ксении от этого не зависит (2026-10-11)

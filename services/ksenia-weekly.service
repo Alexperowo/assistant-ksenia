@@ -2,6 +2,8 @@
 Description=Ксения: недельная сводка (скорость, перебивания, ошибки) в logs/reports
 
 [Service]
+# пути к моделям и движкам — одно место (config/paths.env, переезд 2026-10-13)
+EnvironmentFile=%h/Agents/Ksenia/config/paths.env
 Type=oneshot
 WorkingDirectory=%h/Agents/Ksenia
 ExecStart=%h/Agents/Ksenia/.venv/bin/python %h/Agents/Ksenia/tools-scripts/weekly_report.py 7

@@ -1,7 +1,7 @@
 """Инструменты зрения для Александра: описать экран, прочитать текст с экрана, буфер обмена, лупа.
 
-- Снимок: spectacle (KWin ScreenShot2). Если монитор спит (DPMS off), KWin не рисует кадры и снимок
-  зависает — поэтому монитор будим на время снимка и возвращаем обратно.
+- Снимок: через tools/de (Cinnamon/X11 — gnome-screenshot, KDE — spectacle). Если монитор спит (DPMS off),
+  кадры не рисуются и снимок зависает — поэтому монитор будим на время снимка и возвращаем обратно.
 - Описание: Nex смотрит картинку во второй ячейке сервера (id_slot=1), чтобы не сбить кэш разговора.
 - Чтение дословно: Tesseract (rus+eng) — точнее и быстрее нейросети для текста.
 - Длинный текст не пересказывается: ядро зачитывает его как есть (поле speak_verbatim).
@@ -17,6 +17,8 @@ import time
 
 import aiohttp
 from PIL import Image
+
+from tools import de
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SHOT = os.path.join(ROOT, "..", "..", "logs", "screen.png")
@@ -70,15 +72,15 @@ def _run(*args, timeout=20):
 
 def _dpms_is_off():
     try:
-        return "off" in _run("kscreen-doctor", "--dpms", "show", timeout=5).stdout
+        return de.dpms_is_off()
     except Exception:
         return False
 
 
 def zoom_active():
-    """Включена ли экранная лупа KWin (тогда снимок экрана — только увеличенный участок)."""
+    """Включена ли экранная лупа (тогда снимок экрана — только увеличенный участок)."""
     try:
-        return "zoom" in _run("qdbus6", "org.kde.KWin", "/Effects", "org.kde.kwin.Effects.activeEffects", timeout=3).stdout.split()
+        return de.zoom_active()
     except Exception:
         return False
 
@@ -87,21 +89,17 @@ def _capture(target):
     """Сделать снимок; при спящем мониторе — разбудить и вернуть в сон. Возвращает PIL.Image."""
     was_off = _dpms_is_off()
     if was_off:
-        _run("kscreen-doctor", "--dpms", "on", timeout=5)
+        de.dpms(True)
         time.sleep(1.5)
     try:
-        if os.path.exists(SHOT):
-            os.remove(SHOT)
-        mode = "-a" if target == "window" else "-f"
-        _run("spectacle", "-b", "-n", mode, "-o", SHOT, timeout=20)
-        if not os.path.exists(SHOT):
+        if not de.screenshot(SHOT, window=target == "window"):
             raise RuntimeError("снимок экрана не получился")
         im = Image.open(SHOT).convert("RGB")
         im.load()
         return im
     finally:
         if was_off:
-            _run("kscreen-doctor", "--dpms", "off", timeout=5)
+            de.dpms(False)
 
 
 def _ocr(im):
@@ -205,8 +203,8 @@ async def call(name, args, session):
         return _verbatim(text, "экран")
     if name == "clipboard_read":
         src = args.get("source", "selection")
-        p = await asyncio.to_thread(_run, "wl-paste", "--no-newline", *(["--primary"] if src == "selection" else []))
-        text = (p.stdout or "").strip()
+        raw = await asyncio.to_thread(de.clip_get, src == "selection")
+        text = raw.decode("utf-8", errors="replace").strip()
         if not text:
             return {"ok": False, "error": "выделенного текста нет" if src == "selection" else "буфер обмена пуст"}
         if _looks_binary(text):
@@ -217,10 +215,8 @@ async def call(name, args, session):
             return {"ok": False, "error": "читать больше нечего"}
         return _verbatim(_reading["rest"], "продолжение")
     if name == "magnifier":
-        action = "view_zoom_in" if args.get("action") == "zoom_in" else "view_zoom_out"
         for _ in range(max(1, min(int(args.get("steps") or 1), 5))):
-            await asyncio.to_thread(_run, "qdbus6", "org.kde.kglobalaccel", "/component/kwin",
-                                    "org.kde.kglobalaccel.Component.invokeShortcut", action)
+            await asyncio.to_thread(de.zoom, args.get("action") == "zoom_in")
             await asyncio.sleep(0.15)
         return {"ok": True, "action": args.get("action")}
     return {"ok": False, "error": f"неизвестный инструмент {name}"}

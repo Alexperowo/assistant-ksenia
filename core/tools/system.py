@@ -32,7 +32,10 @@ def _apt(*a):
 
 # Части системы, без которых нет рабочего стола, звука, сети или загрузки: их не удаляет ни одна команда
 # (ни прямо, ни как зависимость). Префиксы: «pipewire» закрывает и pipewire-pulse, и pipewire-audio.
-VITAL = ("sudo", "systemd", "plasma-", "kwin", "kubuntu-", "linux-image", "linux-generic", "network-manager",
+# рабочий стол — Cinnamon с 2026-10-13 (вчера на KDE Ксения удаляла cinnamon по просьбе — теперь это удалило бы
+# весь рабочий стол); KDE-имена оставлены на случай возврата
+VITAL = ("sudo", "systemd", "cinnamon", "muffin", "nemo", "lightdm", "ubuntucinnamon-", "xserver-xorg", "xorg",
+         "plasma-", "kwin", "kubuntu-", "linux-image", "linux-generic", "network-manager",
          "pipewire", "wireplumber", "bluez", "nvidia-", "apt", "dpkg", "python3", "openssh-server", "sddm", "libc6",
          "ubuntu-minimal", "ubuntu-standard", "xdg-desktop-portal", "dbus", "polkit", "grub", "shim", "cuda")
 
@@ -93,7 +96,8 @@ CHANGE = {
 
 PARAM_RULES = {"is_installed": PKG_RE, "search_package": re.compile(r"^\w[\w+.\- ]{1,39}$"), "install": PKG_RE,
                "remove": PKG_RE, "restart_user_service": UNIT_RE, "bluetooth_connect": MAC_RE}
-PROTECTED = {"sudo", "systemd", "plasma-desktop", "kwin-wayland", "linux-image-generic", "network-manager",
+PROTECTED = {"sudo", "systemd", "cinnamon", "cinnamon-session", "muffin", "nemo", "lightdm", "ubuntucinnamon-desktop",
+             "xserver-xorg", "plasma-desktop", "kwin-wayland", "linux-image-generic", "network-manager",
              "pipewire", "bluez", "nvidia-driver", "apt", "dpkg", "python3", "openssh-server", "sddm"}
 
 SCHEMAS = [

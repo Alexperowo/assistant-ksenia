@@ -5,12 +5,13 @@
 (подтверждение решает ядро) и с резервной копией конфигурации.
 """
 import asyncio
+import json
 import os
 import re
 import shutil
 import time
 
-from tools import confirm
+from tools import de, confirm
 
 CFG = os.path.expanduser("~/.config")
 BACKUP = os.path.expanduser("~/Agents/Ksenia/data/settings-backup")
@@ -78,7 +79,46 @@ def _backup(name):
     return dst
 
 
+# Cinnamon (с 2026-10-13): шрифт и указатель — в gsettings; KDE — запасной путь ниже
+CIN_FONTS = [("org.cinnamon.desktop.interface", "font-name"), ("org.gnome.desktop.interface", "font-name"),
+             ("org.cinnamon.desktop.wm.preferences", "titlebar-font")]
+FONTS_ORIG = os.path.join(BACKUP, "fonts-cinnamon.json")
+
+
+async def _gget(schema, key):
+    rc, out = await _run("gsettings", "get", schema, key)
+    return out.strip().strip("'") if rc == 0 else None
+
+
+async def _cin_set_fonts(size):
+    if not os.path.exists(FONTS_ORIG):  # самая первая копия — исходные шрифты, «верни как было» вернёт их
+        os.makedirs(BACKUP, exist_ok=True)
+        orig = {f"{sch} {key}": await _gget(sch, key) for sch, key in CIN_FONTS}
+        with open(FONTS_ORIG, "w", encoding="utf-8") as f:
+            json.dump(orig, f, ensure_ascii=False)
+    for sch, key in CIN_FONTS:
+        cur = await _gget(sch, key)
+        if cur:
+            fam = re.sub(r"\s+\d+(\.\d+)?$", "", cur)
+            await _run("gsettings", "set", sch, key, f"{fam} {size}")
+    return {"ok": True, "font_size": size, "note": "в уже открытых программах шрифт обновится после их перезапуска"}
+
+
+async def _cin_restore_fonts():
+    if not os.path.exists(FONTS_ORIG):
+        return {"ok": False, "error": "резервной копии шрифтов нет"}
+    with open(FONTS_ORIG, encoding="utf-8") as f:
+        orig = json.load(f)
+    for k, v in orig.items():
+        if v:
+            sch, key = k.split(" ", 1)
+            await _run("gsettings", "set", sch, key, v)
+    return {"ok": True, "restored_from": "исходные шрифты"}
+
+
 async def _set_fonts(size):
+    if not de.kde():
+        return await _cin_set_fonts(size)
     _backup("kdeglobals")
     for group, key in FONT_KEYS:
         rc, cur = await _run("kreadconfig6", "--file", "kdeglobals", "--group", group, "--key", key)
@@ -92,6 +132,8 @@ async def _set_fonts(size):
 
 
 async def _restore_fonts():
+    if not de.kde():
+        return await _cin_restore_fonts()
     files = sorted(f for f in os.listdir(BACKUP) if f.startswith("kdeglobals.")) if os.path.isdir(BACKUP) else []
     if not files:
         return {"ok": False, "error": "резервной копии шрифтов нет"}
@@ -101,6 +143,11 @@ async def _restore_fonts():
 
 
 async def _set_cursor(size):
+    if not de.kde():
+        rc = 0
+        for sch in ("org.cinnamon.desktop.interface", "org.gnome.desktop.interface"):
+            rc |= (await _run("gsettings", "set", sch, "cursor-size", str(size)))[0]
+        return {"ok": rc == 0, "cursor_size": size}
     _backup("kcminputrc")
     rc, theme = await _run("kreadconfig6", "--file", "kcminputrc", "--group", "Mouse", "--key", "cursorTheme")
     rc, out = await _run("plasma-apply-cursortheme", theme.strip() or "breeze_cursors", "--size", str(size))
@@ -241,13 +288,25 @@ async def call(name, args, session):
         return {"ok": rc == 0, "audio_to": want[0],
                 **({"note": "мой голос тоже теперь в колонках, микрофон — в наушниках"} if "hdmi" in want[0] else {})}
     if a == "theme":
-        scheme = {"dark": "BreezeDark", "тёмная": "BreezeDark", "light": "BreezeLight", "светлая": "BreezeLight"}.get(v)
-        if not scheme:
+        dark = {"dark": True, "тёмная": True, "light": False, "светлая": False}.get(v)
+        if dark is None:
             return {"ok": False, "error": "тема: dark или light"}
+        if not de.kde():
+            name = "Yaru-cinnamon-dark" if dark else "Yaru-cinnamon"
+            rc = (await _run("gsettings", "set", "org.cinnamon.desktop.interface", "gtk-theme", name))[0]
+            rc |= (await _run("gsettings", "set", "org.cinnamon.theme", "name", name))[0]
+            for sch in ("org.x.apps.portal", "org.gnome.desktop.interface"):
+                await _run("gsettings", "set", sch, "color-scheme", "prefer-dark" if dark else "prefer-light")
+            return {"ok": rc == 0, "theme": name}
+        scheme = "BreezeDark" if dark else "BreezeLight"
         rc, out = await _run("plasma-apply-colorscheme", scheme)
         return {"ok": rc == 0, "theme": scheme}
     if a == "night_light":
         on = v in ("on", "вкл", "включи", "true", "1")
+        if not de.kde():
+            rc, _ = await _run("gsettings", "set", "org.cinnamon.settings-daemon.plugins.color", "night-light-enabled",
+                               "true" if on else "false")
+            return {"ok": rc == 0, "night_light": on}
         _backup("kwinrc")
         await _run("kwriteconfig6", "--file", "kwinrc", "--group", "NightColor", "--key", "Active", "true" if on else "false")
         await _run("qdbus6", "org.kde.KWin", "/KWin", "reconfigure")
