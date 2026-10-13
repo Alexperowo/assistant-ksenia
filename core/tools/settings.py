@@ -276,8 +276,18 @@ async def call(name, args, session):
         return {"ok": True, "muted": False}
     if a == "audio_to":
         sinks = await _sinks()
-        want = [s for s in sinks if (s.startswith("bluez_output") if v.startswith("head") or "наушн" in v
-                                     else "hdmi" in s)]
+        to_head = v.startswith("head") or "наушн" in v
+        want = [s for s in sinks if (s.startswith("bluez_output") if to_head else "hdmi" in s)]
+        if not want and not to_head and await asyncio.to_thread(de.dpms_is_off):
+            # монитор спит — его колонок нет в списке, пока он не проснётся (2026-10-13: «говори в колонки» при
+            # погасшем экране отвечало «такого выхода нет»). Будим и смотрим снова
+            await asyncio.to_thread(de.dpms, True)
+            for _ in range(30):
+                await asyncio.sleep(0.1)
+                sinks = await _sinks()
+                want = [s for s in sinks if "hdmi" in s]
+                if want:
+                    break
         if not want:
             return {"ok": False, "error": "такого выхода сейчас нет (наушники не подключены или монитор спит)",
                     "available": sinks}
