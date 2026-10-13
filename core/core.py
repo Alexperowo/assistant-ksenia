@@ -2095,7 +2095,11 @@ async def handle_say(request):
         # разговор С ПЛАНШЕТА — нет: кнопка «Да» на вопросе «Отправить?» обрывала его (проверка Fable, agent_e/h3_live)
         ks.last_client_t = time.time()
         tablet_live = conv.active() and getattr(conv, "_runner", None) is live and live.source == "push"
-        if not tablet_live:
+        # «жду имени» в наушниках не мешает разговору с планшета — раньше планшет его закрывал, и после этого
+        # «Ксения, который час?» в наушниках встречала тишина (2026-10-13)
+        headset_dozing = conv.active() and getattr(conv, "_runner", None) is live and live.source != "push" \
+            and getattr(live, "dozing", False)
+        if not tablet_live and not headset_dozing:
             async with talk_lock:
                 await stop_conversation()
     else:
@@ -2692,6 +2696,7 @@ class LiveConversation(Conversation):
         self.prejudge = None
         self.ctx_sent = None
         self.last_bc = 0.0
+        self.user_muted = False   # «не слушай» — сам закрыл микрофон: «жду имени» само не возвращается
         self.auto_failed = False  # «жду имени» не включился сам (слух был занят) — повторить при следующем опросе
         self.music_back = False  # позвали касанием в режиме музыки: после разговора — обратно к музыке, без дрёмы
 
@@ -2822,12 +2827,17 @@ class LiveConversation(Conversation):
         early, self.early = self.early, None
         if stop_listening(text):
             log.info("Живой режим: просят не слушать — выключаю микрофон")
+            live.user_muted = True  # сам попросил — «жду имени» не включать, пока не позовёт или не наденет снова
             await say_notice("Ладно, затыкаю уши. Позовёшь касанием наушников или клавишами «Контрол, Альт, К».", output=self.output)
             return True
         if self.dozing:
             # разговор окончен: откликаться только на имя — как человек, которого позвали
             rest = wake_rest(text)
             if rest is None:
+                return False
+            if self.source != "push" and time.time() - getattr(ks, "last_client_t", 0.0) < CONFIG.get("tablet_echo_s", 20):
+                # он сейчас говорит с планшетом, а наушники лежат рядом и слышат то же «Привет, Ксения»
+                log.info("Живой режим: имя слышно и в наушниках, но разговор идёт через планшет — молчу (%s)", text)
                 return False
             self.dozing = False
             log.info("Живой режим: позвали по имени — снова в разговоре (%s)", text)
@@ -3261,9 +3271,16 @@ async def headset_auto_live():
         # и при запуске ядра, если наушники уже подключены (was ещё None), — не только при переходе
         # и повтор, если прошлое включение сорвалось (слух был занят) — иначе Ксения молчала бы до
         # переподключения наушников (анализ Codex 2026-10-11, п. 1.2)
-        if now_on and (was is not True or live.auto_failed) and not conv.active() and CONFIG.get("live_mode", True) \
-                and CONFIG.get("live_doze", True):
-            log.info("Наушники подключились — живой разговор: жду, когда позовут по имени")
+        if now_on and was is not True:
+            live.user_muted = False  # заново надел наушники — снова можно звать по имени
+        # «жду имени» закрылся не по его просьбе (разговор с планшета, касание, тишина без дрёмы) — как человек,
+        # который отошёл, но слышит, когда его позовут: через минуту тишины вернуться (2026-10-13)
+        quiet = min(time.time() - getattr(ks, "last_turn_t", 0.0), time.time() - getattr(ks, "last_client_t", 0.0))
+        resume = was is True and not getattr(live, "user_muted", False) and quiet > CONFIG.get("doze_resume_s", 60)
+        if now_on and (was is not True or live.auto_failed or resume) and not conv.active() \
+                and CONFIG.get("live_mode", True) and CONFIG.get("live_doze", True):
+            log.info("Наушники подключились — живой разговор: жду, когда позовут по имени" if was is not True else
+                     "Тихо — снова жду, когда позовут по имени")
             live.auto_failed = False
             await start_talk(doze=True)
         was = now_on
@@ -3281,6 +3298,8 @@ async def _quiet_reconnect():
 async def start_talk(source=None, doze=False):
     # Нажатие во время разговора: прервать речь Ксении и сразу слушать заново.
     # Замок — чтобы два быстрых нажатия не запустили два разговора сразу.
+    if not doze:
+        live.user_muted = False  # позвал сам (касание, клавиши, планшет) — снова можно и «жду имени»
     async with talk_lock:
         if await stop_conversation():
             await asyncio.sleep(0.2)
